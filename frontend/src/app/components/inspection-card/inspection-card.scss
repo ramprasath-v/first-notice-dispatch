@@ -1,0 +1,6 @@
+.inspection-card { padding: 1.5rem; border-left: 4px solid #16826f; }
+.inspection-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1.4rem; }
+.inspection-grid div { display: grid; gap: .35rem; }
+.inspection-grid span { color: #71847f; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; }
+.inspection-grid strong { color: #163c35; }
+@media (max-width: 650px) { .inspection-grid { grid-template-columns: 1fr; } }

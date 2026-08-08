@@ -1,0 +1,58 @@
+<main class="page status-page">
+  @if (loading()) {
+    <section class="loading-card card"><span class="spinner"></span><div><h1>Finding your claim</h1><p>This should only take a moment.</p></div></section>
+  } @else if (claim(); as current) {
+    <section class="status-hero card">
+      <div class="status-copy">
+        <p class="kicker">Claim {{ current.claim_id }}</p>
+        <div class="status-line"><span class="status-mark"></span><h1>{{ statusLabel(current.status) }}</h1></div>
+        <p class="status-description">{{ statusDescription(current.status) }}</p>
+        <p>Last updated {{ current.updated_at | date:'MMM d, y · h:mm a' }}</p>
+      </div>
+      @if (current.intake_priority) {
+        <div class="priority"><span>Intake priority</span><strong>{{ current.intake_priority.replaceAll('_', ' ') | titlecase }}</strong></div>
+      }
+    </section>
+
+    <nav class="stepper" aria-label="Claim progress">
+      @for (step of steps(current.status); track step.label; let index = $index; let last = $last) {
+        <span class="step" [class.complete]="step.state === 'complete'" [class.active]="step.state === 'active'" [class.upcoming]="step.state === 'upcoming'" [attr.data-state]="step.state" [attr.aria-current]="step.state === 'active' ? 'step' : null">
+          <b aria-hidden="true">{{ step.state === 'complete' ? '✓' : index + 1 }}</b>
+          <small>{{ step.label }}<em>{{ step.note }}</em></small>
+          <span class="sr-only">{{ step.state === 'complete' ? 'Complete' : step.state === 'active' ? 'Current step' : 'Upcoming' }}</span>
+        </span>
+        @if (!last) { <i [class.complete]="step.state === 'complete'" aria-hidden="true"></i> }
+      }
+    </nav>
+
+    @if (documentNotice()) { <div class="alert success-alert" role="status">{{ documentNotice() }}</div> }
+    @if (pollingWarning()) { <div class="alert warning-alert" role="status">{{ pollingWarning() }}</div> }
+    @if (error()) { <div class="alert error-alert" role="alert">{{ error() }}</div> }
+
+    @if (current.status === 'awaiting_documents') {
+      <app-missing-documents [requests]="current.requested_evidence" [uploading]="uploading()" [processing]="rechecking()" (uploadDocument)="uploadDocument($event)" />
+      @for (action of current.requested_actions ?? []; track action.review_id + action.field_name) {
+        <section class="card correction-card">
+          <p class="kicker">Correction requested</p>
+          <h2>{{ action.instruction }}</h2>
+          <label class="field">
+            <span>Your response</span>
+            <input [(ngModel)]="correctionValue" maxlength="256" autocomplete="off" />
+          </label>
+          <button class="primary" type="button" [disabled]="uploading() || !correctionValue.trim()" (click)="submitCorrection(action.field_name)">
+            {{ uploading() ? 'Submitting…' : 'Submit correction' }}
+          </button>
+        </section>
+      }
+    }
+
+    @if (current.inspection) { <app-inspection-card [inspection]="current.inspection" /> }
+
+    <div class="status-layout">
+      <app-claim-timeline [events]="events()" />
+      <aside class="card help-card"><p class="kicker">Good to know</p><h2>Your claim stays active</h2><p>You can return to this page using your claim ID. New evidence is attached to this same claim—there is no need to start again.</p><strong>{{ current.claim_id }}</strong></aside>
+    </div>
+  } @else {
+    <section class="card error-state"><h1>Claim unavailable</h1><p>{{ error() }}</p><button class="secondary" (click)="refreshNow()">Try again</button></section>
+  }
+</main>

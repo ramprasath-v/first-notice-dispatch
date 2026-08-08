@@ -1,0 +1,19 @@
+.submit-page { max-width: 900px; }
+.intro { max-width: 670px; margin-bottom: 2rem; }
+.intro h1 { font-size: clamp(2.2rem, 5vw, 3.6rem); margin: .25rem 0 .75rem; letter-spacing: -.045em; }
+.intro > p:last-child { color: #56706a; font-size: 1.08rem; }
+.form-card { padding: clamp(1.4rem, 4vw, 2.5rem); }
+.upload-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: .9rem; margin: 1.5rem 0 .5rem; }
+.upload-tile { border: 1px dashed #9fb9b2; border-radius: 14px; padding: 1rem; display: grid; gap: .35rem; cursor: pointer; background: #f8fbfa; min-height: 150px; }
+.upload-tile:hover { border-color: #16826f; background: #f1f8f6; }
+.upload-tile input { position: absolute; opacity: 0; pointer-events: none; }
+.upload-tile small { color: #6d837e; }
+.upload-icon { color: #16826f; font-weight: 800; font-size: .75rem; letter-spacing: .12em; }
+.file-name { margin-top: auto; color: #155e52; font-size: .82rem; font-weight: 700; word-break: break-word; }
+.form-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1.8rem; }
+.form-footer p { color: #6d7e7a; font-size: .8rem; max-width: 390px; }
+.progress-wrap { margin-top: 1.4rem; }
+.progress-label { display: flex; justify-content: space-between; font-size: .82rem; margin-bottom: .5rem; }
+.progress { height: 8px; background: #e3ece9; border-radius: 99px; overflow: hidden; }
+.progress span { display: block; height: 100%; background: #16826f; transition: width .2s; }
+@media (max-width: 700px) { .upload-grid { grid-template-columns: 1fr; } .form-footer { align-items: stretch; flex-direction: column; } }

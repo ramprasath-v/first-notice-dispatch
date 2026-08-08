@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+*service-account*.json
+*service_account*.json
+*credentials*.json
+*client_secret*.json
+*oauth*token*
+token.json
+*.pem
+*.p12
+.DS_Store

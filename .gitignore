@@ -1,0 +1,37 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
+node_modules/
+dist/
+.angular/
+.idea/
+.vscode/
+*.log
+firebase-debug.log
+.firebase/
+.gcloud/
+.tmp/
+tmp/
+*service-account*.json
+*service_account*.json
+*credentials*.json
+*client_secret*.json
+*oauth*token*
+token.json
+*.pem
+*.p12
+
+# Local-only sample with a visible real-looking license plate. Replace it with
+# a rights-cleared synthetic artifact before publishing demo samples.
+sample-data/accident-photo.jpg

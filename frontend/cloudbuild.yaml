@@ -1,0 +1,11 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - API_BASE_URL=${_API_BASE_URL}
+      - --tag
+      - ${_IMAGE_URL}
+      - .
+images:
+  - ${_IMAGE_URL}

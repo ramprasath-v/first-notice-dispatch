@@ -1,0 +1,15 @@
+.review-page { max-width: 860px; }
+.review-shell { padding: clamp(1.5rem, 4vw, 3rem); }
+h1 { margin-bottom: 1.8rem; font-size: clamp(2rem, 5vw, 3rem); }
+h2 { font-size: 1.12rem; margin: 1.7rem 0 .55rem; }
+h3 { font-size: .9rem; margin: 1.25rem 0 .4rem; color: #35645c; }
+.claim-heading { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem; border-radius: 12px; background: #edf7f4; }
+.claim-heading div { display: grid; gap: .15rem; }
+.claim-heading span { color: #58756f; font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.claim-heading strong { font-size: 1.2rem; }
+.status { align-self: center; color: #785916 !important; background: #fff3c8; border-radius: 99px; padding: .45rem .7rem; }
+.briefing { border-top: 1px solid #dce6e3; margin-top: 1.5rem; }
+ul { padding-left: 1.25rem; line-height: 1.55; }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.2rem; }
+.boundary, .muted { color: #667b76; font-size: .82rem; margin-top: 1rem; }
+small { color: #73857f; font-weight: 500; }

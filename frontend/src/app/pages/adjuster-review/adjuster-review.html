@@ -1,0 +1,58 @@
+<main class="page review-page">
+  <section class="review-shell card">
+    <p class="kicker">FirstNotice Dispatch</p>
+    <h1>Adjuster Review</h1>
+
+    @if (loading()) {
+      <p class="muted">Loading the secure review checkpoint…</p>
+    } @else if (error()) {
+      <div class="alert error-alert" role="alert">{{ error() }}</div>
+    } @else if (review(); as item) {
+      <div class="claim-heading">
+        <div><span>Claim</span><strong>{{ item.claim_id }}</strong></div>
+        <span class="status">Human Review Required</span>
+      </div>
+
+      <section>
+        <h2>Why FirstNotice paused</h2>
+        <p>{{ item.reason }}</p>
+      </section>
+
+      <section class="briefing">
+        <h2>Workflow briefing</h2>
+        <p>{{ item.briefing.summary }}</p>
+        @if (item.briefing.known_facts.length) {
+          <h3>Known facts</h3>
+          <ul>@for (fact of item.briefing.known_facts; track fact) { <li>{{ fact }}</li> }</ul>
+        }
+        @if (item.briefing.conflicts.length) {
+          <h3>Conflicts</h3>
+          <ul>@for (conflict of item.briefing.conflicts; track conflict) { <li>{{ conflict }}</li> }</ul>
+        }
+        <h3>What to verify</h3>
+        <ul>@for (question of item.briefing.unresolved_questions; track question) { <li>{{ question }}</li> }</ul>
+        <h3>Recommended next step</h3>
+        <p>{{ item.briefing.recommended_next_action }}</p>
+      </section>
+
+      @if (completedMessage()) {
+        <div class="alert success-alert" role="status">{{ completedMessage() }}</div>
+      } @else {
+        <label class="field">
+          <span>Decision note <small>Optional</small></span>
+          <textarea [(ngModel)]="decisionNote" rows="3" maxlength="1000"
+            placeholder="Add a concise operational note"></textarea>
+        </label>
+        <div class="actions">
+          <button class="primary" type="button" [disabled]="deciding()" (click)="approve()">
+            {{ deciding() ? 'Recording…' : 'Approve & Continue' }}
+          </button>
+          <button class="secondary" type="button" [disabled]="deciding()" (click)="requestCorrection()">
+            Request Correction
+          </button>
+        </div>
+        <p class="boundary">This decision resumes operational intake only. It does not approve coverage, liability, or payment.</p>
+      }
+    }
+  </section>
+</main>

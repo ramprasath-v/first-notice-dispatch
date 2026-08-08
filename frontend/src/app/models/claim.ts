@@ -1,0 +1,64 @@
+export interface ClaimAcceptedResponse {
+  claim_id: string;
+  status: string;
+  event_id: string;
+  message: string;
+}
+
+export interface DocumentAcceptedResponse {
+  claim_id: string;
+  document_id: string;
+  status: string;
+  event_id: string;
+}
+
+export interface MissingDocument {
+  type?: string;
+  document_type?: string;
+  reason?: string;
+  source_requirement?: string;
+}
+
+export interface ClaimantEvidenceRequest {
+  document_type: string;
+  label: string;
+  instruction: string;
+  satisfies_requirements: string[];
+  replacement_required: boolean;
+}
+
+export interface InspectionAppointment {
+  appointment_id: string;
+  inspection_type: 'virtual' | 'physical';
+  status: string;
+  scheduled_start: string;
+  scheduled_end: string;
+  location_type: string;
+  location_details?: string | null;
+}
+
+export interface ClaimSummary {
+  claim_id: string;
+  status: string;
+  intake_priority?: string | null;
+  missing_documents: MissingDocument[];
+  requested_evidence: ClaimantEvidenceRequest[];
+  requested_actions?: RequestedAction[];
+  inspection?: InspectionAppointment | null;
+  updated_at: string;
+}
+
+export interface RequestedAction {
+  action_type: 'enter_text';
+  field_name: string;
+  instruction: string;
+  review_id: string;
+}
+
+export interface ClaimSubmission {
+  incidentDescription: string;
+  policyNumberHint?: string;
+  damagePhotos: File[];
+  policeReport?: File;
+  audio?: File;
+}

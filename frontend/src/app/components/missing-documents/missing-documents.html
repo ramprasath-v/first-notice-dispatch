@@ -1,0 +1,19 @@
+<section class="missing-panel" aria-labelledby="missing-title">
+  <p class="kicker">Action needed</p>
+  <h2 id="missing-title">We need a little more information</h2>
+  <p class="lead">Your claim is saved. Add the item below and processing will resume automatically.</p>
+  <div class="missing-list">
+    @for (request of requests; track request.document_type) {
+      <article class="missing-item">
+        <div><strong>{{ request.instruction }}</strong><small>{{ request.label }}</small></div>
+        <label class="secondary file-button" [class.disabled]="uploading || processing">
+          <input type="file" accept="image/jpeg,image/png,application/pdf" (change)="choose(request, $event)" />
+          {{ selected()[request.document_type]?.name || 'Choose file' }}
+        </label>
+        <button class="primary compact" type="button" [disabled]="!selected()[request.document_type] || uploading || processing" (click)="upload(request)">
+          {{ uploading ? 'Uploading…' : processing ? 'Rechecking…' : 'Upload' }}
+        </button>
+      </article>
+    }
+  </div>
+</section>

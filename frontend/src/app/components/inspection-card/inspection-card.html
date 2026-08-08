@@ -1,0 +1,11 @@
+<section class="card inspection-card">
+  <div class="section-heading">
+    <div><p class="kicker">Next step</p><h2>Inspection appointment</h2></div>
+    <span class="pill success">{{ inspection.status | titlecase }}</span>
+  </div>
+  <div class="inspection-grid">
+    <div><span>Date & time</span><strong>{{ inspection.scheduled_start | date:'EEE, MMM d · h:mm a' }}</strong></div>
+    <div><span>Inspection type</span><strong>{{ inspection.inspection_type | titlecase }}</strong></div>
+    <div><span>Location</span><strong>{{ inspection.location_details || (inspection.location_type | titlecase) }}</strong></div>
+  </div>
+</section>
