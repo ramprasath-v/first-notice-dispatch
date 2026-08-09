@@ -28,7 +28,6 @@ export class SubmitClaim {
   readonly audio = signal<File | null>(null);
   readonly errors = signal<Record<string, string>>({});
   readonly submitting = signal(false);
-  readonly progress = signal(0);
   readonly requestError = signal('');
 
   choosePhotos(event: Event): void {
@@ -51,11 +50,11 @@ export class SubmitClaim {
   }
 
   submit(): void {
+    if (this.submitting()) return;
     this.form.markAllAsTouched();
     this.chooseRequiredFileErrors();
     if (this.form.invalid || Object.values(this.errors()).some(Boolean)) return;
     this.submitting.set(true);
-    this.progress.set(0);
     this.requestError.set('');
     const value = this.form.getRawValue();
     this.api.submitClaim({
@@ -66,10 +65,7 @@ export class SubmitClaim {
       audio: this.audio() ?? undefined,
     }, this.idempotencyKey).subscribe({
       next: (event) => {
-        if (event.type === HttpEventType.UploadProgress) {
-          this.progress.set(event.total ? Math.round(100 * event.loaded / event.total) : 35);
-        } else if (event.type === HttpEventType.Response && event.body) {
-          this.progress.set(100);
+        if (event.type === HttpEventType.Response && event.body) {
           void this.router.navigate(['/claims', event.body.claim_id]);
         }
       },

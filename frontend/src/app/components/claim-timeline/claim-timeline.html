@@ -1,12 +1,12 @@
 <section class="card timeline-card activity-card">
   <div class="section-heading">
-    <div><p class="kicker">Live claim updates</p><h2>Your claim activity</h2></div>
-    <span class="live-dot"><i></i> Persisted events</span>
+    <div><p class="kicker">Claim history</p><h2>Your claim activity</h2></div>
+    <span class="live-dot"><i></i> Live</span>
   </div>
 
   <ol class="timeline">
     @for (item of presented; track item.key) {
-      <li><span class="dot"></span><div><strong>{{ item.title }}</strong><p>{{ item.description }}</p><time>{{ item.timestamp | date:'MMM d, h:mm a' }}</time></div></li>
+      <li><time>{{ item.timestamp | date:'h:mm a' }}</time><span class="dot"></span><div><strong>{{ item.title }}</strong><p>{{ item.description }}</p></div></li>
     } @empty { <li class="empty">Your first update will appear here shortly.</li> }
   </ol>
 

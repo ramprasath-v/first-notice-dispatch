@@ -9,7 +9,7 @@
       <div class="alert error-alert" role="alert">{{ error() }}</div>
     } @else if (review(); as item) {
       <div class="claim-heading">
-        <div><span>Claim</span><strong>{{ item.claim_id }}</strong></div>
+        <div><span>Claim</span><strong>{{ item.claim_id }}</strong><p>FirstNotice completed autonomous intake. Review the evidence package before authorizing physical inspection.</p></div>
         <span class="status">Intake Complete</span>
       </div>
 
@@ -30,13 +30,16 @@
         </section>
       }
 
-      @if (comparisonFacts().length) {
-        <section><p class="kicker">Evidence comparison</p>
-        <section class="comparison-grid" aria-label="Evidence comparison">
-          @for (fact of comparisonFacts(); track fact.source + fact.finding) {
-            <article>
-              <span>{{ humanize(fact.source) }}</span>
-              <p>{{ fact.finding }}</p>
+      @if (groupedEvidence().length) {
+        <section><p class="kicker">Current evidence</p>
+        <section class="evidence-grid" aria-label="Current evidence used by FirstNotice">
+          @for (group of groupedEvidence(); track group.source) {
+            <article class="evidence-card">
+              <span>{{ group.label }}</span>
+              <h3>{{ group.source }}</h3>
+              <ul>
+                @for (finding of group.findings; track finding) { <li><b aria-hidden="true">✓</b> {{ finding }}</li> }
+              </ul>
             </article>
           }
         </section>
@@ -44,7 +47,7 @@
       }
 
       @if ((item.resolution_history ?? []).length) {
-        <section><p class="kicker">Resolution history</p><ul class="resolution-list">
+        <section><p class="kicker">Autonomous resolution history</p><ul class="resolution-list">
           @for (entry of item.resolution_history ?? []; track entry) { <li>✓ {{ entry }}</li> }
         </ul></section>
       }
@@ -80,6 +83,7 @@
               placeholder="Please upload a clearer photo of the passenger-side rear damage."></textarea>
           </label>
         }
+        <p class="kicker decision-kicker">Decision</p>
         <div class="actions">
           <button class="secondary" type="button"
             [disabled]="deciding() || (requestInfoOpen() && !decisionNote.trim())"

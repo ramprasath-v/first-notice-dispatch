@@ -4,7 +4,7 @@ import { ActivatedRoute } from '@angular/router';
 import { of, throwError } from 'rxjs';
 import { ClaimApiService } from '../../core/services/claim-api.service';
 import { HumanReview } from '../../models/human-review';
-import { AdjusterReviewPage } from './adjuster-review';
+import { AdjusterReviewPage, groupEvidenceBySource } from './adjuster-review';
 
 const review: HumanReview = {
   review_id: 'HRV-1',
@@ -82,7 +82,7 @@ describe('AdjusterReviewPage', () => {
     expect(fixture.nativeElement.textContent).toContain('Physical inspection recommended');
     expect(fixture.nativeElement.textContent).toContain('Rear impact');
     expect(fixture.nativeElement.textContent).toContain('Rear bumper damage is visible');
-    expect(fixture.nativeElement.textContent).toContain('Resolution history');
+    expect(fixture.nativeElement.textContent).toContain('Autonomous resolution history');
     const analysis = fixture.nativeElement.querySelector('details.analysis-details') as HTMLDetailsElement;
     expect(analysis.open).toBe(false);
     expect(analysis.textContent).toContain('POL-1001 versus POL-9999');
@@ -187,5 +187,40 @@ describe('AdjusterReviewPage', () => {
     const fixture = await create();
     expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
     expect(fixture.nativeElement.querySelector('input[type=file]')).toBeNull();
+  });
+
+  it('groups and deduplicates current evidence findings by source document', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      evidence_comparison: [
+        { source: 'vehicle_damage_license.jpg', finding: 'Plate 7ABX123 is readable.' },
+        { source: 'vehicle_damage_license.jpg', finding: 'Rear bumper damage is visible.' },
+        { source: 'vehicle_damage_license.jpg', finding: 'Rear bumper damage is visible.' },
+        { source: 'police-report.pdf', finding: 'Rear-end collision is documented.' },
+      ],
+    }));
+    const fixture = await create();
+    const cards = fixture.nativeElement.querySelectorAll('.evidence-card');
+    expect(cards).toHaveLength(2);
+    expect(cards[0].textContent).toContain('Current damage photo');
+    expect(cards[0].querySelectorAll('li')).toHaveLength(2);
+    expect(fixture.nativeElement.textContent.match(/Rear bumper damage is visible\./g)).toHaveLength(1);
+  });
+
+  it('builds one group per source using case-insensitive finding deduplication', () => {
+    expect(groupEvidenceBySource([
+      { source: 'rear.jpg', finding: 'Plate readable' },
+      { source: 'rear.jpg', finding: 'plate   readable' },
+    ])).toEqual([{
+      source: 'rear.jpg', label: 'Current damage photo', findings: ['Plate readable'],
+    }]);
+  });
+
+  it('renders recommendation, snapshot, collapsed analysis, and both decisions', async () => {
+    const fixture = await create();
+    expect(fixture.nativeElement.textContent).toContain('AI recommendation');
+    expect(fixture.nativeElement.textContent).toContain('Claim snapshot');
+    expect((fixture.nativeElement.querySelector('.analysis-details') as HTMLDetailsElement).open).toBe(false);
+    expect(fixture.nativeElement.querySelectorAll('.actions button')).toHaveLength(2);
   });
 });

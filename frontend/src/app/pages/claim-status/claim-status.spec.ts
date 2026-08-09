@@ -1,6 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ActivatedRoute } from '@angular/router';
-import { of, throwError } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { ClaimApiService } from '../../core/services/claim-api.service';
 import { ClaimSummary } from '../../models/claim';
 import {
@@ -36,7 +36,7 @@ const awaitingClaim = claim('awaiting_documents', {
 
 describe('ClaimStatusPage', () => {
   const api = {
-    getClaim: vi.fn(), getClaimEvents: vi.fn(), uploadDocument: vi.fn(),
+    getClaim: vi.fn(), getClaimEvents: vi.fn(), uploadDocument: vi.fn(), submitCorrection: vi.fn(),
   };
 
   beforeEach(() => {
@@ -45,6 +45,7 @@ describe('ClaimStatusPage', () => {
     api.getClaim.mockReturnValue(of(awaitingClaim));
     api.getClaimEvents.mockReturnValue(of([]));
     api.uploadDocument.mockReturnValue(of({ status: 'received' }));
+    api.submitCorrection.mockReturnValue(of({ claim_id: 'CLM-ABC12345', event_id: 'evt', status: 'received' }));
   });
 
   afterEach(() => vi.useRealTimers());
@@ -144,14 +145,15 @@ describe('ClaimStatusPage', () => {
 
   it('shows waiting indicators without a spinner for claimant and adjuster waits', async () => {
     const fixture = await create();
-    expect(fixture.nativeElement.textContent).toContain('Waiting for your information');
-    expect(fixture.nativeElement.querySelector('.workflow-indicator').classList.contains('active')).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('Waiting for information from you');
+    expect(fixture.nativeElement.querySelector('.indeterminate-progress')).toBeNull();
 
     api.getClaim.mockReturnValue(of(claim('inspection_ready')));
     fixture.componentInstance.refreshNow();
     fixture.detectChanges();
-    expect(fixture.nativeElement.textContent).toContain('Waiting for adjuster decision');
-    expect(fixture.nativeElement.querySelector('.workflow-indicator').classList.contains('active')).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('Waiting for adjuster');
+    expect(fixture.nativeElement.textContent).toContain('Your intake is complete');
+    expect(fixture.nativeElement.querySelector('.indeterminate-progress')).toBeNull();
   });
 
   it('sends requested_action_id and resumes polling for replacement upload', async () => {
@@ -175,6 +177,139 @@ describe('ClaimStatusPage', () => {
     );
     expect(api.getClaim.mock.calls.length).toBe(callsBeforeUpload + 1);
     expect(fixture.componentInstance.rechecking()).toBe(true);
+  });
+
+  it('immediately replaces a successful evidence action with the processing handoff', async () => {
+    const fixture = await create();
+    upload(fixture);
+
+    expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('Reviewing your new evidence');
+    expect(fixture.nativeElement.textContent).toContain('received your upload and is re-checking your claim');
+    expect(fixture.nativeElement.querySelector('.workflow-heartbeat .indeterminate-progress')).not.toBeNull();
+
+    upload(fixture);
+    expect(api.uploadDocument).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the evidence action available when upload fails', async () => {
+    api.uploadDocument.mockReturnValue(throwError(() => new Error('upload failed')));
+    const fixture = await create();
+    upload(fixture);
+
+    expect(fixture.componentInstance.rechecking()).toBe(false);
+    expect(fixture.nativeElement.querySelector('app-missing-documents')).not.toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('could not upload that document');
+  });
+
+  it('immediately hides a successful text correction and reuses claim refresh', async () => {
+    const textClaim = claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
+        field_name: 'policy_number', instruction: 'Please enter policy number.',
+      }],
+    });
+    api.getClaim.mockReturnValue(of(textClaim));
+    const fixture = await create();
+    const callsBeforeCorrection = api.getClaim.mock.calls.length;
+    fixture.componentInstance.correctionValue = 'POL-1001';
+
+    fixture.componentInstance.submitCorrection('policy_number');
+    fixture.detectChanges();
+
+    expect(api.submitCorrection).toHaveBeenCalledWith('CLM-ABC12345', 'policy_number', 'POL-1001');
+    expect(api.getClaim.mock.calls.length).toBe(callsBeforeCorrection + 1);
+    expect(fixture.nativeElement.querySelector('.correction-card')).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('Reviewing your response');
+    expect(fixture.nativeElement.textContent).toContain('received your information and is continuing your claim');
+
+    fixture.componentInstance.correctionValue = 'POL-1001';
+    fixture.componentInstance.submitCorrection('policy_number');
+    expect(api.submitCorrection).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the correction handoff through a stale timestamp-only GET, then accepts the fresh state', async () => {
+    const textClaim = claim('awaiting_documents', {
+      updated_at: '2026-08-07T12:00:00Z',
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
+        field_name: 'policy_number', instruction: 'Please enter policy number.',
+      }],
+    });
+    const timestampOnlyUpdate = { ...textClaim, updated_at: '2026-08-07T12:00:10Z' };
+    const nextState = claim('inspection_ready', { updated_at: '2026-08-07T12:00:20Z' });
+    api.getClaim
+      .mockReturnValue(of(nextState))
+      .mockReturnValueOnce(of(textClaim))
+      .mockReturnValueOnce(of(timestampOnlyUpdate));
+    const fixture = await create();
+    fixture.componentInstance.correctionValue = 'POL-1001';
+
+    fixture.componentInstance.submitCorrection('policy_number');
+    fixture.detectChanges();
+
+    expect(api.getClaim).toHaveBeenCalledTimes(2);
+    expect(fixture.componentInstance.rechecking()).toBe(true);
+    expect(fixture.nativeElement.querySelector('.correction-card')).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('Reviewing your response');
+
+    vi.advanceTimersByTime(3000);
+    fixture.detectChanges();
+
+    expect(api.getClaim).toHaveBeenCalledTimes(3);
+    expect(fixture.componentInstance.rechecking()).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('Ready for inspection decision');
+    expect(fixture.nativeElement.textContent).not.toContain('Reviewing your response');
+    expect(fixture.nativeElement.querySelector('.correction-card')).toBeNull();
+
+    vi.advanceTimersByTime(3000);
+    expect(api.getClaim).toHaveBeenCalledTimes(4);
+  });
+
+  it('leaves a failed text correction available for retry', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
+        field_name: 'policy_number', instruction: 'Please enter policy number.',
+      }],
+    })));
+    api.submitCorrection.mockReturnValue(throwError(() => new Error('correction failed')));
+    const fixture = await create();
+    fixture.componentInstance.correctionValue = 'POL-1001';
+
+    fixture.componentInstance.submitCorrection('policy_number');
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.rechecking()).toBe(false);
+    expect(fixture.nativeElement.querySelector('.correction-card')).not.toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('could not submit that correction');
+    expect((fixture.nativeElement.querySelector('.correction-card button') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('queues one forced refresh when correction succeeds during an active poll', async () => {
+    const textClaim = claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
+        field_name: 'policy_number', instruction: 'Please enter policy number.',
+      }],
+    });
+    const activePoll = new Subject<ClaimSummary>();
+    api.getClaim
+      .mockReturnValueOnce(of(textClaim))
+      .mockReturnValueOnce(activePoll)
+      .mockReturnValueOnce(of(textClaim));
+    const fixture = await create();
+    fixture.componentInstance.refreshNow();
+    expect(fixture.componentInstance.pollInProgress()).toBe(true);
+    fixture.componentInstance.correctionValue = 'POL-1001';
+
+    fixture.componentInstance.submitCorrection('policy_number');
+    expect(api.getClaim).toHaveBeenCalledTimes(2);
+    activePoll.complete();
+    await Promise.resolve();
+
+    expect(api.getClaim).toHaveBeenCalledTimes(3);
+    fixture.destroy();
   });
 
   it('makes an unusable replacement actionable again after same-state review completion', async () => {
@@ -218,7 +353,7 @@ describe('ClaimStatusPage', () => {
     const steps = fixture.nativeElement.querySelectorAll('.step');
     expect(steps[1].dataset.state).toBe('active');
     expect(steps[1].textContent).toContain('Human review required');
-    expect(fixture.nativeElement.textContent).toContain('requires an adjuster to review');
+    expect(fixture.nativeElement.textContent).toContain('An adjuster is reviewing the evidence package');
   });
 
   it('shows Inspection active while an appointment is being prepared', async () => {
@@ -227,7 +362,7 @@ describe('ClaimStatusPage', () => {
     const steps = fixture.nativeElement.querySelectorAll('.step');
     expect(steps[1].dataset.state).toBe('complete');
     expect(steps[2].dataset.state).toBe('active');
-    expect(steps[2].textContent).toContain('Being arranged');
+    expect(steps[2].textContent).toContain('Scheduling');
   });
 
   it('shows Inspection complete and Adjuster active once inspection is scheduled', async () => {
@@ -244,7 +379,7 @@ describe('ClaimStatusPage', () => {
     const fixture = await create();
     const steps = [...fixture.nativeElement.querySelectorAll('.step')] as HTMLElement[];
     expect(steps.every((step) => step.dataset['state'] === 'complete')).toBe(true);
-    expect(fixture.nativeElement.textContent).toContain('claim information has been sent to the adjuster');
+    expect(fixture.nativeElement.textContent).toContain('inspection details have been prepared and shared');
   });
 
   it('resumes polling immediately after document upload', async () => {
@@ -268,11 +403,14 @@ describe('ClaimStatusPage', () => {
       .mockReturnValueOnce(of(claim('inspection_pending')));
     const fixture = await create();
     upload(fixture);
+    expect(fixture.nativeElement.textContent).toContain('Reviewing your new evidence');
+    expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
 
     vi.advanceTimersByTime(3000);
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.textContent).toContain('Preparing inspection');
+    expect(fixture.nativeElement.textContent).toContain('Inspection approved — scheduling');
+    expect(fixture.nativeElement.textContent).not.toContain('Reviewing your new evidence');
     expect(fixture.componentInstance.rechecking()).toBe(false);
   });
 
@@ -304,7 +442,7 @@ describe('ClaimStatusPage', () => {
     vi.advanceTimersByTime(3000);
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.textContent).toContain('Ready for adjuster review');
+    expect(fixture.nativeElement.textContent).toContain('Inspection coordination complete');
     const callsAtTerminalState = api.getClaim.mock.calls.length;
     vi.advanceTimersByTime(9000);
     expect(api.getClaim).toHaveBeenCalledTimes(callsAtTerminalState);
@@ -328,7 +466,7 @@ describe('ClaimStatusPage', () => {
     vi.advanceTimersByTime(3000);
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.textContent).toContain('Preparing inspection');
+    expect(fixture.nativeElement.textContent).toContain('Inspection approved — scheduling');
     expect(api.getClaimEvents).toHaveBeenCalledTimes(2);
   });
 
@@ -450,5 +588,68 @@ describe('ClaimStatusPage', () => {
     expect(workflowSteps('inspection_pending')[2].state).toBe('active');
     expect(workflowSteps('inspection_scheduled')[3].state).toBe('active');
     expect(workflowSteps('adjuster_notified').every((step) => step.state === 'complete')).toBe(true);
+  });
+
+  it('renders active processing with a live heartbeat and indeterminate bar', async () => {
+    api.getClaim.mockReturnValue(of(claim('review_processing')));
+    const fixture = await create();
+    const heartbeat = fixture.nativeElement.querySelector('.workflow-heartbeat');
+    expect(heartbeat.dataset.mode).toBe('active');
+    expect(heartbeat.textContent).toContain('Live');
+    expect(heartbeat.textContent).toContain('Reviewing your evidence');
+    expect(heartbeat.querySelector('.indeterminate-progress')).not.toBeNull();
+  });
+
+  it('shows poll-in-progress and then successful up-to-date feedback', async () => {
+    const response = new Subject<ClaimSummary>();
+    api.getClaim.mockReturnValue(response);
+    await TestBed.configureTestingModule({
+      imports: [ClaimStatusPage],
+      providers: [
+        { provide: ClaimApiService, useValue: api },
+        { provide: ActivatedRoute, useValue: { snapshot: { paramMap: { get: () => 'CLM-ABC12345' } } } },
+      ],
+    }).compileComponents();
+    const fixture = TestBed.createComponent(ClaimStatusPage);
+    vi.advanceTimersByTime(0);
+    expect(fixture.componentInstance.pollInProgress()).toBe(true);
+    response.next(claim('review_processing'));
+    response.complete();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.pollInProgress()).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('Up to date');
+  });
+
+  it('updates relative last-checked time locally without another request', async () => {
+    const fixture = await create();
+    const calls = api.getClaim.mock.calls.length;
+    fixture.componentInstance.lastSuccessfulPollAt.set(Date.now() - 12_000);
+    fixture.componentInstance.clock.set(Date.now());
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('12 sec ago');
+    expect(api.getClaim).toHaveBeenCalledTimes(calls);
+  });
+
+  it('renders scheduled and completed heartbeat states without processing animation', async () => {
+    api.getClaim.mockReturnValueOnce(of(claim('inspection_scheduled')));
+    const scheduled = await create();
+    expect(scheduled.nativeElement.querySelector('.workflow-heartbeat').dataset.mode).toBe('scheduled');
+    expect(scheduled.nativeElement.querySelector('.indeterminate-progress')).toBeNull();
+    scheduled.destroy();
+
+    api.getClaim.mockReturnValueOnce(of(claim('adjuster_notified')));
+    const completed = TestBed.createComponent(ClaimStatusPage);
+    vi.advanceTimersByTime(0);
+    completed.detectChanges();
+    expect(completed.nativeElement.querySelector('.workflow-heartbeat').dataset.mode).toBe('complete');
+    expect(completed.nativeElement.textContent).toContain('Inspection coordination complete');
+  });
+
+  it('keeps exactly one action panel ahead of the consolidated activity card', async () => {
+    const fixture = await create();
+    const actions = fixture.nativeElement.querySelectorAll('app-missing-documents, .correction-card');
+    expect(actions).toHaveLength(1);
+    expect(fixture.nativeElement.querySelectorAll('app-claim-timeline')).toHaveLength(1);
+    expect(actions[0].compareDocumentPosition(fixture.nativeElement.querySelector('app-claim-timeline')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

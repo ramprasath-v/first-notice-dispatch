@@ -3,7 +3,7 @@ import { Component, DestroyRef, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ActivatedRoute } from '@angular/router';
-import { catchError, EMPTY, exhaustMap, filter, map, merge, Subject, timer } from 'rxjs';
+import { catchError, defer, EMPTY, exhaustMap, filter, finalize, map, merge, Subject, timer } from 'rxjs';
 import { ClaimTimeline } from '../../components/claim-timeline/claim-timeline';
 import { InspectionCard } from '../../components/inspection-card/inspection-card';
 import { DocumentUploadRequest, MissingDocuments } from '../../components/missing-documents/missing-documents';
@@ -12,16 +12,16 @@ import { ClaimantEvidenceRequest, ClaimSummary, EnterTextRequestedAction, Reques
 import { ClaimEvent } from '../../models/claim-event';
 
 export const STATUS_LABELS: Record<string, string> = {
-  submitted: 'Claim received',
-  new: 'Claim received',
-  intake_processing: 'Analyzing your claim',
-  intake_complete: 'Evidence analyzed',
-  review_processing: 'Reviewing claim requirements',
-  awaiting_documents: 'More information needed',
+  submitted: 'FirstNotice is reviewing your claim',
+  new: 'FirstNotice is reviewing your claim',
+  intake_processing: 'FirstNotice is reviewing your claim',
+  intake_complete: 'Reviewing your evidence',
+  review_processing: 'Reviewing your evidence',
+  awaiting_documents: 'We need one more item from you',
   inspection_ready: 'Ready for inspection decision',
-  inspection_pending: 'Preparing inspection',
+  inspection_pending: 'Inspection approved — scheduling',
   inspection_scheduled: 'Inspection scheduled',
-  adjuster_notified: 'Ready for adjuster review',
+  adjuster_notified: 'Inspection coordination complete',
   human_review_required: 'Additional review required',
   closed: 'Claim closed',
 };
@@ -47,6 +47,16 @@ export interface WorkflowStep {
   note: string;
 }
 
+export interface WorkflowHeartbeat {
+  mode: 'active' | 'claimant' | 'adjuster' | 'scheduled' | 'complete';
+  badge: string;
+  title: string;
+  detail: string;
+  showProgress: boolean;
+}
+
+type RecheckKind = 'document' | 'correction';
+
 export function workflowSteps(status: string, rechecking = false): WorkflowStep[] {
   const analyzedActive = [
     'intake_processing', 'intake_complete', 'review_processing',
@@ -54,7 +64,6 @@ export function workflowSteps(status: string, rechecking = false): WorkflowStep[
   ].includes(status);
   const inspectionReached = ['inspection_ready', 'inspection_pending', 'inspection_scheduled', 'adjuster_notified', 'closed'].includes(status);
   const inspectionComplete = ['inspection_scheduled', 'adjuster_notified', 'closed'].includes(status);
-  const adjusterReached = ['inspection_ready', 'inspection_pending', 'inspection_scheduled', 'adjuster_notified', 'closed'].includes(status);
   const adjusterComplete = ['adjuster_notified', 'closed'].includes(status);
   const analyzedNote = rechecking
     ? 'Rechecking evidence'
@@ -79,13 +88,13 @@ export function workflowSteps(status: string, rechecking = false): WorkflowStep[
     },
     {
       label: 'Inspection',
-      state: inspectionComplete ? 'complete' : status === 'inspection_pending' ? 'active' : 'upcoming',
-      note: status === 'inspection_pending' ? 'Being arranged' : inspectionComplete ? 'Complete' : 'Up next',
+      state: inspectionComplete ? 'complete' : ['inspection_ready', 'inspection_pending'].includes(status) ? 'active' : 'upcoming',
+      note: status === 'inspection_ready' ? 'Awaiting approval' : status === 'inspection_pending' ? 'Scheduling' : inspectionComplete ? 'Scheduled' : 'Up next',
     },
     {
       label: 'Adjuster',
-      state: adjusterComplete ? 'complete' : adjusterReached ? 'active' : 'upcoming',
-      note: adjusterComplete ? 'Notified' : status === 'inspection_ready' ? 'Decision needed' : adjusterReached ? 'Preparing handoff' : 'Up next',
+      state: adjusterComplete ? 'complete' : ['inspection_scheduled'].includes(status) ? 'active' : 'upcoming',
+      note: adjusterComplete ? 'Handoff complete' : status === 'inspection_scheduled' ? 'Preparing handoff' : 'Up next',
     },
   ];
 }
@@ -117,26 +126,45 @@ export class ClaimStatusPage {
   readonly uploading = signal(false);
   readonly documentNotice = signal('');
   readonly rechecking = signal(false);
+  readonly recheckKind = signal<RecheckKind | null>(null);
   readonly pollingWarning = signal('');
+  readonly pollInProgress = signal(false);
+  readonly lastSuccessfulPollAt = signal<number | null>(null);
+  readonly lastBusinessUpdateAt = signal<number | null>(null);
+  readonly clock = signal(Date.now());
+  readonly statusChangedUntil = signal(0);
   private readonly refreshRequests = new Subject<void>();
+  private refreshPending = false;
   private documentSubmittedAt: number | null = null;
   private statusAtUpload: string | null = null;
   private updatedAtAtUpload: string | null = null;
+  private actionIdAtSubmission: string | null = null;
   correctionValue = '';
 
   constructor() {
+    timer(0, 1000).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.clock.set(Date.now()));
     merge(
       timer(0, 3000).pipe(map(() => false)),
       this.refreshRequests.pipe(map(() => true)),
     ).pipe(
       filter((forceRefresh) => forceRefresh || this.shouldPoll()),
       exhaustMap(() => this.claimId
-        ? this.api.getClaim(this.claimId).pipe(
+        ? defer(() => {
+          this.pollInProgress.set(true);
+          return this.api.getClaim(this.claimId).pipe(
           catchError(() => {
             this.handleRefreshError();
             return EMPTY;
           }),
-        )
+          finalize(() => {
+            this.pollInProgress.set(false);
+            if (this.refreshPending) {
+              this.refreshPending = false;
+              queueMicrotask(() => this.refreshRequests.next());
+            }
+          }),
+          );
+        })
         : EMPTY),
       takeUntilDestroyed(this.destroyRef),
     ).subscribe((claim) => this.acceptClaim(claim));
@@ -151,6 +179,7 @@ export class ClaimStatusPage {
   steps(status: string): WorkflowStep[] { return workflowSteps(status, this.rechecking()); }
 
   uploadDocument(request: DocumentUploadRequest): void {
+    if (this.uploading() || this.rechecking()) return;
     this.uploading.set(true);
     this.documentNotice.set('');
     this.error.set('');
@@ -168,10 +197,12 @@ export class ClaimStatusPage {
         this.uploading.set(false);
         this.documentNotice.set('Document received. Rechecking your claim…');
         this.rechecking.set(true);
+        this.recheckKind.set('document');
         this.pollingWarning.set('');
         this.documentSubmittedAt = Date.now();
         this.statusAtUpload = this.claim()?.status ?? 'awaiting_documents';
         this.updatedAtAtUpload = this.claim()?.updated_at ?? null;
+        this.actionIdAtSubmission = null;
         this.refreshTimeline();
         this.refreshNow();
       },
@@ -206,29 +237,66 @@ export class ClaimStatusPage {
     return current?.action_type === 'enter_text' ? current : null;
   }
 
-  workflowIndicator(status: string): { active: boolean; title: string; detail: string } {
-    if (this.rechecking() || ['new', 'intake_processing', 'review_processing', 'inspection_pending', 'inspection_scheduled'].includes(status)) {
-      return { active: true, title: 'FirstNotice is working', detail: this.rechecking() ? 'Rechecking your evidence…' : 'Processing your claim…' };
+  workflowHeartbeat(status: string): WorkflowHeartbeat {
+    if (this.rechecking()) {
+      return this.recheckKind() === 'correction'
+        ? { mode: 'active', badge: 'Live', title: 'Reviewing your response', detail: 'FirstNotice received your information and is continuing your claim.', showProgress: true }
+        : { mode: 'active', badge: 'Live', title: 'Reviewing your new evidence', detail: 'FirstNotice received your upload and is re-checking your claim.', showProgress: true };
+    }
+    if (['submitted', 'new', 'intake_processing', 'intake_complete'].includes(status)) {
+      return { mode: 'active', badge: 'Live', title: 'FirstNotice is reviewing your claim', detail: 'Reviewing your police report and submitted evidence. This page updates automatically.', showProgress: true };
+    }
+    if (status === 'review_processing') {
+      return { mode: 'active', badge: 'Live', title: 'Reviewing your evidence', detail: 'FirstNotice is checking the police report and submitted evidence. This page updates automatically.', showProgress: true };
     }
     if (status === 'awaiting_documents') {
-      return { active: false, title: 'Waiting for your information', detail: 'Complete the action below when you are ready.' };
+      return { mode: 'claimant', badge: 'Action needed', title: 'Waiting for information from you', detail: 'FirstNotice needs one item to continue processing your claim.', showProgress: false };
     }
     if (status === 'human_review_required') {
-      return { active: false, title: 'Processing paused safely', detail: 'FirstNotice could not safely determine the next automated action.' };
+      return { mode: 'adjuster', badge: 'Waiting for adjuster', title: 'Additional review is underway', detail: 'An adjuster is reviewing the evidence package. No action is needed from you.', showProgress: false };
     }
     if (status === 'inspection_ready') {
-      return { active: false, title: 'Waiting for adjuster decision', detail: 'No action is needed from you. This page updates automatically.' };
+      return { mode: 'adjuster', badge: 'Waiting for adjuster', title: 'Your intake is complete', detail: 'An adjuster is reviewing the evidence package before authorizing inspection. No action is needed from you.', showProgress: false };
     }
-    return { active: false, title: 'Current step complete', detail: 'Your latest claim status is shown above.' };
+    if (status === 'inspection_pending') {
+      return { mode: 'active', badge: 'Live', title: 'Inspection approved — scheduling', detail: 'FirstNotice is preparing your inspection details. This page updates automatically.', showProgress: true };
+    }
+    if (status === 'inspection_scheduled') {
+      return { mode: 'scheduled', badge: 'Inspection scheduled', title: 'Your inspection is scheduled', detail: 'The appointment details are shown below.', showProgress: false };
+    }
+    return { mode: 'complete', badge: 'Complete', title: 'Inspection coordination complete', detail: 'Your inspection details have been prepared and shared.', showProgress: false };
+  }
+
+  relativeTime(timestamp: number | null): string {
+    if (timestamp === null) return 'waiting for first update';
+    const seconds = Math.max(0, Math.floor((this.clock() - timestamp) / 1000));
+    if (seconds < 2) return 'just now';
+    if (seconds < 60) return `${seconds} sec ago`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes} min ago`;
+  }
+
+  pollMessage(status: string): string {
+    if (this.pollInProgress()) {
+      return status === 'inspection_ready' || status === 'human_review_required'
+        ? 'Checking for decision…'
+        : 'Checking for updates…';
+    }
+    const last = this.lastSuccessfulPollAt();
+    return last !== null && this.clock() - last < 1500 ? 'Up to date' : 'Updates automatic';
   }
 
   refreshNow(): void {
+    if (this.pollInProgress()) {
+      this.refreshPending = true;
+      return;
+    }
     this.refreshRequests.next();
   }
 
   submitCorrection(fieldName: string): void {
     const value = this.correctionValue.trim();
-    if (!value || this.uploading()) return;
+    if (!value || this.uploading() || this.rechecking()) return;
     this.uploading.set(true);
     this.error.set('');
     this.api.submitCorrection(this.claimId, fieldName, value).subscribe({
@@ -237,8 +305,12 @@ export class ClaimStatusPage {
         this.correctionValue = '';
         this.documentNotice.set('Correction received. Rechecking your claim…');
         this.rechecking.set(true);
+        this.recheckKind.set('correction');
         this.statusAtUpload = this.claim()?.status ?? 'awaiting_documents';
         this.updatedAtAtUpload = this.claim()?.updated_at ?? null;
+        this.actionIdAtSubmission = this.claim()?.requested_actions?.find(
+          (action) => action.action_type === 'enter_text' && action.field_name === fieldName,
+        )?.action_id ?? null;
         this.documentSubmittedAt = Date.now();
         this.refreshTimeline();
         this.refreshNow();
@@ -256,18 +328,27 @@ export class ClaimStatusPage {
 
   private acceptClaim(claim: ClaimSummary): void {
     const previousStatus = this.claim()?.status;
+    const now = Date.now();
     this.claim.set(claim);
+    this.lastSuccessfulPollAt.set(now);
+    const businessTimestamp = Date.parse(claim.updated_at);
+    this.lastBusinessUpdateAt.set(Number.isNaN(businessTimestamp) ? now : businessTimestamp);
+    if (previousStatus && previousStatus !== claim.status) this.statusChangedUntil.set(now + 900);
     this.loading.set(false);
     this.error.set('');
     if (!previousStatus || previousStatus !== claim.status) this.refreshTimeline();
-    if (
-      this.rechecking()
-      && (
-        claim.status !== this.statusAtUpload
-        || (this.updatedAtAtUpload !== null && claim.updated_at !== this.updatedAtAtUpload)
-      )
-    ) {
+    const statusChangedAfterSubmission = claim.status !== this.statusAtUpload;
+    const claimUpdatedAfterSubmission = this.updatedAtAtUpload !== null
+      && claim.updated_at !== this.updatedAtAtUpload;
+    const submittedActionStillPending = this.actionIdAtSubmission !== null
+      && (claim.requested_actions ?? []).some((action) => action.action_id === this.actionIdAtSubmission);
+    const correctionResolved = this.recheckKind() === 'correction'
+      && (statusChangedAfterSubmission || !submittedActionStillPending);
+    const documentRecheckResolved = this.recheckKind() === 'document'
+      && (statusChangedAfterSubmission || claimUpdatedAfterSubmission);
+    if (this.rechecking() && (correctionResolved || documentRecheckResolved)) {
       this.rechecking.set(false);
+      this.recheckKind.set(null);
       this.documentNotice.set(
         claim.status === 'awaiting_documents'
           ? 'We still need a usable document. Please review the request and try again.'
@@ -277,6 +358,17 @@ export class ClaimStatusPage {
       this.documentSubmittedAt = null;
       this.statusAtUpload = null;
       this.updatedAtAtUpload = null;
+      this.actionIdAtSubmission = null;
+    } else if (
+      this.rechecking()
+      && this.recheckKind() === 'correction'
+      && submittedActionStillPending
+      && claimUpdatedAfterSubmission
+    ) {
+      // The correction POST may update the claim timestamp before the async
+      // workflow replaces its action. Keep the local handoff active until the
+      // authoritative status or requested-action identity changes.
+      this.updatedAtAtUpload = claim.updated_at;
     } else if (
       this.rechecking()
       && this.documentSubmittedAt !== null

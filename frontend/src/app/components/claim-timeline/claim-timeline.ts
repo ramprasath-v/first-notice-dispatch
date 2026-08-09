@@ -5,7 +5,10 @@ import { AgentActivityItem, ClaimEvent, PresentedEvent } from '../../models/clai
 const PRESENTATION: Record<string, [string, string]> = {
   claim_submission_received: ['Claim submitted', 'Your claim and evidence were received.'],
   claim_intake_completed: ['Evidence analyzed', 'The submitted evidence was analyzed.'],
-  document_received: ['Evidence received', 'Your additional evidence was attached to this claim.'],
+  document_received: ['Additional evidence received', 'Your latest evidence was attached to this claim.'],
+  document_quality_checked: ['Evidence verified', 'FirstNotice checked the quality of your latest evidence.'],
+  missing_requirement_satisfied: ['Requested evidence accepted', 'FirstNotice confirmed that the requested item was received.'],
+  claim_review_resumed: ['Processing resumed', 'FirstNotice automatically continued this same claim.'],
   human_review_requested: ['Additional review required', 'Processing paused while an adjuster reviewed the information.'],
   human_review_approved: ['Adjuster review completed', 'The additional review was completed.'],
   inspection_scheduled: ['Inspection scheduled', 'An inspection appointment was prepared.'],
@@ -29,7 +32,7 @@ export class ClaimTimeline {
     return normalizedEvents(this.events).flatMap((event): PresentedEvent[] => {
       const copy = presentationFor(event);
       return copy ? [{ key: eventKey(event), ...copy, timestamp: event.timestamp, event }] : [];
-    });
+    }).reverse();
   }
 
   get technical(): ClaimEvent[] {
