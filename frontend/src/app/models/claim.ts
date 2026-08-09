@@ -25,6 +25,7 @@ export interface ClaimantEvidenceRequest {
   instruction: string;
   satisfies_requirements: string[];
   replacement_required: boolean;
+  requested_action_id?: string;
 }
 
 export interface InspectionAppointment {
@@ -48,12 +49,24 @@ export interface ClaimSummary {
   updated_at: string;
 }
 
-export interface RequestedAction {
+export interface EnterTextRequestedAction {
   action_type: 'enter_text';
+  action_id: string;
   field_name: string;
   instruction: string;
   review_id: string;
 }
+
+export interface UploadDocumentRequestedAction {
+  action_type: 'upload_document';
+  action_id: string;
+  review_id: string;
+  document_type: string;
+  instruction: string;
+  replaces_document_id: string;
+}
+
+export type RequestedAction = EnterTextRequestedAction | UploadDocumentRequestedAction;
 
 export interface ClaimSubmission {
   incidentDescription: string;

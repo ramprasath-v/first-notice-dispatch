@@ -49,8 +49,31 @@ export class AdjusterReviewPage {
     this.decide('approve');
   }
 
-  requestCorrection(): void {
+  requestMoreInformation(): void {
+    if (!this.review()?.recommended_remediation.can_request) return;
     this.decide('correction');
+  }
+
+  comparisonFacts(): Array<{ source: string; finding: string }> {
+    return (this.review()?.briefing.known_facts ?? []).flatMap((fact) => {
+      const separator = fact.indexOf(':');
+      if (separator < 1) return [];
+      const rawSource = fact.slice(0, separator).trim();
+      const finding = fact.slice(separator + 1).trim();
+      const normalized = rawSource.toLowerCase();
+      const source = normalized.includes('police')
+        ? 'Police report'
+        : normalized.includes('followup') || normalized.includes('follow-up')
+          ? 'Follow-up evidence'
+          : normalized.match(/\.(jpg|jpeg|png|webp|heic)$/)
+            ? 'Submitted photo'
+            : rawSource.replaceAll('_', ' ');
+      return finding ? [{ source, finding }] : [];
+    }).slice(0, 3);
+  }
+
+  humanize(value: string): string {
+    return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
   }
 
   private decide(action: 'approve' | 'correction'): void {

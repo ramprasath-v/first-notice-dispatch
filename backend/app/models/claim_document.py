@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.models.intake_result import EvidenceCapabilityType
 from app.models.review_result import EvidenceConflict
 
 
@@ -26,7 +27,10 @@ class ClaimDocument(BaseModel):
     status: DocumentStatus = "received"
     received_at: datetime
     replaces_document_id: str | None = None
+    requested_action_id: str | None = None
     quality_reason: str | None = None
+    supported_capabilities: list[EvidenceCapabilityType] = Field(default_factory=list)
+    evidence_findings: list[str] = Field(default_factory=list)
     superseded_by_document_id: str | None = None
     resume_idempotency_key: str | None = None
     resume_processed_at: datetime | None = None
@@ -46,6 +50,8 @@ class DocumentExtractionResult(BaseModel):
     usable: bool
     reason: str
     satisfies_requirement: str | None = None
+    supported_capabilities: list[EvidenceCapabilityType] = Field(default_factory=list)
+    evidence_findings: list[str] = Field(default_factory=list)
     conflicts: list[EvidenceConflict] = Field(default_factory=list)
 
 

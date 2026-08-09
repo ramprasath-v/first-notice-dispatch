@@ -27,6 +27,14 @@ from app.models.human_review import (
     HumanReviewDecisionResponse,
     HumanReviewPublicResponse,
     HumanReviewRecord,
+    RecommendedRemediation,
+    human_review_id,
+)
+from app.models.claim_document import ClaimDocument
+from app.models.requested_action import (
+    EnterTextRequestedAction,
+    EvidenceSourceReference,
+    UploadDocumentRequestedAction,
 )
 from app.tools.firestore_repository import FirestoreClaimRepository
 
@@ -76,11 +84,6 @@ def hash_review_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _review_id(claim_id: str) -> str:
-    key = f"{claim_id}:human-review-request:v1".encode("utf-8")
-    return f"HRV-{hashlib.sha256(key).hexdigest()[:12].upper()}"
-
-
 class HumanReviewService:
     def __init__(
         self,
@@ -107,12 +110,20 @@ class HumanReviewService:
             raise HumanReviewConflictError(
                 "A human review can only be requested for human_review_required."
             )
-        review_id = _review_id(claim_id)
+        generation, generation_key, review_id = self._current_review_generation(
+            claim_id, claim
+        )
         existing = self._repository.get_human_review(claim_id, review_id)
         token: str | None = None
         now = datetime.now(timezone.utc)
         if existing is None:
             token = secrets.token_urlsafe(32)
+            source_references = _conflict_source_references(
+                claim, self._repository.get_documents(claim_id)
+            )
+            remediation, remediation_target = _recommended_remediation(
+                claim, source_references
+            )
             review = HumanReviewRecord(
                 review_id=review_id,
                 claim_id=claim_id,
@@ -124,6 +135,24 @@ class HumanReviewService:
                     for item in claim.get("conflicts", [])
                     if isinstance(item, dict) and item.get("field")
                 ],
+                source_references=source_references,
+                generation=generation,
+                generation_key=generation_key,
+                conflicts=[
+                    item
+                    for item in claim.get("conflicts", [])
+                    if isinstance(item, dict)
+                    and item.get("values")
+                    and item.get("reason")
+                ],
+                unresolved_uncertainties=[
+                    item
+                    for item in claim.get("unresolved_uncertainties", [])
+                    if isinstance(item, dict)
+                ],
+                issue_fingerprints=_current_issue_fingerprints(claim),
+                recommended_remediation=remediation,
+                recommended_target_document_id=remediation_target,
                 token_hash=hash_review_token(token),
                 created_at=now,
                 expires_at=now + timedelta(minutes=self._settings.token_ttl_minutes),
@@ -147,6 +176,7 @@ class HumanReviewService:
                     review_id,
                     status="disabled",
                     correlation_id=correlation_id,
+                    review_generation=generation,
                 )
             return review.model_copy(update={"notification_status": "disabled"})
 
@@ -190,6 +220,7 @@ class HumanReviewService:
                 review_id,
                 status="failed",
                 correlation_id=correlation_id,
+                review_generation=generation,
             )
             raise
         self._repository.mark_human_review_notification(
@@ -198,10 +229,61 @@ class HumanReviewService:
             status="sent",
             gmail_message_id=sent.gmail_message_id,
             correlation_id=correlation_id,
+            review_generation=generation,
         )
         return review.model_copy(
             update={"notification_status": "sent", "gmail_message_id": sent.gmail_message_id}
         )
+
+    def _current_review_generation(
+        self, claim_id: str, claim: dict[str, object]
+    ) -> tuple[int, str, str]:
+        current_id = str(claim.get("current_human_review_id") or "").strip()
+        current_key = str(
+            claim.get("current_human_review_generation_key") or ""
+        ).strip()
+        current_generation = int(
+            claim.get("current_human_review_generation") or 0
+        )
+        if current_id and current_key and current_generation > 0:
+            return current_generation, current_key, current_id
+
+        cycle_one_id = human_review_id(claim_id, 1)
+        cycle_one = self._repository.get_human_review(claim_id, cycle_one_id)
+        reentry_key = (
+            _legacy_reentry_generation_key(
+                claim_id,
+                cycle_one.review_id,
+                self._repository.get_claim_events(claim_id),
+            )
+            if cycle_one is not None and cycle_one.status != "pending"
+            else None
+        )
+        if reentry_key:
+            reserved = self._repository.reserve_human_review_generation(
+                claim_id=claim_id,
+                generation_key=reentry_key,
+                floor_generation=1,
+                make_current=True,
+            )
+            return (
+                reserved.generation,
+                reserved.generation_key,
+                reserved.review_id,
+            )
+
+        generation_key = (
+            cycle_one.generation_key
+            if cycle_one is not None
+            else f"{claim_id}:submitted-review:v1"
+        )
+        self._repository.set_current_human_review_generation(
+            claim_id=claim_id,
+            generation=1,
+            generation_key=generation_key,
+            review_id=cycle_one_id,
+        )
+        return 1, generation_key, cycle_one_id
 
     def get_public_review(self, token: str) -> HumanReviewPublicResponse:
         review = self._review_for_token(token)
@@ -215,7 +297,49 @@ class HumanReviewService:
     def request_correction(
         self, token: str, request: HumanReviewDecisionRequest
     ) -> HumanReviewDecisionResponse:
-        return self._decide(token, "correction_requested", request)
+        review = self._review_for_token(token)
+        remediation = review.recommended_remediation
+        if not remediation.can_request:
+            raise HumanReviewConflictError(
+                "FirstNotice cannot safely select one remediation target for this review."
+            )
+        if remediation.type == "upload_document":
+            target_id = review.recommended_target_document_id
+            target = next(
+                (
+                    item
+                    for item in review.source_references
+                    if item.document_id == target_id and item.replacement_eligible
+                ),
+                None,
+            )
+            if target is None:
+                raise HumanReviewConflictError(
+                    "The recommended replacement target is no longer available."
+                )
+            document = self._repository.get_document(
+                review.claim_id, target.document_id
+            )
+            if (
+                document is None
+                or document.claim_id != review.claim_id
+                or document.status == "superseded"
+                or document.document_type != target.document_type
+            ):
+                raise HumanReviewConflictError(
+                    "The recommended replacement target is no longer active."
+                )
+            authoritative = request.model_copy(
+                update={
+                    "correction_type": "replace_document",
+                    "target_document_id": target.document_id,
+                }
+            )
+        else:
+            authoritative = request.model_copy(
+                update={"correction_type": "text", "target_document_id": None}
+            )
+        return self._decide(token, "correction_requested", authoritative)
 
     def _decide(
         self,
@@ -229,6 +353,8 @@ class HumanReviewService:
             decision=decision,
             decision_note=request.decision_note,
             reviewer_label=request.reviewer_label,
+            correction_type=(request.correction_type or "text"),
+            target_document_id=request.target_document_id,
             now=datetime.now(timezone.utc),
         )
         if review is None:
@@ -267,7 +393,10 @@ class HumanReviewService:
                 actor="adjuster",
                 from_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
                 to_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
-                details={"review_id": review.review_id},
+                details={
+                    "review_id": review.review_id,
+                    "review_generation": review.generation,
+                },
                 correlation_id=review.correlation_id,
                 event_id=f"{event_id}-decision",
             )
@@ -333,10 +462,47 @@ class HumanReviewResumeWorkflow:
 
     def resume_approved(self, claim_id: str, review_id: str, correlation_id: str) -> dict[str, str]:
         claim, review = self._validated(claim_id, review_id, "approved")
-        resolved_fields = set(review.conflict_fields)
-        conflicts = [
-            item for item in claim.get("conflicts", [])
-            if not isinstance(item, dict) or item.get("field") not in resolved_fields
+        resolved_conflicts = {
+            _conflict_identity(item.model_dump(mode="python"))
+            for item in review.conflicts
+        }
+        if resolved_conflicts:
+            conflicts = [
+                item for item in claim.get("conflicts", [])
+                if not isinstance(item, dict)
+                or _conflict_identity(item) not in resolved_conflicts
+            ]
+        else:
+            # Backward compatibility for checkpoints created before complete
+            # source/value conflict snapshots were persisted.
+            legacy_fields = set(review.conflict_fields)
+            conflicts = [
+                item for item in claim.get("conflicts", [])
+                if not isinstance(item, dict)
+                or item.get("field") not in legacy_fields
+            ]
+        approved_fingerprints = list(dict.fromkeys([
+            *[str(value) for value in claim.get("approved_issue_fingerprints", [])],
+            *review.issue_fingerprints,
+        ]))
+        approved_now = set(review.issue_fingerprints)
+        source_aware_conflicts = [
+            item
+            for item in claim.get("source_aware_conflicts", [])
+            if not isinstance(item, dict)
+            or item.get("fingerprint") not in approved_now
+        ]
+        source_aware_uncertainties = [
+            item
+            for item in claim.get("source_aware_uncertainties", [])
+            if not isinstance(item, dict)
+            or item.get("fingerprint") not in approved_now
+        ]
+        uncertainties = [
+            item
+            for item in claim.get("unresolved_uncertainties", [])
+            if not isinstance(item, dict)
+            or item.get("fingerprint") not in approved_now
         ]
         missing = list(claim.get("missing_documents", []))
         unusable = list(claim.get("unusable_evidence", []))
@@ -354,20 +520,36 @@ class HumanReviewResumeWorkflow:
             unusable_evidence=unusable,
             requested_actions=[],
             correlation_id=correlation_id,
+            approved_issue_fingerprints=approved_fingerprints,
+            source_aware_conflicts=source_aware_conflicts,
+            source_aware_uncertainties=source_aware_uncertainties,
+            unresolved_uncertainties=uncertainties,
         )
         return {"action": "human_review_resumed", "final_status": target.value}
 
     def request_correction(self, claim_id: str, review_id: str, correlation_id: str) -> dict[str, str]:
         claim, review = self._validated(claim_id, review_id, "correction_requested")
-        field_name = next(
-            (field for field in review.conflict_fields if field in {"policy_number", "incident_date"}),
-            "incident_summary",
-        )
-        instruction = (
-            "Please confirm your policy number."
-            if field_name == "policy_number"
-            else "Please provide the corrected incident information."
-        )
+        if review.correction_type == "replace_document":
+            target = _validated_replacement_target(
+                self._repository, claim_id, review
+            )
+            action = UploadDocumentRequestedAction(
+                action_id=_requested_action_id(
+                    review_id, "upload_document", target.document_id
+                ),
+                review_id=review_id,
+                document_type=(
+                    review.recommended_remediation.document_type
+                    or target.document_type
+                ),
+                instruction=review.recommended_remediation.instruction,
+                replaces_document_id=target.document_id,
+            )
+            requested_actions = [action.model_dump(mode="python")]
+        else:
+            requested_actions = [
+                _text_requested_action(review).model_dump(mode="python")
+            ]
         self._repository.complete_human_review_resume(
             claim_id=claim_id,
             review_id=review_id,
@@ -375,14 +557,7 @@ class HumanReviewResumeWorkflow:
             conflicts=list(claim.get("conflicts", [])),
             missing_documents=list(claim.get("missing_documents", [])),
             unusable_evidence=list(claim.get("unusable_evidence", [])),
-            requested_actions=[
-                {
-                    "action_type": "enter_text",
-                    "field_name": field_name,
-                    "instruction": instruction,
-                    "review_id": review_id,
-                }
-            ],
+            requested_actions=requested_actions,
             correlation_id=correlation_id,
         )
         return {"action": "claimant_correction_requested", "final_status": "awaiting_documents"}
@@ -415,26 +590,352 @@ class HumanReviewResumeWorkflow:
         return claim, review
 
 
+def _requested_action_id(review_id: str, action_type: str, target: str) -> str:
+    value = f"{review_id}:{action_type}:{target}".encode("utf-8")
+    return f"ACT-{hashlib.sha256(value).hexdigest()[:16].upper()}"
+
+
+def _recommended_remediation(
+    claim: dict[str, object],
+    source_references: list[EvidenceSourceReference],
+) -> tuple[RecommendedRemediation, str | None]:
+    conflict_fields = {
+        str(item.get("field"))
+        for item in claim.get("conflicts", [])
+        if isinstance(item, dict) and item.get("field")
+    }
+    if "policy_number" in conflict_fields:
+        return (
+            RecommendedRemediation(
+                type="enter_text",
+                label="Ask the claimant to confirm the policy number.",
+                instruction="Please confirm your policy number.",
+                field_name="policy_number",
+            ),
+            None,
+        )
+    if "incident_date" in conflict_fields:
+        return (
+            RecommendedRemediation(
+                type="enter_text",
+                label="Ask the claimant to confirm the incident date.",
+                instruction="Please confirm the incident date.",
+                field_name="incident_date",
+            ),
+            None,
+        )
+
+    source_assessments = [
+        *claim.get("source_aware_conflicts", []),
+        *claim.get("source_aware_uncertainties", []),
+    ]
+    selected_outliers = {
+        str(item.get("selected_outlier_document_id"))
+        for item in source_assessments
+        if isinstance(item, dict) and item.get("selected_outlier_document_id")
+    }
+    if len(selected_outliers) == 1:
+        target_id = next(iter(selected_outliers))
+        target = next(
+            (
+                reference
+                for reference in source_references
+                if reference.document_id == target_id
+                and reference.replacement_eligible
+            ),
+            None,
+        )
+        if target is not None:
+            return (
+                RecommendedRemediation(
+                    type="upload_document",
+                    label="Request a replacement damage photo.",
+                    instruction="Please upload the correct damage photo for this claim.",
+                    document_type="damage_evidence",
+                ),
+                target.document_id,
+            )
+
+    eligible = [
+        reference
+        for reference in source_references
+        if reference.replacement_eligible
+    ]
+    if len(eligible) == 1:
+        target = eligible[0]
+        instruction = _replacement_instruction(target.document_type)
+        label = (
+            "Request a replacement damage photo."
+            if target.document_type == "damage_evidence"
+            else "Request a clear replacement vehicle photo."
+        )
+        return (
+            RecommendedRemediation(
+                type="upload_document",
+                label=label,
+                instruction=instruction,
+                document_type=target.document_type,
+            ),
+            target.document_id,
+        )
+    if len(eligible) > 1:
+        return (
+            RecommendedRemediation(
+                type="upload_document",
+                label="Manual evidence selection is required.",
+                instruction=(
+                    "Multiple evidence artifacts may require replacement; "
+                    "FirstNotice will not choose one automatically."
+                ),
+                can_request=False,
+            ),
+            None,
+        )
+
+    evidence_fields = {
+        "damage_location",
+        "vehicle_drivability",
+        "vehicle_identity",
+        "parts_affected",
+    }
+    if conflict_fields & evidence_fields or claim.get("unresolved_uncertainties"):
+        return (
+            RecommendedRemediation(
+                type="upload_document",
+                label="Manual evidence review is required.",
+                instruction=(
+                    "FirstNotice could not identify one safe evidence artifact "
+                    "to replace automatically."
+                ),
+                can_request=False,
+            ),
+            None,
+        )
+    return (
+        RecommendedRemediation(
+            type="enter_text",
+            label="Ask the claimant to provide corrected information.",
+            instruction="Please provide the corrected incident information.",
+            field_name="incident_summary",
+        ),
+        None,
+    )
+
+
+def _text_requested_action(review: HumanReviewRecord) -> EnterTextRequestedAction:
+    remediation = review.recommended_remediation
+    field_name = remediation.field_name or "incident_summary"
+    if field_name == "incident_summary":
+        field_name = next(
+            (
+                field
+                for field in review.conflict_fields
+                if field in {"policy_number", "incident_date"}
+            ),
+            field_name,
+        )
+    instruction = (
+        "Please confirm your policy number."
+        if field_name == "policy_number"
+        else "Please confirm the incident date."
+        if field_name == "incident_date"
+        else remediation.instruction
+    )
+    return EnterTextRequestedAction(
+        action_id=_requested_action_id(review.review_id, "enter_text", field_name),
+        review_id=review.review_id,
+        field_name=field_name,
+        instruction=instruction,
+    )
+
+
+def _conflict_source_references(
+    claim: dict[str, object], documents: list[ClaimDocument]
+) -> list[EvidenceSourceReference]:
+    active = [document for document in documents if document.status != "superseded"]
+    references: dict[str, EvidenceSourceReference] = {}
+    attributed_items: list[tuple[str, object]] = []
+    attributed_items.extend(
+        (str(item.get("field") or "conflict"), item.get("sources", []))
+        for item in claim.get("conflicts", [])
+        if isinstance(item, dict)
+    )
+    attributed_items.extend(
+        ("unresolved_uncertainty", item.get("sources", []))
+        for item in claim.get("unresolved_uncertainties", [])
+        if isinstance(item, dict)
+    )
+    for field, sources in attributed_items:
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            normalized = str(source).strip().casefold()
+            matches = [
+                document
+                for document in active
+                if document.filename.strip().casefold() == normalized
+            ]
+            if len(matches) != 1:
+                continue
+            document = matches[0]
+            existing = references.get(document.document_id)
+            fields = list(existing.conflict_fields) if existing else []
+            if field and field not in fields:
+                fields.append(field)
+            references[document.document_id] = EvidenceSourceReference(
+                document_id=document.document_id,
+                filename=document.filename,
+                document_type=document.document_type,
+                conflict_fields=fields,
+                replacement_eligible=document.document_type
+                in {"damage_evidence", "license_plate_photo"},
+            )
+    return list(references.values())
+
+
+def _current_issue_fingerprints(claim: dict[str, object]) -> list[str]:
+    values = [
+        str(item.get("fingerprint"))
+        for item in claim.get("source_aware_conflicts", [])
+        if isinstance(item, dict) and item.get("fingerprint")
+    ]
+    values.extend(
+        str(item.get("fingerprint"))
+        for item in claim.get("unresolved_uncertainties", [])
+        if isinstance(item, dict) and item.get("fingerprint")
+    )
+    return list(dict.fromkeys(values))
+
+
+def _conflict_identity(
+    conflict: dict[str, object],
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    return (
+        str(conflict.get("field") or ""),
+        tuple(sorted(str(value).casefold() for value in conflict.get("values", []))),
+        tuple(sorted(str(value).casefold() for value in conflict.get("sources", []))),
+    )
+
+
+def _legacy_reentry_generation_key(
+    claim_id: str,
+    review_id: str,
+    events: object,
+) -> str | None:
+    if not isinstance(events, list):
+        return None
+    resumed_at = max(
+        (
+            item.get("timestamp")
+            for item in events
+            if isinstance(item, dict)
+            and item.get("action") == "human_review_resumed"
+            and (item.get("details") or {}).get("review_id") == review_id
+            and isinstance(item.get("timestamp"), datetime)
+        ),
+        default=None,
+    )
+    if resumed_at is None:
+        return None
+    reentries = [
+        item
+        for item in events
+        if isinstance(item, dict)
+        and isinstance(item.get("timestamp"), datetime)
+        and item["timestamp"] > resumed_at
+        and (
+            item.get("action") == "claim_moved_to_human_review"
+            or (
+                item.get("action") == "claim_review_completed"
+                and item.get("to_status") == ClaimStatus.HUMAN_REVIEW_REQUIRED.value
+            )
+        )
+    ]
+    if not reentries:
+        return None
+    latest = max(reentries, key=lambda item: item["timestamp"])
+    document_id = str(latest.get("document_id") or "").strip()
+    if document_id:
+        return f"{claim_id}:{document_id}:resume"
+    correlation_id = str(latest.get("correlation_id") or "").strip()
+    return (
+        f"{claim_id}:legacy-human-review:{correlation_id}"
+        if correlation_id
+        else None
+    )
+
+
+def _validated_replacement_target(
+    repository: FirestoreClaimRepository,
+    claim_id: str,
+    review: HumanReviewRecord,
+) -> ClaimDocument:
+    target = next(
+        (
+            item
+            for item in review.source_references
+            if item.document_id == review.target_document_id
+            and item.replacement_eligible
+        ),
+        None,
+    )
+    if target is None:
+        raise HumanReviewConflictError(
+            "The replacement target is not part of this review checkpoint."
+        )
+    document = repository.get_document(claim_id, target.document_id)
+    if (
+        document is None
+        or document.claim_id != claim_id
+        or document.status == "superseded"
+        or document.document_type != target.document_type
+    ):
+        raise HumanReviewConflictError(
+            "The replacement target is missing, unrelated, or superseded."
+        )
+    return document
+
+
+def _replacement_instruction(document_type: str) -> str:
+    if document_type == "damage_evidence":
+        return "Please upload the correct damage photo for this claim."
+    return "Please upload a clear replacement photo for this claim."
+
+
 def _briefing_from_claim(claim: dict[str, object]) -> HumanReviewBriefing:
     conflicts = [
-        f"{item.get('field')}: {' versus '.join(str(v) for v in item.get('values', []))}"
+        (
+            f"{item.get('field')} — sources: "
+            f"{', '.join(str(source) for source in item.get('sources', []))} — "
+            f"{item.get('reason')}"
+        )
         for item in claim.get("conflicts", [])
         if isinstance(item, dict)
     ]
-    known = [
-        text
-        for text in (
-            f"Claim type: {claim.get('claim_type')}" if claim.get("claim_type") else None,
-            str(claim.get("incident_summary") or "").strip() or None,
-        )
-        if text
+    current_findings = [
+        f"{item.get('source')}: {item.get('finding')}"
+        for item in claim.get("current_evidence_findings", [])
+        if isinstance(item, dict) and item.get("source") and item.get("finding")
     ]
+    known = (
+        ([f"Claim type: {claim.get('claim_type')}"] if claim.get("claim_type") else [])
+        + current_findings
+    )
+    if not current_findings and claim.get("incident_summary"):
+        known.append(str(claim["incident_summary"]).strip())
     reason = str(claim.get("human_review_reason") or "Human verification is required.")
     questions = [
-        f"Verify the correct value for {item.get('field')}."
+        _conflict_review_question(item)
         for item in claim.get("conflicts", [])
         if isinstance(item, dict) and item.get("field")
-    ] or ["Resolve the operational ambiguity described above."]
+    ]
+    questions.extend(
+        f"Resolve whether this remains consequential: {item.get('uncertainty')}"
+        for item in claim.get("unresolved_uncertainties", [])
+        if isinstance(item, dict) and item.get("uncertainty")
+    )
+    if not questions:
+        questions = ["Verify the current evidence before operational routing continues."]
     return HumanReviewBriefing(
         reason=reason,
         summary=f"FirstNotice paused automated routing because {reason.lower()}",
@@ -444,6 +945,20 @@ def _briefing_from_claim(claim: dict[str, object]) -> HumanReviewBriefing:
         recommended_next_action=questions[0],
         confidence=float(claim["review_confidence"]) if claim.get("review_confidence") is not None else None,
     )
+
+
+def _conflict_review_question(conflict: dict[str, object]) -> str:
+    field = str(conflict.get("field") or "conflicting fact")
+    sources = [str(source) for source in conflict.get("sources", [])]
+    if field in {"damage_location", "vehicle_drivability", "parts_affected"}:
+        image_sources = [
+            source
+            for source in sources
+            if source.lower().endswith((".jpg", ".jpeg", ".png", ".heic", ".webp"))
+        ]
+        if image_sources:
+            return f"Verify whether {image_sources[0]} belongs to this claim."
+    return f"Verify the current evidence for {field}."
 
 
 def _decision_response(review: HumanReviewRecord, *, duplicate: bool) -> HumanReviewDecisionResponse:

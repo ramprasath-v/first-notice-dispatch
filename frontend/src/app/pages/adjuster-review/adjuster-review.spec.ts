@@ -20,6 +20,13 @@ const review: HumanReview = {
     recommended_next_action: 'Verify the correct policy identifier.',
     confidence: 0.9,
   },
+  recommended_remediation: {
+    type: 'enter_text',
+    label: 'Ask the claimant to confirm the policy number.',
+    instruction: 'Please confirm your policy number.',
+    field_name: 'policy_number',
+    can_request: true,
+  },
   expires_at: '2026-08-08T02:00:00Z',
 };
 
@@ -58,11 +65,32 @@ describe('AdjusterReviewPage', () => {
     return fixture;
   }
 
-  it('loads a valid token and renders briefing and conflicts', async () => {
+  it('loads a valid token and shows the recommendation while analysis is collapsed', async () => {
     const fixture = await create();
     expect(api.getHumanReview).toHaveBeenCalledWith('secure-token');
     expect(fixture.nativeElement.textContent).toContain('CLM-A1B2C3D4');
-    expect(fixture.nativeElement.textContent).toContain('POL-1001 versus POL-9999');
+    expect(fixture.nativeElement.textContent).toContain('Ask the claimant to confirm the policy number');
+    const analysis = fixture.nativeElement.querySelector('details.analysis-details') as HTMLDetailsElement;
+    expect(analysis.open).toBe(false);
+    expect(analysis.textContent).toContain('POL-1001 versus POL-9999');
+  });
+
+  it('expands the detailed AI analysis on request', async () => {
+    const fixture = await create();
+    const analysis = fixture.nativeElement.querySelector('details.analysis-details') as HTMLDetailsElement;
+    analysis.querySelector('summary')?.dispatchEvent(new MouseEvent('click'));
+    fixture.detectChanges();
+    expect(analysis.open).toBe(true);
+  });
+
+  it('renders only the two product decisions with no document selector', async () => {
+    const fixture = await create();
+    const labels = [...fixture.nativeElement.querySelectorAll('.actions button')]
+      .map((button: HTMLButtonElement) => button.textContent?.trim());
+    expect(labels).toEqual(['Approve & Continue', 'Request More Information']);
+    expect(fixture.nativeElement.querySelector('select')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('Request Text Correction');
+    expect(fixture.nativeElement.textContent).not.toContain('Request Replacement Evidence');
   });
 
   it('approves through the token endpoint and disables both buttons', async () => {
@@ -74,12 +102,53 @@ describe('AdjusterReviewPage', () => {
     expect(fixture.nativeElement.querySelectorAll('button')).toHaveLength(0);
   });
 
-  it('requests correction through the distinct endpoint', async () => {
+  it('requests the server-recommended action through the unified endpoint', async () => {
     const fixture = await create();
     fixture.nativeElement.querySelector('.secondary').click();
     fixture.detectChanges();
     expect(api.requestHumanReviewCorrection).toHaveBeenCalledWith('secure-token', '');
     expect(fixture.nativeElement.textContent).toContain('Correction requested');
+  });
+
+  it('loads a repeated review cycle with its own current recommendation', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      review_id: 'HRV-2',
+      generation: 2,
+      recommended_remediation: {
+        type: 'upload_document',
+        label: 'Request a replacement damage photo.',
+        instruction: 'Please upload the correct damage photo for this claim.',
+        document_type: 'damage_evidence',
+        can_request: true,
+      },
+      source_references: [
+        {
+          filename: 'initial-damage.jpg',
+          document_type: 'damage_evidence',
+        },
+      ],
+    }));
+    const fixture = await create();
+    expect(fixture.nativeElement.textContent).toContain('Request a replacement damage photo');
+    expect(fixture.nativeElement.textContent).toContain('initial-damage.jpg');
+    expect(fixture.nativeElement.querySelector('select')).toBeNull();
+  });
+
+  it('does not guess when the server marks remediation ambiguous', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      recommended_remediation: {
+        type: 'upload_document', label: 'Manual evidence selection required.',
+        instruction: 'Multiple evidence artifacts could require replacement.',
+        document_type: 'damage_evidence', can_request: false,
+      },
+    }));
+    const fixture = await create();
+    const request = fixture.nativeElement.querySelector('.actions .secondary') as HTMLButtonElement;
+    expect(request.disabled).toBe(true);
+    request.click();
+    expect(api.requestHumanReviewCorrection).not.toHaveBeenCalled();
   });
 
   it('renders an expired link safely', async () => {

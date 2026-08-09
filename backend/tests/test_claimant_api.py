@@ -37,6 +37,8 @@ from app.services.claim_submission_service import (
     EvidenceUpload,
 )
 from app.tools.firestore_repository import ClaimSubmissionReservation
+from app.tools.firestore_repository import ReplacementUploadReservation
+from app.models.requested_action import UploadDocumentRequestedAction
 
 
 CLAIM_ID = "CLM-A1B2C3D4"
@@ -386,6 +388,99 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
         self.storage.upload_claim_document.assert_not_called()
         self.publisher.publish.assert_not_called()
 
+    def test_requested_action_resolves_damage_replacement_server_side(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+        }
+        action = UploadDocumentRequestedAction(
+            action_id="ACT-REPLACE",
+            review_id="HRV-1",
+            document_type="damage_evidence",
+            instruction="Upload the correct damage photo.",
+            replaces_document_id="DOC-OLD",
+        )
+        self.repository.reserve_replacement_upload.return_value = (
+            ReplacementUploadReservation(
+                action=action,
+                document_id="DOC-REPLACEMENT",
+                event_id="replacement-event",
+                correlation_id="replacement-correlation",
+                status="uploading",
+                should_upload=True,
+            )
+        )
+
+        response = self.service.add_missing_document(
+            claim_id=CLAIM_ID,
+            document_type="ignored_by_server",
+            requested_action_id="ACT-REPLACE",
+            idempotency_key="replacement-key-1",
+            evidence=evidence(filename="correct-damage.jpg"),
+        )
+
+        document = self.repository.add_document.call_args.args[0]
+        self.assertEqual(response.document_id, "DOC-REPLACEMENT")
+        self.assertEqual(document.document_type, "damage_evidence")
+        self.assertEqual(document.requested_action_id, "ACT-REPLACE")
+        self.assertEqual(document.replaces_document_id, "DOC-OLD")
+        self.assertEqual(
+            self.publisher.publish.call_args.args[0].event_id,
+            "replacement-event",
+        )
+
+    def test_duplicate_replacement_upload_returns_same_effective_document(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+        }
+        action = UploadDocumentRequestedAction(
+            action_id="ACT-REPLACE",
+            review_id="HRV-1",
+            document_type="damage_evidence",
+            instruction="Upload the correct damage photo.",
+            replaces_document_id="DOC-OLD",
+        )
+        self.repository.reserve_replacement_upload.return_value = (
+            ReplacementUploadReservation(
+                action=action,
+                document_id="DOC-REPLACEMENT",
+                event_id="replacement-event",
+                correlation_id="replacement-correlation",
+                status="published",
+                should_upload=False,
+            )
+        )
+
+        response = self.service.add_missing_document(
+            claim_id=CLAIM_ID,
+            document_type="damage_evidence",
+            requested_action_id="ACT-REPLACE",
+            idempotency_key="replacement-key-1",
+            evidence=evidence(),
+        )
+
+        self.assertEqual(response.document_id, "DOC-REPLACEMENT")
+        self.storage.upload_claim_document.assert_not_called()
+        self.repository.add_document.assert_not_called()
+        self.publisher.publish.assert_not_called()
+
+    def test_arbitrary_damage_upload_without_action_is_rejected(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+        }
+
+        with self.assertRaises(ClaimStorageValidationError):
+            self.service.add_missing_document(
+                claim_id=CLAIM_ID,
+                document_type="damage_evidence",
+                evidence=evidence(),
+            )
+
+        self.repository.reserve_replacement_upload.assert_not_called()
+        self.storage.upload_claim_document.assert_not_called()
+
     def test_get_timeline_returns_oldest_first(self) -> None:
         self.repository.get_claim.return_value = {"claim_id": CLAIM_ID}
         self.repository.get_claim_events.return_value = [
@@ -558,6 +653,31 @@ class ClaimantApiEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["document_id"], DOCUMENT_ID)
+
+    def test_replacement_upload_contract_forwards_action_and_idempotency_only(self) -> None:
+        self.service.add_missing_document.return_value = DocumentAcceptedResponse(
+            claim_id=CLAIM_ID,
+            document_id=DOCUMENT_ID,
+            status="received",
+            event_id="event-document",
+        )
+
+        response = self.client.post(
+            f"/claims/{CLAIM_ID}/documents",
+            data={
+                "document_type": "damage_evidence",
+                "requested_action_id": "ACT-REPLACE",
+                "replaces_document_id": "DOC-BROWSER-CHOICE",
+            },
+            headers={"X-Idempotency-Key": "replacement-request-1"},
+            files={"file": ("damage.jpg", b"image", "image/jpeg")},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        kwargs = self.service.add_missing_document.call_args.kwargs
+        self.assertEqual(kwargs["requested_action_id"], "ACT-REPLACE")
+        self.assertEqual(kwargs["idempotency_key"], "replacement-request-1")
+        self.assertNotIn("replaces_document_id", kwargs)
 
     def test_missing_document_unknown_claim_returns_404(self) -> None:
         self.service.add_missing_document.side_effect = ClaimNotFoundError("missing")

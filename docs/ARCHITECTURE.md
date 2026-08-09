@@ -266,6 +266,20 @@ When a durable claim is `inspection_pending`, `claim.inspection.ready` invokes t
 
 Calendar records the inspection; Gmail communicates with the adjuster. Calendar does not add an attendee or send an invitation.
 
+### Dedicated adjuster-owned Calendar
+
+The deployed Calendar ID may refer to any secondary calendar that the Cloud Run runtime identity can edit; the adapter does not assume a calendar owner or derive the Calendar ID from an email address. For the hackathon demo:
+
+1. Sign in to the dedicated `firstnotice.adjuster@gmail.com` account.
+2. Create the secondary calendar **FirstNotice Demo Inspections**.
+3. Share it with `firstnotice-runtime@firstnotice-ai.iam.gserviceaccount.com`.
+4. Grant **Make changes to events**.
+5. Copy its Calendar ID and set it as `GOOGLE_CALENDAR_ID` on `firstnotice-dispatch`.
+
+The runtime service account authenticates to Calendar through ADC and creates the event directly on that shared secondary calendar. The payload deliberately contains no `attendees`, and the request uses `sendUpdates=none`.
+
+Gmail is independent: its OAuth configuration sends the final handoff to `ADJUSTER_EMAIL=firstnotice.adjuster@gmail.com`. Using the same dedicated demo account makes both external actions easy to verify without coupling their implementations or inviting the adjuster to an event already owned by that account.
+
 ## 10. Reliability and idempotency
 
 - Submission reservation and claim shell creation share an atomic Firestore batch.

@@ -25,7 +25,11 @@ from app.models.adjuster_packet import AdjusterPacket
 from app.models.inspection_appointment import InspectionAppointment, InspectionSlot
 from app.models.notification import AdjusterNotification
 from app.models.review_result import ReviewResult
-from app.models.human_review import HumanReviewRecord
+from app.models.human_review import HumanReviewRecord, human_review_id
+from app.models.requested_action import (
+    UploadDocumentRequestedAction,
+    parse_requested_actions,
+)
 
 
 WORKFLOW_VERSION = "1.0"
@@ -36,6 +40,24 @@ class ClaimSubmissionReservation:
     claim_id: str
     event_id: str
     correlation_id: str
+    created: bool
+
+
+@dataclass(frozen=True)
+class ReplacementUploadReservation:
+    action: UploadDocumentRequestedAction
+    document_id: str
+    event_id: str
+    correlation_id: str
+    status: str
+    should_upload: bool
+
+
+@dataclass(frozen=True)
+class HumanReviewGeneration:
+    generation: int
+    generation_key: str
+    review_id: str
     created: bool
 
 
@@ -297,21 +319,182 @@ class FirestoreClaimRepository:
                 f"Could not read documents for claim {claim_id}: {exc}"
             ) from exc
 
+    def reserve_replacement_upload(
+        self,
+        *,
+        claim_id: str,
+        action_id: str,
+        idempotency_key: str,
+    ) -> ReplacementUploadReservation:
+        claim_ref = self._client.collection("claims").document(claim_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def reserve(transaction):
+            snapshot = claim_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise FirestoreWriteError(f"Claim {claim_id} does not exist.")
+            claim = snapshot.to_dict()
+            if claim.get("status") != ClaimStatus.AWAITING_DOCUMENTS.value:
+                raise FirestoreWriteError(
+                    "Replacement evidence is not currently accepted for this claim."
+                )
+            action = next(
+                (
+                    item
+                    for item in parse_requested_actions(
+                        claim.get("requested_actions", [])
+                    )
+                    if isinstance(item, UploadDocumentRequestedAction)
+                    and item.action_id == action_id
+                ),
+                None,
+            )
+            if action is None:
+                raise FirestoreWriteError(
+                    "The requested replacement action is missing or already consumed."
+                )
+            reservations = dict(claim.get("replacement_upload_reservations") or {})
+            existing = reservations.get(action_id)
+            if isinstance(existing, dict) and existing.get("status") != "retry_required":
+                if existing.get("idempotency_key") != idempotency_key:
+                    raise FirestoreWriteError(
+                        "A replacement upload is already active for this action."
+                    )
+                return ReplacementUploadReservation(
+                    action=action,
+                    document_id=str(existing["document_id"]),
+                    event_id=str(existing["event_id"]),
+                    correlation_id=str(existing["correlation_id"]),
+                    status=str(existing["status"]),
+                    should_upload=False,
+                )
+
+            digest = hashlib.sha256(
+                f"{claim_id}:{action_id}:{idempotency_key}".encode("utf-8")
+            ).hexdigest()
+            reservation = {
+                "idempotency_key": idempotency_key,
+                "document_id": f"DOC-{digest[:8].upper()}",
+                "event_id": f"{claim_id}:{action_id}:upload:{digest[:16]}",
+                "correlation_id": f"{action_id}:{digest[16:32]}",
+                "status": "uploading",
+                "updated_at": utc_now(),
+            }
+            reservations[action_id] = reservation
+            transaction.update(
+                claim_ref, {"replacement_upload_reservations": reservations}
+            )
+            return ReplacementUploadReservation(
+                action=action,
+                document_id=reservation["document_id"],
+                event_id=reservation["event_id"],
+                correlation_id=reservation["correlation_id"],
+                status="uploading",
+                should_upload=True,
+            )
+
+        try:
+            return reserve(transaction)
+        except ClaimRepositoryError:
+            raise
+        except Exception as exc:
+            self._raise_write_error("reserve replacement upload", exc)
+
+    def update_replacement_upload_status(
+        self,
+        *,
+        claim_id: str,
+        action_id: str,
+        document_id: str,
+        status: str,
+    ) -> None:
+        claim_ref = self._client.collection("claims").document(claim_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def update(transaction):
+            snapshot = claim_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise FirestoreWriteError(f"Claim {claim_id} does not exist.")
+            claim = snapshot.to_dict()
+            reservations = dict(
+                claim.get("replacement_upload_reservations") or {}
+            )
+            current = reservations.get(action_id)
+            if not isinstance(current, dict):
+                action_still_exists = any(
+                    action.action_id == action_id
+                    for action in parse_requested_actions(
+                        claim.get("requested_actions", [])
+                    )
+                )
+                if not action_still_exists:
+                    # The asynchronous resume already consumed the action and
+                    # reservation atomically. A late HTTP status update is a no-op.
+                    return
+                raise FirestoreWriteError(
+                    "Replacement upload reservation no longer matches."
+                )
+            if current.get("document_id") != document_id:
+                raise FirestoreWriteError(
+                    "Replacement upload reservation no longer matches."
+                )
+            reservations[action_id] = {
+                **current,
+                "status": status,
+                "updated_at": utc_now(),
+            }
+            transaction.update(
+                claim_ref, {"replacement_upload_reservations": reservations}
+            )
+
+        try:
+            update(transaction)
+        except ClaimRepositoryError:
+            raise
+        except Exception as exc:
+            self._raise_write_error("update replacement upload status", exc)
+
     def mark_document_unusable(
-        self, claim_id: str, document_id: str, reason: str
+        self,
+        claim_id: str,
+        document_id: str,
+        reason: str,
+        *,
+        supported_capabilities: list[str] | None = None,
+        evidence_findings: list[str] | None = None,
     ) -> None:
         self._update_document(
             claim_id,
             document_id,
-            {"status": "unusable", "quality_reason": reason},
+            {
+                "status": "unusable",
+                "quality_reason": reason,
+                "supported_capabilities": list(supported_capabilities or []),
+                "evidence_findings": list(evidence_findings or []),
+            },
             "mark claim document unusable",
         )
 
-    def mark_document_validated(self, claim_id: str, document_id: str) -> None:
+    def mark_document_validated(
+        self,
+        claim_id: str,
+        document_id: str,
+        *,
+        quality_reason: str | None = None,
+        supported_capabilities: list[str] | None = None,
+        evidence_findings: list[str] | None = None,
+    ) -> None:
         self._update_document(
             claim_id,
             document_id,
-            {"status": "validated"},
+            {
+                "status": "validated",
+                "quality_reason": quality_reason,
+                "supported_capabilities": list(supported_capabilities or []),
+                "evidence_findings": list(evidence_findings or []),
+            },
             "mark claim document validated",
         )
 
@@ -380,6 +563,95 @@ class FirestoreClaimRepository:
 
         return snapshot.to_dict()
 
+    def reserve_human_review_generation(
+        self,
+        *,
+        claim_id: str,
+        generation_key: str,
+        floor_generation: int = 0,
+        make_current: bool = False,
+    ) -> HumanReviewGeneration:
+        """Transactionally map one review-producing operation to one cycle."""
+        if not generation_key.strip():
+            raise FirestoreWriteError("Human-review generation key is required.")
+        claim_ref = self._client.collection("claims").document(claim_id)
+        transaction = self._client.transaction()
+        key_hash = hashlib.sha256(generation_key.encode("utf-8")).hexdigest()
+
+        @firestore.transactional
+        def reserve(transaction):
+            snapshot = claim_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise FirestoreWriteError(f"Claim {claim_id} does not exist.")
+            claim = snapshot.to_dict()
+            generations = dict(claim.get("human_review_generations") or {})
+            existing = generations.get(key_hash)
+            if isinstance(existing, dict):
+                generation = int(existing["generation"])
+                review_id = str(existing["review_id"])
+                created = False
+            else:
+                generation = max(
+                    int(claim.get("human_review_generation") or 0),
+                    floor_generation,
+                ) + 1
+                review_id = human_review_id(claim_id, generation)
+                generations[key_hash] = {
+                    "generation": generation,
+                    "generation_key": generation_key,
+                    "review_id": review_id,
+                    "reserved_at": utc_now(),
+                }
+                created = True
+            update: dict[str, Any] = {
+                "human_review_generation": max(
+                    int(claim.get("human_review_generation") or 0), generation
+                ),
+                "human_review_generations": generations,
+            }
+            if make_current:
+                update.update(
+                    {
+                        "current_human_review_generation": generation,
+                        "current_human_review_generation_key": generation_key,
+                        "current_human_review_id": review_id,
+                    }
+                )
+            transaction.update(claim_ref, update)
+            return HumanReviewGeneration(
+                generation=generation,
+                generation_key=generation_key,
+                review_id=review_id,
+                created=created,
+            )
+
+        try:
+            return reserve(transaction)
+        except ClaimRepositoryError:
+            raise
+        except Exception as exc:
+            self._raise_write_error("reserve human-review generation", exc)
+
+    def set_current_human_review_generation(
+        self,
+        *,
+        claim_id: str,
+        generation: int,
+        generation_key: str,
+        review_id: str,
+    ) -> None:
+        try:
+            self._client.collection("claims").document(claim_id).update(
+                {
+                    "human_review_generation": generation,
+                    "current_human_review_generation": generation,
+                    "current_human_review_generation_key": generation_key,
+                    "current_human_review_id": review_id,
+                }
+            )
+        except Exception as exc:
+            self._raise_write_error("link current human-review generation", exc)
+
     def create_human_review(self, review: HumanReviewRecord) -> bool:
         """Create one durable review checkpoint and hash-only token index."""
         claim_ref = self._client.collection("claims").document(review.claim_id)
@@ -415,7 +687,11 @@ class FirestoreClaimRepository:
                     actor="firstnoticeai",
                     from_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
                     to_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
-                    details={"review_id": review.review_id, "reason": review.reason},
+                    details={
+                        "review_id": review.review_id,
+                        "review_generation": review.generation,
+                        "reason": review.reason,
+                    },
                     correlation_id=review.correlation_id,
                 ),
             )
@@ -484,6 +760,7 @@ class FirestoreClaimRepository:
         status: str,
         gmail_message_id: str | None = None,
         correlation_id: str,
+        review_generation: int = 1,
     ) -> None:
         claim_ref = self._client.collection("claims").document(claim_id)
         review_ref = claim_ref.collection("human_reviews").document(review_id)
@@ -503,6 +780,7 @@ class FirestoreClaimRepository:
                         to_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
                         details={
                             "review_id": review_id,
+                            "review_generation": review_generation,
                             "gmail_message_id": gmail_message_id,
                         },
                         correlation_id=correlation_id,
@@ -560,6 +838,8 @@ class FirestoreClaimRepository:
         decision: str,
         decision_note: str | None,
         reviewer_label: str | None,
+        correction_type: str | None,
+        target_document_id: str | None,
         now: datetime,
     ) -> tuple[HumanReviewRecord | None, bool]:
         """Atomically consume a review token; returns (record, duplicate)."""
@@ -595,6 +875,8 @@ class FirestoreClaimRepository:
                 "decision_at": now,
                 "decision_note": decision_note,
                 "reviewer_label": reviewer_label,
+                "correction_type": correction_type,
+                "target_document_id": target_document_id,
                 "decision_event_id": (
                     f"{current.claim_id}:{current.review_id}:{decision}:v1"
                 ),
@@ -643,6 +925,10 @@ class FirestoreClaimRepository:
         unusable_evidence: list[dict[str, Any]],
         requested_actions: list[dict[str, Any]],
         correlation_id: str,
+        approved_issue_fingerprints: list[str] | None = None,
+        source_aware_conflicts: list[dict[str, Any]] | None = None,
+        source_aware_uncertainties: list[dict[str, Any]] | None = None,
+        unresolved_uncertainties: list[dict[str, Any]] | None = None,
     ) -> None:
         claim = self.get_claim(claim_id)
         if claim is None:
@@ -653,30 +939,51 @@ class FirestoreClaimRepository:
         validate_claim_status_transition(ClaimStatus.REVIEW_PROCESSING, target_status)
         now = utc_now()
         claim_ref = self._client.collection("claims").document(claim_id)
+        review_ref = claim_ref.collection("human_reviews").document(review_id)
         event_ref = claim_ref.collection("events").document(f"{review_id}-resumed")
         try:
             batch = self._client.batch()
+            claim_update: dict[str, Any] = {
+                "status": target_status.value,
+                "review_status": "completed",
+                "requires_human_review": False,
+                "human_review_reason": None,
+                "conflicts": conflicts,
+                "conflict_count": len(conflicts),
+                "missing_documents": missing_documents,
+                "missing_document_count": len(missing_documents),
+                "unusable_evidence": unusable_evidence,
+                "unusable_evidence_count": len(unusable_evidence),
+                "requested_actions": requested_actions,
+                "current_human_review_id": None,
+                "current_human_review_generation_key": None,
+                "intake_complete": not missing_documents and not unusable_evidence,
+                "intake_priority": (
+                    "expedited"
+                    if claim.get("intake_priority") == "expedited"
+                    else "routine"
+                ),
+                "updated_at": now,
+            }
+            if approved_issue_fingerprints is not None:
+                claim_update["approved_issue_fingerprints"] = approved_issue_fingerprints
+            if source_aware_conflicts is not None:
+                claim_update["source_aware_conflicts"] = source_aware_conflicts
+            if source_aware_uncertainties is not None:
+                claim_update["source_aware_uncertainties"] = source_aware_uncertainties
+            if unresolved_uncertainties is not None:
+                claim_update["unresolved_uncertainties"] = unresolved_uncertainties
+                claim_update["uncertainties"] = [
+                    str(item.get("uncertainty"))
+                    for item in unresolved_uncertainties
+                    if isinstance(item, dict) and item.get("uncertainty")
+                ]
+            batch.update(claim_ref, claim_update)
             batch.update(
-                claim_ref,
+                review_ref,
                 {
-                    "status": target_status.value,
-                    "review_status": "completed",
-                    "requires_human_review": False,
-                    "human_review_reason": None,
-                    "conflicts": conflicts,
-                    "conflict_count": len(conflicts),
-                    "missing_documents": missing_documents,
-                    "missing_document_count": len(missing_documents),
-                    "unusable_evidence": unusable_evidence,
-                    "unusable_evidence_count": len(unusable_evidence),
+                    "completed_at": now,
                     "requested_actions": requested_actions,
-                    "intake_complete": not missing_documents and not unusable_evidence,
-                    "intake_priority": (
-                        "expedited"
-                        if claim.get("intake_priority") == "expedited"
-                        else "routine"
-                    ),
-                    "updated_at": now,
                 },
             )
             batch.create(
@@ -687,7 +994,12 @@ class FirestoreClaimRepository:
                     actor="firstnoticeai",
                     from_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
                     to_status=target_status.value,
-                    details={"review_id": review_id},
+                    details={
+                        "review_id": review_id,
+                        "review_generation": int(
+                            claim.get("current_human_review_generation") or 1
+                        ),
+                    },
                     correlation_id=correlation_id,
                 ),
             )
@@ -1673,6 +1985,9 @@ class FirestoreClaimRepository:
         correlation_id: str | None = None,
         resume_document_id: str | None = None,
         resume_idempotency_key: str | None = None,
+        replacement_document: ClaimDocument | None = None,
+        retry_replacement_action_id: str | None = None,
+        review_generation_key: str | None = None,
     ) -> ClaimStatus:
         """Atomically persist review fields, final status, and timeline event."""
         claim = self.get_claim(claim_id)
@@ -1683,6 +1998,16 @@ class FirestoreClaimRepository:
 
         target = review_target_status(review_result)
         validate_claim_status_transition(claim.get("status", ""), target)
+
+        generation: HumanReviewGeneration | None = None
+        if target == ClaimStatus.HUMAN_REVIEW_REQUIRED:
+            generation = self.reserve_human_review_generation(
+                claim_id=claim_id,
+                generation_key=(
+                    review_generation_key
+                    or f"{claim_id}:submitted-review:v1"
+                ),
+            )
 
         now = utc_now()
         claim_ref = self._client.collection("claims").document(claim_id)
@@ -1715,8 +2040,72 @@ class FirestoreClaimRepository:
             "conflicts": [
                 item.model_dump(mode="python") for item in review_result.conflicts
             ],
+            "source_aware_conflicts": [
+                item.model_dump(mode="python")
+                for item in review_result.source_aware_conflicts
+            ],
+            "source_aware_uncertainties": [
+                item.model_dump(mode="python")
+                for item in review_result.source_aware_uncertainties
+            ],
+            "current_evidence_findings": [
+                item.model_dump(mode="python")
+                for item in review_result.current_evidence_findings
+            ],
+            "unresolved_uncertainties": [
+                item.model_dump(mode="python")
+                for item in review_result.unresolved_uncertainties
+            ],
+            "uncertainties": [
+                item.uncertainty for item in review_result.unresolved_uncertainties
+            ],
             "updated_at": now,
         }
+        if generation is not None:
+            claim_update.update(
+                {
+                    "current_human_review_generation": generation.generation,
+                    "current_human_review_generation_key": generation.generation_key,
+                    "current_human_review_id": generation.review_id,
+                }
+            )
+        if replacement_document is not None:
+            if (
+                not replacement_document.replaces_document_id
+                or not replacement_document.requested_action_id
+            ):
+                raise FirestoreWriteError(
+                    "Atomic replacement review requires action and target IDs."
+                )
+            remaining_actions = [
+                action.model_dump(mode="python")
+                for action in parse_requested_actions(
+                    claim.get("requested_actions", [])
+                )
+                if action.action_id != replacement_document.requested_action_id
+            ]
+            reservations = dict(
+                claim.get("replacement_upload_reservations") or {}
+            )
+            reservations.pop(replacement_document.requested_action_id, None)
+            claim_update.update(
+                {
+                    "requested_actions": remaining_actions,
+                    "replacement_upload_reservations": reservations,
+                }
+            )
+        elif retry_replacement_action_id is not None:
+            reservations = dict(
+                claim.get("replacement_upload_reservations") or {}
+            )
+            reservation = reservations.get(retry_replacement_action_id)
+            if isinstance(reservation, dict):
+                reservations[retry_replacement_action_id] = {
+                    **reservation,
+                    "status": "retry_required",
+                    "updated_at": now,
+                }
+                claim_update["replacement_upload_reservations"] = reservations
         event = self._event_document(
             timestamp=now,
             action="claim_review_completed",
@@ -1741,6 +2130,14 @@ class FirestoreClaimRepository:
                     {"field": item.field, "reason": item.reason}
                     for item in review_result.conflicts
                 ],
+                **(
+                    {
+                        "review_id": generation.review_id,
+                        "review_generation": generation.generation,
+                    }
+                    if generation is not None
+                    else {}
+                ),
             },
             correlation_id=correlation_id,
         )
@@ -1758,6 +2155,31 @@ class FirestoreClaimRepository:
                         "resume_idempotency_key": resume_idempotency_key,
                         "resume_processed_at": now,
                         "resume_result_status": target.value,
+                        **(
+                            {
+                                "status": "validated",
+                                "quality_reason": replacement_document.quality_reason,
+                                "supported_capabilities": list(
+                                    replacement_document.supported_capabilities
+                                ),
+                                "evidence_findings": list(
+                                    replacement_document.evidence_findings
+                                ),
+                            }
+                            if replacement_document is not None
+                            else {}
+                        ),
+                    },
+                )
+            if replacement_document is not None:
+                replaced_ref = claim_ref.collection("documents").document(
+                    replacement_document.replaces_document_id
+                )
+                batch.update(
+                    replaced_ref,
+                    {
+                        "status": "superseded",
+                        "superseded_by_document_id": replacement_document.document_id,
                     },
                 )
             batch.commit()

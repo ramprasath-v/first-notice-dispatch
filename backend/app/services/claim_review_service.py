@@ -9,12 +9,19 @@ from app.domain.intake_requirements import (
     IntakeRequirement,
     evaluate_intake_requirements,
 )
+from app.domain.evidence_reasoning import (
+    fingerprint_uncertainties,
+    shape_source_aware_conflicts,
+    shape_source_aware_uncertainties,
+)
 from app.models.intake_result import IntakeResult
 from app.models.review_result import (
     ClaimEvidenceMetadata,
+    CurrentEvidenceFinding,
     EvidenceConflict,
     MissingEvidence,
     ReviewResult,
+    UnresolvedUncertainty,
     UnusableEvidence,
 )
 
@@ -27,6 +34,10 @@ SIGNIFICANT_CONFLICT_FIELDS = {
     "incident_date",
     "policy_number",
     "vehicle_identity",
+}
+MATERIAL_OPERATIONAL_CONFLICT_FIELDS = {
+    "damage_location",
+    "vehicle_drivability",
 }
 
 
@@ -105,7 +116,20 @@ Safety and scope rules:
    conclude fraud, calculate payout, or make legal conclusions.
 7. Only surface operational indicators: possible injury, safety concern,
    significant damage, or uncertainty affecting the next routing step.
-8. Return only the required ReviewResult structure.
+8. Re-evaluate the complete current evidence set. Historical uncertainties in
+   IntakeResult are context, not automatically current. Return only ambiguities
+   that remain unresolved after considering all active evidence in
+   unresolved_uncertainties.
+9. Populate current_evidence_findings with concise facts and the exact submitted
+   filename supporting each fact. When raw evidence parts are supplied, each is
+   preceded by its Evidence source marker.
+10. Persist contradictions as EvidenceConflict entries with the exact submitted
+   filenames in sources. Do not treat an additional image as replacing an older
+   image unless the metadata says it was superseded.
+11. For every unresolved uncertainty that compares two or more evidence
+   artifacts, enumerate every participating submitted filename in sources. Do
+   not summarize a comparison of multiple photos with only one source.
+12. Return only the required ReviewResult structure.
 
 Validated IntakeResult:
 {intake_result.model_dump_json(indent=2)}
@@ -174,6 +198,7 @@ Deterministic checklist evaluations:
             )
             for evidence in metadata.uploaded_evidence
             if evidence.usable is False
+            and evidence.evidence_type not in confirmed_usable_types
         ]
         for item in ai_review.unusable_evidence:
             if (
@@ -209,6 +234,105 @@ Deterministic checklist evaluations:
                 for existing in conflicts
             ):
                 conflicts.append(conflict)
+        current_findings = [
+            CurrentEvidenceFinding(source=evidence.filename, finding=finding)
+            for evidence in metadata.uploaded_evidence
+            for finding in evidence.evidence_findings
+        ]
+        for finding in ai_review.current_evidence_findings:
+            source_key = _submitted_source_key(
+                finding.source,
+                filenames=submitted_filenames,
+                finding_sources=submitted_finding_sources,
+            )
+            if source_key is None:
+                continue
+            candidate = finding.model_copy(update={"source": source_key})
+            if candidate not in current_findings:
+                current_findings.append(candidate)
+        current_findings = sorted(
+            current_findings,
+            key=lambda item: (item.source.casefold(), item.finding.casefold()),
+        )
+
+        current_uncertainties: list[UnresolvedUncertainty] = []
+        for uncertainty in ai_review.unresolved_uncertainties:
+            returned_sources = list(
+                dict.fromkeys(
+                    " ".join(source.lower().split())
+                    for source in uncertainty.sources
+                    if source.strip()
+                )
+            )
+            grounded_sources = list(
+                dict.fromkeys(
+                    source_key
+                    for source in uncertainty.sources
+                    if (
+                        source_key := _submitted_source_key(
+                            source,
+                            filenames=submitted_filenames,
+                            finding_sources=submitted_finding_sources,
+                        )
+                    )
+                )
+            )
+            if not grounded_sources:
+                continue
+            attribution_incomplete = (
+                len(grounded_sources) < len(returned_sources)
+                or (
+                    _describes_cross_evidence_comparison(uncertainty.uncertainty)
+                    and len(grounded_sources) < 2
+                )
+            )
+            current_uncertainties.append(
+                uncertainty.model_copy(
+                    update={
+                        "sources": grounded_sources,
+                        "source_attribution_incomplete": attribution_incomplete,
+                    }
+                )
+            )
+
+        source_aware = shape_source_aware_conflicts(
+            conflicts, current_findings, metadata.uploaded_evidence
+        )
+        conflict_pairs = sorted(
+            zip(conflicts, source_aware), key=lambda pair: pair[1].fingerprint
+        )
+        approved_fingerprints = set(metadata.approved_issue_fingerprints)
+        conflicts = [
+            conflict
+            for conflict, assessment in conflict_pairs
+            if assessment.fingerprint not in approved_fingerprints
+        ]
+        source_aware = [
+            assessment
+            for _, assessment in conflict_pairs
+            if assessment.fingerprint not in approved_fingerprints
+        ]
+        fingerprinted_uncertainties = fingerprint_uncertainties(
+            current_uncertainties,
+            [assessment for _, assessment in conflict_pairs],
+            metadata.uploaded_evidence,
+        )
+        source_aware_uncertainties = shape_source_aware_uncertainties(
+            fingerprinted_uncertainties,
+            current_findings,
+            metadata.uploaded_evidence,
+        )
+        current_uncertainties = [
+            uncertainty
+            for uncertainty in fingerprinted_uncertainties
+            if uncertainty.fingerprint not in approved_fingerprints
+        ]
+        source_aware_uncertainties = [
+            assessment
+            for assessment in source_aware_uncertainties
+            if assessment.fingerprint not in approved_fingerprints
+        ]
+        current_uncertainties.sort(key=lambda item: item.fingerprint or "")
         significant_conflict = any(
             conflict.field in SIGNIFICANT_CONFLICT_FIELDS for conflict in conflicts
         )
@@ -228,8 +352,18 @@ Deterministic checklist evaluations:
         significant_damage = (
             metadata.significant_damage or indicators.significant_damage
         )
-        high_uncertainty = len(intake_result.uncertainties) >= 3
+        high_uncertainty = (
+            indicators.high_operational_uncertainty
+            and bool(current_uncertainties)
+        )
         has_resolvable_evidence_gap = bool(missing or unusable)
+        material_operational_conflict = (
+            not has_resolvable_evidence_gap
+            and any(
+                conflict.field in MATERIAL_OPERATIONAL_CONFLICT_FIELDS
+                for conflict in conflicts
+            )
+        )
 
         if possible_injury:
             priority = "urgent_human_review"
@@ -240,6 +374,11 @@ Deterministic checklist evaluations:
         elif significant_conflict:
             priority = "urgent_human_review"
             priority_reason = "A significant factual conflict requires human review."
+        elif material_operational_conflict:
+            priority = "urgent_human_review"
+            priority_reason = (
+                "Current submitted evidence contains a material operational conflict."
+            )
         elif high_uncertainty and not has_resolvable_evidence_gap:
             priority = "urgent_human_review"
             priority_reason = (
@@ -260,7 +399,12 @@ Deterministic checklist evaluations:
 
         requires_human_review = priority == "urgent_human_review"
         human_review_reason = priority_reason if requires_human_review else None
-        intake_complete = not missing and not unusable and not significant_conflict
+        intake_complete = (
+            not missing
+            and not unusable
+            and not significant_conflict
+            and not material_operational_conflict
+        )
 
         return ReviewResult(
             intake_complete=intake_complete,
@@ -271,6 +415,10 @@ Deterministic checklist evaluations:
             missing_documents=missing,
             unusable_evidence=unusable,
             conflicts=conflicts,
+            source_aware_conflicts=source_aware,
+            source_aware_uncertainties=source_aware_uncertainties,
+            current_evidence_findings=current_findings,
+            unresolved_uncertainties=current_uncertainties,
             requires_human_review=requires_human_review,
             human_review_reason=human_review_reason,
             operational_indicators=indicators,
@@ -307,8 +455,11 @@ def _submitted_source_key(
     }
     if any(marker in normalized for marker in workflow_markers):
         return None
-    for candidate in filenames | finding_sources:
-        if candidate == normalized or candidate in normalized:
+    candidates = filenames | finding_sources
+    if normalized in candidates:
+        return normalized
+    for candidate in sorted(candidates, key=lambda value: (-len(value), value)):
+        if candidate in normalized:
             return candidate
     submitted_text_sources = {
         "incident description",
@@ -319,3 +470,20 @@ def _submitted_source_key(
     if normalized in submitted_text_sources:
         return normalized
     return None
+
+
+def _describes_cross_evidence_comparison(uncertainty: str) -> bool:
+    normalized = " ".join(uncertainty.lower().split())
+    markers = (
+        "two submitted",
+        "two photos",
+        "two images",
+        "different vehicles",
+        "multiple photos",
+        "multiple images",
+        "between the photos",
+        "between the images",
+        "conflicting evidence",
+        "inconsistent evidence",
+    )
+    return any(marker in normalized for marker in markers)

@@ -52,6 +52,22 @@ describe('ClaimApiService', () => {
     upload.flush({});
   });
 
+  it('sends the server action ID and stable idempotency key for replacement evidence', () => {
+    service.uploadDocument(
+      'CLM-1',
+      'damage_evidence',
+      new File(['x'], 'correct-damage.jpg'),
+      'ACT-REPLACE',
+      'replacement-request-1',
+    ).subscribe();
+
+    const upload = http.expectOne('http://localhost:8080/claims/CLM-1/documents');
+    expect(upload.request.headers.get('X-Idempotency-Key')).toBe('replacement-request-1');
+    expect(upload.request.body.get('requested_action_id')).toBe('ACT-REPLACE');
+    expect(upload.request.body.has('replaces_document_id')).toBe(false);
+    upload.flush({});
+  });
+
   it('uses token-scoped review endpoints', () => {
     service.getHumanReview('token/value').subscribe();
     const load = http.expectOne('http://localhost:8080/reviews/current');
@@ -67,6 +83,8 @@ describe('ClaimApiService', () => {
     service.requestHumanReviewCorrection('token/value', 'Confirm policy').subscribe();
     const correction = http.expectOne('http://localhost:8080/reviews/current/request-correction');
     expect(correction.request.body.decision_note).toBe('Confirm policy');
+    expect(correction.request.body.correction_type).toBeUndefined();
+    expect(correction.request.body.target_document_id).toBeUndefined();
     correction.flush({});
   });
 });

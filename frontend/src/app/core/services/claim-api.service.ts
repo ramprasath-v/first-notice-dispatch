@@ -47,13 +47,17 @@ export class ClaimApiService {
     claimId: string,
     documentType: string,
     file: File,
+    requestedActionId?: string,
+    idempotencyKey?: string,
   ): Observable<DocumentAcceptedResponse> {
     const body = new FormData();
     body.append('document_type', documentType);
     body.append('file', file);
+    if (requestedActionId) body.append('requested_action_id', requestedActionId);
     return this.http.post<DocumentAcceptedResponse>(
       `${this.baseUrl}/claims/${claimId}/documents`,
       body,
+      idempotencyKey ? { headers: { 'X-Idempotency-Key': idempotencyKey } } : {},
     );
   }
 

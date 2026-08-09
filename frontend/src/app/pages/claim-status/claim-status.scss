@@ -16,6 +16,11 @@
 .stepper small em { display: block; margin-top: .22rem; color: #72857f; font-size: .62rem; font-style: normal; font-weight: 500; white-space: nowrap; }
 .stepper i { height: 2px; margin-top: 15px; background: #dfe8e5; }
 .stepper i.complete { background: #16826f; }
+.workflow-indicator { display: flex; align-items: center; gap: .8rem; padding: 1rem 1.2rem; box-shadow: none; }
+.workflow-indicator div { display: grid; gap: .2rem; }
+.workflow-indicator small { color: #667b76; }
+.indicator-dot { width: 11px; height: 11px; border: 2px solid #7d8e89; border-radius: 50%; background: transparent; }
+.workflow-indicator.active .indicator-dot { border-color: #16826f; background: #22a88f; box-shadow: 0 0 0 5px #dff2ee; }
 .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 .status-layout { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(240px, .8fr); gap: 1.2rem; align-items: start; }
 .status-layout app-claim-timeline { display: grid; gap: 1.2rem; }
@@ -29,4 +34,6 @@
 .error-state { padding: 2rem; text-align: center; }
 .correction-card { padding: 1.5rem; }
 .correction-card h2 { font-size: 1.15rem; }
+.action-count, .supporting-copy { color: #667b76; }
+.supporting-copy { margin: 1rem 0 0; font-size: .88rem; }
 @media (max-width: 760px) { .status-hero { align-items: stretch; flex-direction: column; } .status-layout { grid-template-columns: 1fr; } .help-card { position: static; } .stepper { padding-inline: .7rem; } .stepper small { width: 76px; font-size: .68rem; } .stepper small em { white-space: normal; font-size: .58rem; } }

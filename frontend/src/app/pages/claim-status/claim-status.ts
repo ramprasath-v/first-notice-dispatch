@@ -8,7 +8,7 @@ import { ClaimTimeline } from '../../components/claim-timeline/claim-timeline';
 import { InspectionCard } from '../../components/inspection-card/inspection-card';
 import { DocumentUploadRequest, MissingDocuments } from '../../components/missing-documents/missing-documents';
 import { ClaimApiService } from '../../core/services/claim-api.service';
-import { ClaimSummary } from '../../models/claim';
+import { ClaimantEvidenceRequest, ClaimSummary, EnterTextRequestedAction, RequestedAction } from '../../models/claim';
 import { ClaimEvent } from '../../models/claim-event';
 
 export const STATUS_LABELS: Record<string, string> = {
@@ -119,6 +119,7 @@ export class ClaimStatusPage {
   private readonly refreshRequests = new Subject<void>();
   private documentSubmittedAt: number | null = null;
   private statusAtUpload: string | null = null;
+  private updatedAtAtUpload: string | null = null;
   correctionValue = '';
 
   constructor() {
@@ -151,7 +152,16 @@ export class ClaimStatusPage {
     this.uploading.set(true);
     this.documentNotice.set('');
     this.error.set('');
-    this.api.uploadDocument(this.claimId, request.documentType, request.file).subscribe({
+    const upload = request.requestedActionId
+      ? this.api.uploadDocument(
+        this.claimId,
+        request.documentType,
+        request.file,
+        request.requestedActionId,
+        request.idempotencyKey,
+      )
+      : this.api.uploadDocument(this.claimId, request.documentType, request.file);
+    upload.subscribe({
       next: () => {
         this.uploading.set(false);
         this.documentNotice.set('Document received. Rechecking your claim…');
@@ -159,6 +169,7 @@ export class ClaimStatusPage {
         this.pollingWarning.set('');
         this.documentSubmittedAt = Date.now();
         this.statusAtUpload = this.claim()?.status ?? 'awaiting_documents';
+        this.updatedAtAtUpload = this.claim()?.updated_at ?? null;
         this.refreshTimeline();
         this.refreshNow();
       },
@@ -167,6 +178,43 @@ export class ClaimStatusPage {
         this.error.set('We could not upload that document. Please check the file and try again.');
       },
     });
+  }
+
+  evidenceRequests(
+    requestedEvidence: ClaimantEvidenceRequest[],
+    actions: RequestedAction[] = [],
+  ): ClaimantEvidenceRequest[] {
+    const currentAction = actions[0];
+    if (currentAction?.action_type === 'upload_document') {
+      return [{
+        document_type: currentAction.document_type,
+        label: 'Replacement evidence',
+        instruction: currentAction.instruction,
+        satisfies_requirements: [],
+        replacement_required: true,
+        requested_action_id: currentAction.action_id,
+      }];
+    }
+    if (currentAction) return [];
+    return requestedEvidence.slice(0, 1);
+  }
+
+  textAction(actions: RequestedAction[] = []): EnterTextRequestedAction | null {
+    const current = actions[0];
+    return current?.action_type === 'enter_text' ? current : null;
+  }
+
+  workflowIndicator(status: string): { active: boolean; title: string; detail: string } {
+    if (this.rechecking() || ['new', 'intake_processing', 'review_processing', 'inspection_pending', 'inspection_scheduled'].includes(status)) {
+      return { active: true, title: 'FirstNotice is working', detail: this.rechecking() ? 'Rechecking your evidence…' : 'Processing your claim…' };
+    }
+    if (status === 'awaiting_documents') {
+      return { active: false, title: 'Waiting for your information', detail: 'Complete the action below when you are ready.' };
+    }
+    if (status === 'human_review_required') {
+      return { active: false, title: 'Waiting for adjuster review', detail: 'An adjuster is reviewing the current evidence.' };
+    }
+    return { active: false, title: 'Current step complete', detail: 'Your latest claim status is shown above.' };
   }
 
   refreshNow(): void {
@@ -185,6 +233,7 @@ export class ClaimStatusPage {
         this.documentNotice.set('Correction received. Rechecking your claim…');
         this.rechecking.set(true);
         this.statusAtUpload = this.claim()?.status ?? 'awaiting_documents';
+        this.updatedAtAtUpload = this.claim()?.updated_at ?? null;
         this.documentSubmittedAt = Date.now();
         this.refreshTimeline();
         this.refreshNow();
@@ -206,12 +255,23 @@ export class ClaimStatusPage {
     this.loading.set(false);
     this.error.set('');
     if (!previousStatus || previousStatus !== claim.status) this.refreshTimeline();
-    if (this.rechecking() && claim.status !== this.statusAtUpload) {
+    if (
+      this.rechecking()
+      && (
+        claim.status !== this.statusAtUpload
+        || (this.updatedAtAtUpload !== null && claim.updated_at !== this.updatedAtAtUpload)
+      )
+    ) {
       this.rechecking.set(false);
-      this.documentNotice.set('');
+      this.documentNotice.set(
+        claim.status === 'awaiting_documents'
+          ? 'We still need a usable document. Please review the request and try again.'
+          : '',
+      );
       this.pollingWarning.set('');
       this.documentSubmittedAt = null;
       this.statusAtUpload = null;
+      this.updatedAtAtUpload = null;
     } else if (
       this.rechecking()
       && this.documentSubmittedAt !== null

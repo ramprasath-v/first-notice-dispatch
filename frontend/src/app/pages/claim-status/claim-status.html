@@ -25,15 +25,27 @@
       }
     </nav>
 
+    @if (workflowIndicator(current.status); as indicator) {
+      <section class="workflow-indicator card" [class.active]="indicator.active" aria-live="polite">
+        <span class="indicator-dot" aria-hidden="true"></span>
+        <div><strong>{{ indicator.title }}</strong><small>{{ indicator.detail }}</small></div>
+      </section>
+    }
+
     @if (documentNotice()) { <div class="alert success-alert" role="status">{{ documentNotice() }}</div> }
     @if (pollingWarning()) { <div class="alert warning-alert" role="status">{{ pollingWarning() }}</div> }
     @if (error()) { <div class="alert error-alert" role="alert">{{ error() }}</div> }
 
     @if (current.status === 'awaiting_documents') {
-      <app-missing-documents [requests]="current.requested_evidence" [uploading]="uploading()" [processing]="rechecking()" (uploadDocument)="uploadDocument($event)" />
-      @for (action of current.requested_actions ?? []; track action.review_id + action.field_name) {
+      @if (evidenceRequests(current.requested_evidence, current.requested_actions); as requests) {
+        @if (requests.length) {
+          <app-missing-documents [requests]="requests" [uploading]="uploading()" [processing]="rechecking()" (uploadDocument)="uploadDocument($event)" />
+        }
+      }
+      @if (textAction(current.requested_actions); as action) {
         <section class="card correction-card">
-          <p class="kicker">Correction requested</p>
+          <p class="kicker">More information needed</p>
+          <p class="action-count">1 item needed to continue</p>
           <h2>{{ action.instruction }}</h2>
           <label class="field">
             <span>Your response</span>
@@ -42,6 +54,7 @@
           <button class="primary" type="button" [disabled]="uploading() || !correctionValue.trim()" (click)="submitCorrection(action.field_name)">
             {{ uploading() ? 'Submitting…' : 'Submit correction' }}
           </button>
+          <p class="supporting-copy">FirstNotice will automatically continue processing when this item is received.</p>
         </section>
       }
     }

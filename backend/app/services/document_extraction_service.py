@@ -11,6 +11,10 @@ SUPPORTED_RESUME_DOCUMENT_TYPES = {
     "license_plate_photo",
     "police_report_page",
 }
+SUPPORTED_DOCUMENT_EXTRACTION_TYPES = {
+    *SUPPORTED_RESUME_DOCUMENT_TYPES,
+    "damage_evidence",
+}
 
 
 class DocumentExtractionError(RuntimeError):
@@ -58,11 +62,16 @@ Rules:
    vehicle identity.
 3. For a police-report page, the page must be readable and relevant to the
    matched missing page.
-4. Report factual conflicts only when visible in this file and comparable with
+4. Independently list every supported capability visibly provided by an image:
+   license_plate_photo, vehicle_identity, and damage_evidence. The original
+   document type remains unchanged for audit purposes.
+5. Record concise factual evidence_findings visible in this file, including
+   damage location or tow condition when present. Do not infer liability.
+6. Report factual conflicts only when visible in this file and comparable with
    the supplied requirement. Do not invent values or sources.
-5. Do not create document requirements or choose workflow state.
-6. Do not decide liability, coverage, fraud, payout, approval, or denial.
-7. Return only DocumentExtractionResult.
+7. Do not create document requirements or choose workflow state.
+8. Do not decide liability, coverage, fraud, payout, approval, or denial.
+9. Return only DocumentExtractionResult.
 """.strip()
 
         try:
@@ -107,6 +116,7 @@ Rules:
 
 
 def _is_supported_document_type(document_type: str) -> bool:
-    return document_type in SUPPORTED_RESUME_DOCUMENT_TYPES or document_type.startswith(
-        "police_report_page_"
+    return (
+        document_type in SUPPORTED_DOCUMENT_EXTRACTION_TYPES
+        or document_type.startswith("police_report_page_")
     )

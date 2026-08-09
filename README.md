@@ -261,6 +261,35 @@ gcloud run deploy firstnotice-web --image="$IMAGE_URL" --region=us-central1 \
 
 Do not make dispatch public. Secret bindings and full resource provisioning are deployment-operator concerns and are intentionally not embedded with secret values in this README.
 
+### Dedicated demo Calendar setup
+
+Google Calendar and Gmail use the same dedicated demo account for easy judge verification, but they remain separate integrations:
+
+- **Calendar:** the runtime service account creates the inspection directly on a shared secondary calendar.
+- **Gmail:** the Gmail API separately sends review requests and final handoffs to `firstnotice.adjuster@gmail.com`.
+
+Configure the Calendar without invitations:
+
+1. Sign in to `firstnotice.adjuster@gmail.com`.
+2. Create the secondary calendar **FirstNotice Demo Inspections**.
+3. Share it with `firstnotice-runtime@firstnotice-ai.iam.gserviceaccount.com`.
+4. Grant **Make changes to events**.
+5. Copy the secondary calendar’s Calendar ID from Google Calendar settings.
+6. Set that ID only on `firstnotice-dispatch` as `GOOGLE_CALENDAR_ID`.
+7. Keep attendees disabled; the event is already created directly on the adjuster-owned calendar.
+8. Keep `sendUpdates=none`; Gmail remains the notification channel.
+
+```bash
+export GOOGLE_CALENDAR_ID='<calendar-id-copied-from-google-calendar-settings>'
+
+gcloud run services update firstnotice-dispatch \
+  --project=firstnotice-ai \
+  --region=us-central1 \
+  --update-env-vars="GOOGLE_CALENDAR_ENABLED=true,GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID}"
+```
+
+Do not configure an attendee or `sendUpdates=all`; that invitation path is unnecessary and previously caused a Calendar permission failure.
+
 ## Cost control
 
 Verified live configuration on August 7, 2026:

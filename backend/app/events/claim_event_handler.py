@@ -90,9 +90,10 @@ class ClaimEventHandler:
         if not should_process:
             try:
                 status, _ = self._ensure_inspection_dispatch_boundary(event)
+                self._ensure_human_review_boundary(event, status)
             except Exception as exc:
                 raise ClaimEventProcessingError(
-                    "Could not reconcile the inspection dispatch boundary.",
+                    "Could not reconcile a durable workflow boundary.",
                     retryable=True,
                 ) from exc
             return EventHandlingResult(
@@ -109,7 +110,7 @@ class ClaimEventHandler:
             status, inspection_ready_message_id = (
                 self._ensure_inspection_dispatch_boundary(event)
             )
-            review_request = self._request_human_review(event, status)
+            review_request = self._ensure_human_review_boundary(event, status)
             if review_request is not None:
                 route_result = {**route_result, "human_review": review_request}
             if inspection_ready_message_id is not None:
@@ -209,7 +210,7 @@ class ClaimEventHandler:
 
         raise NonRetryableEventError(f"Unsupported event type: {event.event_type}")
 
-    def _request_human_review(
+    def _ensure_human_review_boundary(
         self, event: ClaimEvent, status: str | None
     ) -> dict[str, str] | None:
         if status != "human_review_required" or self._human_review_service is None:

@@ -14,10 +14,12 @@ from app.models.claim_document import ClaimDocument, DocumentExtractionResult
 from app.models.intake_result import ImageEvidenceCapabilities, IntakeResult
 from app.models.review_result import (
     ClaimEvidenceMetadata,
+    CurrentEvidenceFinding,
     EvidenceConflict,
     MissingEvidence,
     OperationalIndicators,
     ReviewResult,
+    UnresolvedUncertainty,
     UnusableEvidence,
     UploadedEvidence,
 )
@@ -464,7 +466,20 @@ class ClaimReviewServiceTests(unittest.TestCase):
             }
         )
 
-        review = self.run_review(intake=uncertain_intake)
+        review = self.run_review(
+            intake=uncertain_intake,
+            model_review=ai_review(
+                operational_indicators=OperationalIndicators(
+                    high_operational_uncertainty=True
+                ),
+                unresolved_uncertainties=[
+                    UnresolvedUncertainty(
+                        uncertainty="The safe inspection route remains ambiguous.",
+                        sources=["accident-photo.jpg"],
+                    )
+                ],
+            ),
+        )
 
         self.assertEqual(review.missing_documents, [])
         self.assertEqual(review.unusable_evidence, [])
@@ -473,6 +488,437 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertEqual(
             review.human_review_reason,
             "High uncertainty affects the next operational routing step.",
+        )
+
+    def test_historical_uncertainty_count_alone_does_not_trigger_human_review(
+        self,
+    ) -> None:
+        historical = intake_result().model_copy(
+            update={
+                "uncertainties": [
+                    "Vehicle identity was unavailable.",
+                    "The license plate was not visible.",
+                    "The vehicle identifier could not be confirmed.",
+                ]
+            }
+        )
+
+        review = self.run_review(intake=historical)
+
+        self.assertEqual(review.unresolved_uncertainties, [])
+        self.assertEqual(review.intake_priority, "routine")
+        self.assertFalse(review.requires_human_review)
+
+    def test_current_cross_evidence_conflict_is_source_attributed(self) -> None:
+        metadata = complete_metadata(
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="police-report.pdf",
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="initial-damage.jpg",
+                ),
+                UploadedEvidence(
+                    evidence_type="license_plate_photo",
+                    filename="followup-identity.jpg",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="vehicle_identity",
+                    filename="followup-identity.jpg",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="followup-identity.jpg",
+                    usable=True,
+                    evidence_findings=["Readable plate and rear damage are visible."],
+                ),
+            ],
+            vehicle_identity_clear=True,
+        )
+        conflict = EvidenceConflict(
+            field="damage_location",
+            values=["rear damage", "severe front damage"],
+            sources=[
+                "police-report.pdf",
+                "initial-damage.jpg",
+                "followup-identity.jpg",
+            ],
+            reason=(
+                "The initial photo shows front damage while the report and "
+                "identified follow-up photo indicate rear damage."
+            ),
+        )
+        model_review = ai_review(
+            conflicts=[conflict],
+            current_evidence_findings=[
+                CurrentEvidenceFinding(
+                    source="police-report.pdf",
+                    finding="The report describes a rear-end collision and a drivable vehicle.",
+                ),
+                CurrentEvidenceFinding(
+                    source="initial-damage.jpg",
+                    finding="Severe front damage and a tow-truck condition are visible.",
+                ),
+                CurrentEvidenceFinding(
+                    source="followup-identity.jpg",
+                    finding="The plate is readable and rear damage is visible.",
+                ),
+            ],
+            unresolved_uncertainties=[
+                UnresolvedUncertainty(
+                    uncertainty="Whether the initial front-damage photo belongs to this claim.",
+                    sources=[
+                        "initial-damage.jpg",
+                        "police-report.pdf",
+                        "followup-identity.jpg",
+                    ],
+                )
+            ],
+            operational_indicators=OperationalIndicators(
+                high_operational_uncertainty=True
+            ),
+        )
+
+        review = self.run_review(metadata=metadata, model_review=model_review)
+
+        self.assertEqual(review.conflicts, [conflict])
+        self.assertEqual(
+            {finding.source for finding in review.current_evidence_findings},
+            {
+                "police-report.pdf",
+                "initial-damage.jpg",
+                "followup-identity.jpg",
+            },
+        )
+        self.assertTrue(review.requires_human_review)
+        self.assertEqual(review.intake_priority, "urgent_human_review")
+
+    def test_approved_fingerprint_suppresses_only_unchanged_current_issue(self) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type="police_report", filename="report.pdf",
+                document_id="DOC-REPORT", source_identity="document:DOC-REPORT",
+                document_type="police_report", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="rear.jpg",
+                document_id="DOC-REAR", source_identity="document:DOC-REAR",
+                document_type="damage_evidence", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="license_plate_photo", filename="front.jpg",
+                document_id="DOC-FRONT", source_identity="document:DOC-FRONT",
+                document_type="license_plate_photo", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="vehicle_identity", filename="front.jpg",
+                document_id="DOC-FRONT", source_identity="document:DOC-FRONT",
+                document_type="license_plate_photo", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="front.jpg",
+                document_id="DOC-FRONT", source_identity="document:DOC-FRONT",
+                document_type="license_plate_photo", usable=True,
+            ),
+        ]
+        metadata = complete_metadata(
+            uploaded_evidence=uploaded, vehicle_identity_clear=True
+        )
+        conflict = EvidenceConflict(
+            field="damage_location", values=["rear", "front"],
+            sources=["report.pdf", "rear.jpg", "front.jpg"],
+            reason="The front image conflicts with the corroborated rear damage.",
+        )
+        findings = [
+            CurrentEvidenceFinding(source="report.pdf", finding="Rear-end damage."),
+            CurrentEvidenceFinding(source="rear.jpg", finding="Rear damage visible."),
+            CurrentEvidenceFinding(source="front.jpg", finding="Front-end damage visible."),
+        ]
+        model = ai_review(
+            conflicts=[conflict], current_evidence_findings=findings,
+            unresolved_uncertainties=[UnresolvedUncertainty(
+                uncertainty="The front versus rear damage location remains unclear.",
+                sources=["report.pdf", "rear.jpg", "front.jpg"],
+            )],
+            operational_indicators=OperationalIndicators(
+                high_operational_uncertainty=True
+            ),
+        )
+
+        first = self.run_review(metadata=metadata, model_review=model)
+        fingerprint = first.source_aware_conflicts[0].fingerprint
+        approved = metadata.model_copy(
+            update={"approved_issue_fingerprints": [fingerprint]}
+        )
+        second = self.run_review(metadata=approved, model_review=model)
+
+        self.assertEqual(second.conflicts, [])
+        self.assertEqual(second.unresolved_uncertainties, [])
+        self.assertFalse(second.requires_human_review)
+
+    def test_flow_4_uncertainty_selects_corroborated_front_image(self) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type="police_report", filename="police-report.pdf",
+                document_id="DOC-REPORT", source_identity="document:DOC-REPORT",
+                document_type="police_report", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="vehicle_damage.jpg",
+                document_id="DOC-REAR", source_identity="document:DOC-REAR",
+                document_type="damage_evidence", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="license_plate_photo",
+                filename="vehicle_damage_front.jpg", document_id="DOC-FRONT",
+                source_identity="document:DOC-FRONT",
+                document_type="license_plate_photo", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="vehicle_identity",
+                filename="vehicle_damage_front.jpg", document_id="DOC-FRONT",
+                source_identity="document:DOC-FRONT",
+                document_type="license_plate_photo", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence",
+                filename="vehicle_damage_front.jpg", document_id="DOC-FRONT",
+                source_identity="document:DOC-FRONT",
+                document_type="license_plate_photo", usable=True,
+            ),
+        ]
+        findings = [
+            CurrentEvidenceFinding(
+                source="police-report.pdf", finding="Rear-end collision damage."
+            ),
+            CurrentEvidenceFinding(
+                source="vehicle_damage.jpg", finding="Rear damage is visible."
+            ),
+            CurrentEvidenceFinding(
+                source="vehicle_damage_front.jpg", finding="Front-end damage is visible."
+            ),
+        ]
+        model = ai_review(
+            conflicts=[], current_evidence_findings=findings,
+            unresolved_uncertainties=[UnresolvedUncertainty(
+                uncertainty=(
+                    "The relationship of the front-end vehicle in "
+                    "vehicle_damage_front.jpg to the rear-end collision vehicle "
+                    "in vehicle_damage.jpg is unclear."
+                ),
+                sources=["vehicle_damage.jpg", "vehicle_damage_front.jpg"],
+                source_attribution_incomplete=False,
+            )],
+            operational_indicators=OperationalIndicators(
+                high_operational_uncertainty=True
+            ),
+        )
+
+        review = self.run_review(
+            metadata=complete_metadata(
+                uploaded_evidence=uploaded, vehicle_identity_clear=True
+            ),
+            model_review=model,
+        )
+
+        self.assertTrue(review.requires_human_review)
+        self.assertEqual(review.conflicts, [])
+        self.assertEqual(
+            review.source_aware_uncertainties[0].selected_outlier_document_id,
+            "DOC-FRONT",
+        )
+
+    def test_changed_evidence_set_produces_new_review_fingerprint(self) -> None:
+        base = [
+            UploadedEvidence(
+                evidence_type="police_report", filename="report.pdf",
+                document_id="DOC-REPORT", source_identity="document:DOC-REPORT",
+                document_type="police_report", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="rear.jpg",
+                document_id="DOC-REAR", source_identity="document:DOC-REAR",
+                document_type="damage_evidence", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="front.jpg",
+                document_id="DOC-FRONT", source_identity="document:DOC-FRONT",
+                document_type="license_plate_photo", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="vehicle_identity", filename="front.jpg",
+                document_id="DOC-FRONT", source_identity="document:DOC-FRONT",
+                document_type="license_plate_photo", usable=True,
+            ),
+        ]
+        first_conflict = EvidenceConflict(
+            field="damage_location", values=["rear", "front"],
+            sources=["report.pdf", "rear.jpg", "front.jpg"], reason="Conflict.",
+        )
+        first_findings = [
+            CurrentEvidenceFinding(source="report.pdf", finding="Rear damage."),
+            CurrentEvidenceFinding(source="rear.jpg", finding="Rear damage."),
+            CurrentEvidenceFinding(source="front.jpg", finding="Front damage."),
+        ]
+        first = self.run_review(
+            metadata=complete_metadata(uploaded_evidence=base, vehicle_identity_clear=True),
+            model_review=ai_review(
+                conflicts=[first_conflict], current_evidence_findings=first_findings
+            ),
+        )
+        approved_fingerprint = first.source_aware_conflicts[0].fingerprint
+        added = UploadedEvidence(
+            evidence_type="damage_evidence", filename="new-rear.jpg",
+            document_id="DOC-NEW", source_identity="document:DOC-NEW",
+            document_type="damage_evidence", usable=True,
+        )
+        changed_conflict = first_conflict.model_copy(update={
+            "sources": ["report.pdf", "rear.jpg", "new-rear.jpg", "front.jpg"]
+        })
+        changed_findings = [
+            *first_findings,
+            CurrentEvidenceFinding(source="new-rear.jpg", finding="Rear damage."),
+        ]
+        changed_metadata = complete_metadata(
+            uploaded_evidence=[*base, added], vehicle_identity_clear=True,
+            approved_issue_fingerprints=[approved_fingerprint],
+        )
+
+        changed = self.run_review(
+            metadata=changed_metadata,
+            model_review=ai_review(
+                conflicts=[changed_conflict], current_evidence_findings=changed_findings
+            ),
+        )
+
+        self.assertNotEqual(
+            changed.source_aware_conflicts[0].fingerprint, approved_fingerprint
+        )
+        self.assertTrue(changed.requires_human_review)
+
+    def test_two_image_uncertainty_preserves_both_grounded_sources(self) -> None:
+        metadata = complete_metadata(
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="silver-suv.jpg",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="grey-sedan.jpg",
+                    usable=True,
+                ),
+            ],
+            vehicle_identity_clear=True,
+        )
+        uncertainty = UnresolvedUncertainty(
+            uncertainty="The two submitted photos show different vehicles.",
+            sources=["silver-suv.jpg", "grey-sedan.jpg"],
+        )
+
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                unresolved_uncertainties=[uncertainty],
+                operational_indicators=OperationalIndicators(
+                    high_operational_uncertainty=True
+                ),
+            ),
+        )
+
+        persisted = review.unresolved_uncertainties[0]
+        self.assertEqual(
+            persisted.sources, ["silver-suv.jpg", "grey-sedan.jpg"]
+        )
+        self.assertFalse(persisted.source_attribution_incomplete)
+
+    def test_cross_image_uncertainty_marks_incomplete_source_attribution(self) -> None:
+        metadata = complete_metadata(
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="silver-suv.jpg",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="grey-sedan.jpg",
+                    usable=True,
+                ),
+            ],
+            vehicle_identity_clear=True,
+        )
+
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                unresolved_uncertainties=[UnresolvedUncertainty(
+                    uncertainty="The two submitted photos show different vehicles.",
+                    sources=["silver-suv.jpg", "unmatched-second-photo.jpg"],
+                )],
+                operational_indicators=OperationalIndicators(
+                    high_operational_uncertainty=True
+                ),
+            ),
+        )
+
+        persisted = review.unresolved_uncertainties[0]
+        self.assertEqual(persisted.sources, ["silver-suv.jpg"])
+        self.assertTrue(persisted.source_attribution_incomplete)
+        self.assertTrue(review.requires_human_review)
+
+    def test_damage_conflict_waits_for_resolvable_identity_evidence_first(
+        self,
+    ) -> None:
+        metadata = complete_metadata(
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="police-report.pdf",
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="initial-damage.jpg",
+                    usable=True,
+                ),
+            ],
+            vehicle_identity_clear=False,
+        )
+        conflict = EvidenceConflict(
+            field="damage_location",
+            values=["rear", "front"],
+            sources=["police-report.pdf", "initial-damage.jpg"],
+            reason="The submitted sources show different damage locations.",
+        )
+
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                conflicts=[conflict],
+                operational_indicators=OperationalIndicators(
+                    high_operational_uncertainty=True
+                ),
+                unresolved_uncertainties=[
+                    UnresolvedUncertainty(
+                        uncertainty="The initial photo vehicle identity is unclear.",
+                        sources=["initial-damage.jpg", "police-report.pdf"],
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(
+            {item.type for item in review.missing_documents},
+            {"vehicle_identity", "license_plate_photo"},
+        )
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(
+            review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
         )
 
     def test_explicit_no_injury_overrides_unsupported_ai_indicator(self) -> None:
@@ -746,6 +1192,12 @@ class InitialImageCapabilityRegressionTests(unittest.TestCase):
             DocumentExtractionResult(
                 usable=True,
                 reason="The license plate is readable enough to verify identity.",
+                supported_capabilities=[
+                    "license_plate_photo",
+                    "vehicle_identity",
+                    "damage_evidence",
+                ],
+                evidence_findings=["The plate is readable and rear damage is visible."],
             ).model_dump_json()
         )
         resume_document = self.document.model_copy(
@@ -762,6 +1214,8 @@ class InitialImageCapabilityRegressionTests(unittest.TestCase):
         self.assertEqual(initial_review.unusable_evidence, [])
         self.assertTrue(resume_result.usable)
         self.assertEqual(resume_result.satisfies_requirement, "vehicle_identity")
+        self.assertIn("damage_evidence", resume_result.supported_capabilities)
+        self.assertIn("rear damage", resume_result.evidence_findings[0])
 
 
 if __name__ == "__main__":

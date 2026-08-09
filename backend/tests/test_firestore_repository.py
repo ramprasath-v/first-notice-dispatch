@@ -1,7 +1,8 @@
+import hashlib
 import re
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from google.api_core.exceptions import AlreadyExists, ServiceUnavailable
 
@@ -11,13 +12,19 @@ from app.models.inspection_appointment import InspectionAppointment, InspectionS
 from app.models.notification import AdjusterNotification
 from app.models.adjuster_packet import AdjusterPacket
 from app.domain.claim_status import ClaimStatus
-from app.models.review_result import ReviewResult
+from app.models.review_result import (
+    CurrentEvidenceFinding,
+    ReviewResult,
+    UnresolvedUncertainty,
+)
 from app.tools.firestore_repository import (
     FirestoreClaimRepository,
     FirestoreWriteError,
+    HumanReviewGeneration,
     generate_claim_id,
     intake_result_to_claim_fields,
 )
+from app.models.human_review import human_review_id
 
 
 def sample_intake_result() -> IntakeResult:
@@ -256,6 +263,18 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
             confidence=0.9,
             inspection_required=True,
             requires_human_review=False,
+            current_evidence_findings=[
+                CurrentEvidenceFinding(
+                    source="followup.jpg",
+                    finding="The plate is readable.",
+                )
+            ],
+            unresolved_uncertainties=[
+                UnresolvedUncertainty(
+                    uncertainty="Damage extent remains unclear.",
+                    sources=["followup.jpg"],
+                )
+            ],
         )
 
         status = self.repository.save_review_result(
@@ -267,11 +286,289 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         self.assertEqual(claim_update["status"], "inspection_pending")
         self.assertEqual(claim_update["review_status"], "completed")
         self.assertEqual(claim_update["missing_document_count"], 0)
+        self.assertEqual(
+            claim_update["current_evidence_findings"][0]["source"],
+            "followup.jpg",
+        )
+        self.assertEqual(
+            claim_update["uncertainties"], ["Damage extent remains unclear."]
+        )
         event = self.batch.create.call_args.args[1]
         self.assertEqual(event["action"], "claim_review_completed")
         self.assertEqual(event["from_status"], "review_processing")
         self.assertEqual(event["to_status"], "inspection_pending")
         self.batch.commit.assert_called_once_with()
+
+    def test_replacement_acceptance_and_supersession_share_review_batch(self) -> None:
+        snapshot = MagicMock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {
+            "status": "review_processing",
+            "requested_actions": [
+                {
+                    "action_id": "ACT-REPLACE",
+                    "action_type": "upload_document",
+                    "review_id": "HRV-1",
+                    "document_type": "damage_evidence",
+                    "instruction": "Upload the correct damage photo.",
+                    "replaces_document_id": "DOC-OLD",
+                }
+            ],
+            "replacement_upload_reservations": {
+                "ACT-REPLACE": {"status": "published"}
+            },
+        }
+        self.claim_ref.get.return_value = snapshot
+        review = ReviewResult(
+            intake_complete=True,
+            intake_priority="routine",
+            priority_reason="Current evidence is complete.",
+            confidence=0.9,
+            inspection_required=True,
+            requires_human_review=False,
+        )
+        replacement = ClaimDocument(
+            document_id="DOC-NEW",
+            claim_id="CLM-A1B2C3D4",
+            document_type="damage_evidence",
+            filename="correct.jpg",
+            status="validated",
+            received_at=datetime.now(timezone.utc),
+            requested_action_id="ACT-REPLACE",
+            replaces_document_id="DOC-OLD",
+            supported_capabilities=["damage_evidence"],
+        )
+
+        self.repository.save_review_result(
+            "CLM-A1B2C3D4",
+            review,
+            resume_document_id="DOC-NEW",
+            resume_idempotency_key="resume-key",
+            replacement_document=replacement,
+        )
+
+        claim_update = self.batch.update.call_args_list[0].args[1]
+        self.assertEqual(claim_update["requested_actions"], [])
+        self.assertEqual(claim_update["replacement_upload_reservations"], {})
+        document_updates = [call.args[1] for call in self.batch.update.call_args_list[1:]]
+        self.assertIn(
+            {
+                "status": "superseded",
+                "superseded_by_document_id": "DOC-NEW",
+            },
+            document_updates,
+        )
+        self.assertTrue(
+            any(update.get("status") == "validated" for update in document_updates)
+        )
+        self.batch.commit.assert_called_once_with()
+
+    def test_human_review_result_links_reserved_generation_atomically(self) -> None:
+        snapshot = MagicMock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {"status": "review_processing"}
+        self.claim_ref.get.return_value = snapshot
+        review = ReviewResult(
+            intake_complete=False,
+            intake_priority="urgent_human_review",
+            priority_reason="A consequential conflict requires review.",
+            confidence=0.7,
+            inspection_required=True,
+            requires_human_review=True,
+            human_review_reason="A consequential conflict requires review.",
+        )
+        generation = HumanReviewGeneration(
+            generation=2,
+            generation_key="CLM-A1B2C3D4:DOC-NEW:resume",
+            review_id=human_review_id("CLM-A1B2C3D4", 2),
+            created=True,
+        )
+
+        with patch.object(
+            self.repository,
+            "reserve_human_review_generation",
+            return_value=generation,
+        ):
+            self.repository.save_review_result(
+                "CLM-A1B2C3D4",
+                review,
+                review_generation_key=generation.generation_key,
+            )
+
+        claim_update = self.batch.update.call_args_list[0].args[1]
+        self.assertEqual(claim_update["current_human_review_generation"], 2)
+        self.assertEqual(
+            claim_update["current_human_review_id"], generation.review_id
+        )
+        event = self.batch.create.call_args.args[1]
+        self.assertEqual(event["details"]["review_generation"], 2)
+
+    def test_same_generation_key_reuses_cycle_without_incrementing(self) -> None:
+        key = "CLM-A1B2C3D4:DOC-NEW:resume"
+        key_hash = hashlib.sha256(key.encode()).hexdigest()
+        snapshot = MagicMock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {
+            "human_review_generation": 2,
+            "human_review_generations": {
+                key_hash: {
+                    "generation": 2,
+                    "generation_key": key,
+                    "review_id": human_review_id("CLM-A1B2C3D4", 2),
+                }
+            },
+        }
+        self.claim_ref.get.return_value = snapshot
+        transaction = MagicMock()
+        self.client.transaction.return_value = transaction
+
+        with patch(
+            "app.tools.firestore_repository.firestore.transactional",
+            side_effect=lambda function: function,
+        ):
+            reserved = self.repository.reserve_human_review_generation(
+                claim_id="CLM-A1B2C3D4",
+                generation_key=key,
+                make_current=True,
+            )
+
+        self.assertFalse(reserved.created)
+        self.assertEqual(reserved.generation, 2)
+        update = transaction.update.call_args.args[1]
+        self.assertEqual(update["human_review_generation"], 2)
+
+    def test_new_generation_key_after_cycle_one_reserves_cycle_two(self) -> None:
+        snapshot = MagicMock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {
+            "human_review_generation": 1,
+            "human_review_generations": {},
+        }
+        self.claim_ref.get.return_value = snapshot
+        transaction = MagicMock()
+        self.client.transaction.return_value = transaction
+
+        with patch(
+            "app.tools.firestore_repository.firestore.transactional",
+            side_effect=lambda function: function,
+        ):
+            reserved = self.repository.reserve_human_review_generation(
+                claim_id="CLM-A1B2C3D4",
+                generation_key="CLM-A1B2C3D4:DOC-NEW:resume",
+                floor_generation=1,
+                make_current=True,
+            )
+
+        self.assertTrue(reserved.created)
+        self.assertEqual(reserved.generation, 2)
+        self.assertEqual(reserved.review_id, human_review_id("CLM-A1B2C3D4", 2))
+
+    def test_replacement_upload_reservation_is_stable_for_duplicate_retry(self) -> None:
+        snapshot = MagicMock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {
+            "status": "awaiting_documents",
+            "requested_actions": [{
+                "action_id": "ACT-REPLACE",
+                "action_type": "upload_document",
+                "review_id": "HRV-1",
+                "document_type": "damage_evidence",
+                "instruction": "Upload the correct damage photo.",
+                "replaces_document_id": "DOC-OLD",
+            }],
+            "replacement_upload_reservations": {
+                "ACT-REPLACE": {
+                    "idempotency_key": "same-request-key",
+                    "document_id": "DOC-ONE",
+                    "event_id": "event-one",
+                    "correlation_id": "corr-one",
+                    "status": "published",
+                },
+            },
+        }
+        self.claim_ref.get.return_value = snapshot
+        transaction = MagicMock()
+        self.client.transaction.return_value = transaction
+
+        with patch(
+            "app.tools.firestore_repository.firestore.transactional",
+            side_effect=lambda function: function,
+        ):
+            reservation = self.repository.reserve_replacement_upload(
+                claim_id="CLM-A1B2C3D4",
+                action_id="ACT-REPLACE",
+                idempotency_key="same-request-key",
+            )
+
+        self.assertFalse(reservation.should_upload)
+        self.assertEqual(reservation.document_id, "DOC-ONE")
+        transaction.update.assert_not_called()
+
+    def test_concurrent_replacement_action_cannot_reserve_a_second_document(self) -> None:
+        snapshot = MagicMock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {
+            "status": "awaiting_documents",
+            "requested_actions": [{
+                "action_id": "ACT-REPLACE",
+                "action_type": "upload_document",
+                "review_id": "HRV-1",
+                "document_type": "damage_evidence",
+                "instruction": "Upload the correct damage photo.",
+                "replaces_document_id": "DOC-OLD",
+            }],
+            "replacement_upload_reservations": {
+                "ACT-REPLACE": {
+                    "idempotency_key": "first-request-key",
+                    "document_id": "DOC-FIRST",
+                    "event_id": "event-first",
+                    "correlation_id": "corr-first",
+                    "status": "uploading",
+                },
+            },
+        }
+        self.claim_ref.get.return_value = snapshot
+        transaction = MagicMock()
+        self.client.transaction.return_value = transaction
+
+        with patch(
+            "app.tools.firestore_repository.firestore.transactional",
+            side_effect=lambda function: function,
+        ), self.assertRaisesRegex(
+            FirestoreWriteError, "already active"
+        ):
+            self.repository.reserve_replacement_upload(
+                claim_id="CLM-A1B2C3D4",
+                action_id="ACT-REPLACE",
+                idempotency_key="second-request-key",
+            )
+
+        transaction.update.assert_not_called()
+
+    def test_late_upload_status_update_is_noop_after_action_consumption(self) -> None:
+        snapshot = MagicMock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {
+            "status": "inspection_pending",
+            "requested_actions": [],
+            "replacement_upload_reservations": {},
+        }
+        self.claim_ref.get.return_value = snapshot
+        transaction = MagicMock()
+        self.client.transaction.return_value = transaction
+
+        with patch(
+            "app.tools.firestore_repository.firestore.transactional",
+            side_effect=lambda function: function,
+        ):
+            self.repository.update_replacement_upload_status(
+                claim_id="CLM-A1B2C3D4",
+                action_id="ACT-REPLACE",
+                document_id="DOC-NEW",
+                status="published",
+            )
+
+        transaction.update.assert_not_called()
 
     def test_review_firestore_write_failure_is_surfaced(self) -> None:
         snapshot = MagicMock()

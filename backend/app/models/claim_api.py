@@ -4,6 +4,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.domain.claimant_evidence_requests import ClaimantEvidenceRequest
+from app.models.requested_action import RequestedAction
 
 
 class ClaimAcceptedResponse(BaseModel):
@@ -26,7 +27,7 @@ class ClaimSummaryResponse(BaseModel):
     intake_priority: str | None = None
     missing_documents: list[dict[str, Any]] = Field(default_factory=list)
     requested_evidence: list[ClaimantEvidenceRequest] = Field(default_factory=list)
-    requested_actions: list[dict[str, Any]] = Field(default_factory=list)
+    requested_actions: list[RequestedAction] = Field(default_factory=list)
     inspection: dict[str, Any] | None = None
     updated_at: datetime
 

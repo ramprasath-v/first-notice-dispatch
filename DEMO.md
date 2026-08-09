@@ -18,11 +18,13 @@ export DISPATCH_URL='https://<private-firstnotice-dispatch-url>'
 
 1. `$FIRSTNOTICE_WEB_URL`
 2. `firstnotice.adjuster@gmail.com` inbox
-3. **FirstNotice Demo Inspections** Google Calendar
+3. **FirstNotice Demo Inspections** Google Calendar while signed in to `firstnotice.adjuster@gmail.com`
 4. Google Cloud Console → Cloud Run → `firstnotice-dispatch` → Logs (troubleshooting only)
 5. A second browser tab reserved for the secure adjuster-review link
 
 Keep email previews and Cloud logs out of the recording until needed; they can expose irrelevant metadata.
+
+The Calendar should be the secondary calendar owned by the dedicated adjuster account and shared with `firstnotice-runtime@firstnotice-ai.iam.gserviceaccount.com` using **Make changes to events**. Calendar records the inspection directly; Gmail separately delivers review and handoff messages. No Calendar attendee or invitation is expected.
 
 ### Prepare rights-cleared assets
 

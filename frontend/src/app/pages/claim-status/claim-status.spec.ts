@@ -78,6 +78,131 @@ describe('ClaimStatusPage', () => {
     expect(fixture.nativeElement.querySelectorAll('.missing-item')).toHaveLength(1);
   });
 
+  it('renders enter_text as the existing text correction UI', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
+        field_name: 'policy_number', instruction: 'Please confirm your policy number.',
+      }],
+    })));
+    const fixture = await create();
+    expect(fixture.nativeElement.querySelector('.correction-card input')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
+    expect(fixture.nativeElement.querySelector('input[type=file]')).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('Please confirm your policy number');
+  });
+
+  it('renders upload_document as one file picker without a correction text box', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'upload_document', action_id: 'ACT-REPLACE', review_id: 'HRV-1',
+        document_type: 'damage_evidence', instruction: 'Please upload the correct damage photo.',
+        replaces_document_id: 'DOC-OLD',
+      }],
+    })));
+    const fixture = await create();
+    expect(fixture.nativeElement.querySelectorAll('input[type=file]')).toHaveLength(1);
+    expect(fixture.nativeElement.querySelector('.correction-card input')).toBeNull();
+  });
+
+  it('prioritizes a human-review action over ordinary missing evidence', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_evidence: awaitingClaim.requested_evidence,
+      requested_actions: [{
+        action_type: 'upload_document', action_id: 'ACT-REPLACE', review_id: 'HRV-1',
+        document_type: 'damage_evidence', instruction: 'Please upload the correct damage photo.',
+        replaces_document_id: 'DOC-OLD',
+      }],
+    })));
+    const fixture = await create();
+    expect(fixture.nativeElement.querySelectorAll('input[type=file]')).toHaveLength(1);
+    expect(fixture.nativeElement.textContent).toContain('Please upload the correct damage photo');
+    expect(fixture.nativeElement.textContent).not.toContain("vehicle's license plate");
+  });
+
+  it('shows only the next ordinary evidence action and advances after reevaluation', async () => {
+    const twoRequests = [
+      ...awaitingClaim.requested_evidence,
+      {
+        document_type: 'police_report', label: 'Police report',
+        instruction: 'Please upload the police report.', satisfies_requirements: ['police_report'],
+        replacement_required: false,
+      },
+    ];
+    api.getClaim
+      .mockReturnValueOnce(of(claim('awaiting_documents', { requested_evidence: twoRequests })))
+      .mockReturnValueOnce(of(claim('awaiting_documents', { requested_evidence: twoRequests.slice(1) })));
+    const fixture = await create();
+    expect(fixture.nativeElement.querySelectorAll('input[type=file]')).toHaveLength(1);
+    expect(fixture.nativeElement.textContent).toContain("vehicle's license plate");
+
+    fixture.componentInstance.refreshNow();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelectorAll('input[type=file]')).toHaveLength(1);
+    expect(fixture.nativeElement.textContent).toContain('Please upload the police report');
+  });
+
+  it('shows waiting indicators without a spinner for claimant and adjuster waits', async () => {
+    const fixture = await create();
+    expect(fixture.nativeElement.textContent).toContain('Waiting for your information');
+    expect(fixture.nativeElement.querySelector('.workflow-indicator').classList.contains('active')).toBe(false);
+
+    api.getClaim.mockReturnValue(of(claim('human_review_required')));
+    fixture.componentInstance.refreshNow();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Waiting for adjuster review');
+    expect(fixture.nativeElement.querySelector('.workflow-indicator').classList.contains('active')).toBe(false);
+  });
+
+  it('sends requested_action_id and resumes polling for replacement upload', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'upload_document', action_id: 'ACT-REPLACE', review_id: 'HRV-1',
+        document_type: 'damage_evidence', instruction: 'Upload the correct damage photo.',
+        replaces_document_id: 'DOC-OLD',
+      }],
+    })));
+    const fixture = await create();
+    const callsBeforeUpload = api.getClaim.mock.calls.length;
+    fixture.componentInstance.uploadDocument({
+      documentType: 'damage_evidence', file: new File(['x'], 'correct.jpg'),
+      requestedActionId: 'ACT-REPLACE', idempotencyKey: 'stable-upload-key',
+    });
+
+    expect(api.uploadDocument).toHaveBeenCalledWith(
+      'CLM-ABC12345', 'damage_evidence', expect.any(File),
+      'ACT-REPLACE', 'stable-upload-key',
+    );
+    expect(api.getClaim.mock.calls.length).toBe(callsBeforeUpload + 1);
+    expect(fixture.componentInstance.rechecking()).toBe(true);
+  });
+
+  it('makes an unusable replacement actionable again after same-state review completion', async () => {
+    const replacementClaim = claim('awaiting_documents', {
+      updated_at: '2026-08-07T12:00:00Z',
+      requested_actions: [{
+        action_type: 'upload_document', action_id: 'ACT-REPLACE', review_id: 'HRV-1',
+        document_type: 'damage_evidence', instruction: 'Upload the correct damage photo.',
+        replaces_document_id: 'DOC-OLD',
+      }],
+    });
+    api.getClaim
+      .mockReturnValueOnce(of(replacementClaim))
+      .mockReturnValueOnce(of(replacementClaim))
+      .mockReturnValueOnce(of({ ...replacementClaim, updated_at: '2026-08-07T12:01:00Z' }));
+    const fixture = await create();
+    fixture.componentInstance.uploadDocument({
+      documentType: 'damage_evidence', file: new File(['x'], 'blurry.jpg'),
+      requestedActionId: 'ACT-REPLACE', idempotencyKey: 'stable-upload-key',
+    });
+    vi.advanceTimersByTime(3000);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.rechecking()).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('still need a usable document');
+    expect(fixture.nativeElement.querySelector('.file-button').classList.contains('disabled')).toBe(false);
+  });
+
   it('shows Analyzed as the current waiting stage for awaiting_documents', async () => {
     const fixture = await create();
     const steps = fixture.nativeElement.querySelectorAll('.step');

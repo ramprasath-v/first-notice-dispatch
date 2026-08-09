@@ -6,6 +6,17 @@ from pydantic import BaseModel, Field, model_validator
 class UploadedEvidence(BaseModel):
     evidence_type: str = Field(description="Deterministic evidence category.")
     filename: str = Field(description="Uploaded filename; never the file contents.")
+    document_id: str | None = Field(
+        default=None, description="Internal immutable evidence identity."
+    )
+    source_identity: str | None = Field(
+        default=None, description="Stable internal source identity."
+    )
+    document_type: str | None = Field(
+        default=None, description="Original audit document type."
+    )
+    evidence_generation: str | None = None
+    status: str | None = None
     usable: bool | None = Field(
         default=None,
         description="Known usability, or null when Gemini must assess quality.",
@@ -13,6 +24,10 @@ class UploadedEvidence(BaseModel):
     quality_observations: list[str] = Field(
         default_factory=list,
         description="Known quality observations supplied by the intake workflow.",
+    )
+    evidence_findings: list[str] = Field(
+        default_factory=list,
+        description="Current factual observations attributed to this file.",
     )
     page_count: int | None = Field(default=None, ge=1)
     expected_page_count: int | None = Field(default=None, ge=1)
@@ -27,6 +42,7 @@ class ClaimEvidenceMetadata(BaseModel):
     safety_concern: bool = False
     significant_damage: bool = False
     known_conflicts: list["EvidenceConflict"] = Field(default_factory=list)
+    approved_issue_fingerprints: list[str] = Field(default_factory=list)
 
 
 class MissingEvidence(BaseModel):
@@ -52,6 +68,52 @@ class EvidenceConflict(BaseModel):
     reason: str = Field(description="Why the conflict requires resolution.")
 
 
+class ConflictSourceAssertion(BaseModel):
+    field: str
+    value: str
+    source_identity: str
+    filename: str
+    document_id: str | None = None
+    document_type: str | None = None
+    replaceable: bool = False
+    evidence_generation: str | None = None
+
+
+class SourceAwareConflict(BaseModel):
+    fingerprint: str
+    field: str
+    assertions: list[ConflictSourceAssertion] = Field(default_factory=list)
+    selected_outlier_document_id: str | None = None
+
+
+class SourceAwareUncertainty(BaseModel):
+    fingerprint: str
+    category: str
+    assertions: list[ConflictSourceAssertion] = Field(default_factory=list)
+    selected_outlier_document_id: str | None = None
+
+
+class CurrentEvidenceFinding(BaseModel):
+    source: str = Field(description="Submitted filename supporting this finding.")
+    finding: str = Field(description="Current factual observation from that source.")
+
+
+class UnresolvedUncertainty(BaseModel):
+    uncertainty: str = Field(description="Current operational ambiguity.")
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Submitted filenames supporting or giving rise to the ambiguity.",
+    )
+    source_attribution_incomplete: bool = Field(
+        default=False,
+        description=(
+            "True when a cross-evidence ambiguity could not be attributed to "
+            "every artifact it compares."
+        ),
+    )
+    fingerprint: str | None = None
+
+
 class OperationalIndicators(BaseModel):
     possible_injury: bool = False
     safety_concern: bool = False
@@ -68,6 +130,16 @@ class ReviewResult(BaseModel):
     missing_documents: list[MissingEvidence] = Field(default_factory=list)
     unusable_evidence: list[UnusableEvidence] = Field(default_factory=list)
     conflicts: list[EvidenceConflict] = Field(default_factory=list)
+    source_aware_conflicts: list[SourceAwareConflict] = Field(default_factory=list)
+    source_aware_uncertainties: list[SourceAwareUncertainty] = Field(
+        default_factory=list
+    )
+    current_evidence_findings: list[CurrentEvidenceFinding] = Field(
+        default_factory=list
+    )
+    unresolved_uncertainties: list[UnresolvedUncertainty] = Field(
+        default_factory=list
+    )
     requires_human_review: bool
     human_review_reason: str | None = None
     operational_indicators: OperationalIndicators = Field(
@@ -104,6 +176,22 @@ def review_result_from_claim(claim: dict[str, object]) -> ReviewResult:
         conflicts=[
             EvidenceConflict.model_validate(item)
             for item in claim.get("conflicts", [])
+        ],
+        source_aware_conflicts=[
+            SourceAwareConflict.model_validate(item)
+            for item in claim.get("source_aware_conflicts", [])
+        ],
+        source_aware_uncertainties=[
+            SourceAwareUncertainty.model_validate(item)
+            for item in claim.get("source_aware_uncertainties", [])
+        ],
+        current_evidence_findings=[
+            CurrentEvidenceFinding.model_validate(item)
+            for item in claim.get("current_evidence_findings", [])
+        ],
+        unresolved_uncertainties=[
+            UnresolvedUncertainty.model_validate(item)
+            for item in claim.get("unresolved_uncertainties", [])
         ],
         requires_human_review=bool(claim.get("requires_human_review", False)),
         human_review_reason=claim.get("human_review_reason"),

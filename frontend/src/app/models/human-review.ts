@@ -14,8 +14,25 @@ export interface HumanReview {
   status: 'pending' | 'approved' | 'correction_requested' | 'expired';
   reason: string;
   briefing: HumanReviewBriefing;
+  source_references?: EvidenceSourceReference[];
+  generation?: number;
+  recommended_remediation: RecommendedRemediation;
   expires_at: string;
   decision_at?: string | null;
+}
+
+export interface EvidenceSourceReference {
+  filename: string;
+  document_type: string;
+}
+
+export interface RecommendedRemediation {
+  type: 'enter_text' | 'upload_document';
+  label: string;
+  instruction: string;
+  field_name?: string | null;
+  document_type?: string | null;
+  can_request: boolean;
 }
 
 export interface HumanReviewDecision {

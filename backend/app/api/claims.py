@@ -72,12 +72,18 @@ def create_claims_router(
     def add_claim_document(
         claim_id: str,
         document_type: str = Form(..., min_length=1, max_length=64),
+        requested_action_id: str | None = Form(default=None, max_length=128),
+        idempotency_key: str | None = Header(
+            default=None, alias="X-Idempotency-Key", max_length=128
+        ),
         file: UploadFile = File(...),
     ) -> DocumentAcceptedResponse:
         try:
             return get_service().add_missing_document(
                 claim_id=claim_id,
                 document_type=document_type,
+                requested_action_id=requested_action_id,
+                idempotency_key=idempotency_key,
                 evidence=_evidence_upload(file),
             )
         except ClaimNotFoundError as exc:

@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass
 from datetime import timezone
 from typing import BinaryIO
+from uuid import uuid4
 
 from app.events.claim_events import (
     ClaimDocumentReceivedEvent,
@@ -17,6 +18,7 @@ from app.models.claim_api import (
     DocumentAcceptedResponse,
 )
 from app.models.claim_document import ClaimDocument
+from app.models.requested_action import parse_requested_actions
 from app.services.claim_storage_service import (
     ClaimStorageService,
     ClaimStorageValidationError,
@@ -161,10 +163,60 @@ class ClaimSubmissionService:
         claim_id: str,
         document_type: str,
         evidence: EvidenceUpload,
+        requested_action_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> DocumentAcceptedResponse:
         if self._repository.get_claim(claim_id) is None:
             raise ClaimNotFoundError(f"Claim {claim_id} does not exist.")
-        _validate_resume_document_type(document_type)
+        reservation = None
+        replaces_document_id = None
+        if requested_action_id:
+            if not idempotency_key:
+                raise ClaimStorageValidationError(
+                    "X-Idempotency-Key is required for replacement evidence."
+                )
+            _validate_idempotency_key(idempotency_key)
+            try:
+                reservation = self._repository.reserve_replacement_upload(
+                    claim_id=claim_id,
+                    action_id=requested_action_id,
+                    idempotency_key=idempotency_key,
+                )
+            except Exception as exc:
+                raise ClaimStorageValidationError(str(exc)) from exc
+            document_type = reservation.action.document_type
+            replaces_document_id = reservation.action.replaces_document_id
+            if not reservation.should_upload:
+                if reservation.status == "stored":
+                    event = ClaimDocumentReceivedEvent(
+                        event_id=reservation.event_id,
+                        event_type="claim.document.received",
+                        claim_id=claim_id,
+                        correlation_id=reservation.correlation_id,
+                        source="claimant-api",
+                        payload=DocumentReceivedPayload(
+                            document_id=reservation.document_id
+                        ),
+                    )
+                    self._publisher.publish(event)
+                    self._repository.update_replacement_upload_status(
+                        claim_id=claim_id,
+                        action_id=requested_action_id,
+                        document_id=reservation.document_id,
+                        status="published",
+                    )
+                return DocumentAcceptedResponse(
+                    claim_id=claim_id,
+                    document_id=reservation.document_id,
+                    status=(
+                        "received"
+                        if reservation.status in {"stored", "published"}
+                        else "processing"
+                    ),
+                    event_id=reservation.event_id,
+                )
+        else:
+            _validate_resume_document_type(document_type)
         prepared = self._prepare_evidence(
             [
                 EvidenceUpload(
@@ -175,16 +227,42 @@ class ClaimSubmissionService:
                 )
             ]
         )[0]
-        document_id = generate_document_id()
+        document_id = (
+            reservation.document_id if reservation else generate_document_id()
+        )
         event = ClaimDocumentReceivedEvent(
+            event_id=(reservation.event_id if reservation else str(uuid4())),
             event_type="claim.document.received",
             claim_id=claim_id,
+            correlation_id=(
+                reservation.correlation_id if reservation else str(uuid4())
+            ),
             source="claimant-api",
             payload=DocumentReceivedPayload(document_id=document_id),
         )
         try:
-            self._store_document(claim_id, prepared, document_id=document_id)
+            self._store_document(
+                claim_id,
+                prepared,
+                document_id=document_id,
+                requested_action_id=requested_action_id,
+                replaces_document_id=replaces_document_id,
+            )
+            if reservation:
+                self._repository.update_replacement_upload_status(
+                    claim_id=claim_id,
+                    action_id=requested_action_id,
+                    document_id=document_id,
+                    status="stored",
+                )
         except Exception as exc:
+            if reservation:
+                self._repository.update_replacement_upload_status(
+                    claim_id=claim_id,
+                    action_id=requested_action_id,
+                    document_id=document_id,
+                    status="retry_required",
+                )
             self._repository.append_claim_event(
                 claim_id,
                 action="claim_document_upload_failed",
@@ -205,6 +283,13 @@ class ClaimSubmissionService:
             ) from exc
         try:
             self._publisher.publish(event)
+            if reservation:
+                self._repository.update_replacement_upload_status(
+                    claim_id=claim_id,
+                    action_id=requested_action_id,
+                    document_id=document_id,
+                    status="published",
+                )
         except Exception as exc:
             self._repository.append_claim_event(
                 claim_id,
@@ -251,7 +336,9 @@ class ClaimSubmissionService:
                 claim.get("missing_documents", []),
                 claim.get("unusable_evidence", []),
             ),
-            requested_actions=list(claim.get("requested_actions", [])),
+            requested_actions=parse_requested_actions(
+                claim.get("requested_actions", [])
+            ),
             inspection=(
                 appointment.model_dump(mode="python") if appointment else None
             ),
@@ -310,6 +397,8 @@ class ClaimSubmissionService:
         item: PreparedEvidence,
         *,
         document_id: str | None = None,
+        requested_action_id: str | None = None,
+        replaces_document_id: str | None = None,
     ) -> str:
         document_id = document_id or generate_document_id()
         stored = self._storage.upload_claim_document(
@@ -323,6 +412,8 @@ class ClaimSubmissionService:
                 document_id=document_id,
                 claim_id=claim_id,
                 document_type=item.document_type,
+                requested_action_id=requested_action_id,
+                replaces_document_id=replaces_document_id,
                 filename=stored.filename,
                 content_type=stored.content_type,
                 storage_path=stored.gs_uri,

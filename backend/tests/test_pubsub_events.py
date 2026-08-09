@@ -236,6 +236,24 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         ready = self.publisher.publish.call_args.args[0]
         self.assertEqual(ready.event_id, inspection_ready_event_id(CLAIM_ID))
 
+    async def test_duplicate_event_reconciles_missing_human_review_checkpoint(self) -> None:
+        self.repository.begin_claim_event.return_value = False
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "human_review_required",
+            "current_human_review_generation": 2,
+            "current_human_review_id": "HRV-CYCLE-2",
+        }
+
+        result = await self.handler.handle(submitted_event())
+
+        self.assertTrue(result.duplicate)
+        self.coordinator.process_submitted_claim.assert_not_awaited()
+        self.resume.resume.assert_not_called()
+        self.human_review_service.ensure_review_requested.assert_called_once_with(
+            CLAIM_ID, correlation_id="corr-123"
+        )
+
     async def test_correction_resume_uses_same_inspection_dispatch_boundary(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,

@@ -109,9 +109,9 @@ class ClaimWorkflowToolAdapter:
             )
 
         documents = self.repository.get_documents(claim_id)
-        active_documents = [
+        active_documents = sorted([
             document for document in documents if document.status != "superseded"
-        ]
+        ], key=lambda document: document.document_id)
         intake_result = intake_result_from_claim(claim)
         metadata = build_initial_review_metadata(
             intake_result,
@@ -140,7 +140,11 @@ class ClaimWorkflowToolAdapter:
             metadata,
             evidence_parts=evidence_parts,
         )
-        self.repository.save_review_result(claim_id, review_result)
+        self.repository.save_review_result(
+            claim_id,
+            review_result,
+            review_generation_key=f"{claim_id}:submitted-review:v1",
+        )
         return self.get_claim_state(claim_id)
 
     def request_missing_evidence(self, claim_id: str) -> dict[str, Any]:
@@ -202,7 +206,7 @@ def build_initial_review_metadata(
     evidence_by_key: dict[tuple[str, str], UploadedEvidence] = {}
     matched_image_facts: list[ImageEvidenceCapabilities] = []
 
-    for document in documents:
+    for document in sorted(documents, key=lambda item: item.document_id):
         fact = _capabilities_for_document(
             document, intake_result.image_evidence_capabilities
         )
@@ -224,6 +228,11 @@ def build_initial_review_metadata(
         evidence_by_key[(document.filename, document.document_type)] = UploadedEvidence(
             evidence_type=document.document_type,
             filename=document.filename,
+            document_id=document.document_id,
+            source_identity=f"document:{document.document_id}",
+            document_type=document.document_type,
+            evidence_generation=document.document_id,
+            status=document.status,
             usable=usable,
             quality_observations=list(dict.fromkeys(observations)),
         )
@@ -232,6 +241,11 @@ def build_initial_review_metadata(
                 evidence_by_key[(document.filename, capability)] = UploadedEvidence(
                     evidence_type=capability,
                     filename=document.filename,
+                    document_id=document.document_id,
+                    source_identity=f"document:{document.document_id}",
+                    document_type=document.document_type,
+                    evidence_generation=document.document_id,
+                    status=document.status,
                     usable=True,
                     quality_observations=list(
                         dict.fromkeys(fact.quality_observations)
@@ -248,8 +262,8 @@ def build_initial_review_metadata(
     )
     identity_clear = (
         True
-        if identity_supported or (dedicated_plate and not matched_image_facts)
-        else False if matched_image_facts else None
+        if identity_supported
+        else False if matched_image_facts or dedicated_plate else None
     )
     known_conflicts = []
     if (
@@ -270,7 +284,9 @@ def build_initial_review_metadata(
             )
         )
     return ClaimEvidenceMetadata(
-        uploaded_evidence=list(evidence_by_key.values()),
+        uploaded_evidence=[
+            evidence_by_key[key] for key in sorted(evidence_by_key)
+        ],
         vehicle_identity_clear=identity_clear,
         known_conflicts=known_conflicts,
     )

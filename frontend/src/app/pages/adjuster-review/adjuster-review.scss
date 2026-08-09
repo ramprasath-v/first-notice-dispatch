@@ -9,7 +9,22 @@ h3 { font-size: .9rem; margin: 1.25rem 0 .4rem; color: #35645c; }
 .claim-heading strong { font-size: 1.2rem; }
 .status { align-self: center; color: #785916 !important; background: #fff3c8; border-radius: 99px; padding: .45rem .7rem; }
 .briefing { border-top: 1px solid #dce6e3; margin-top: 1.5rem; }
+.comparison-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: .8rem; margin-top: 1.5rem; }
+.comparison-grid article { padding: 1rem; border: 1px solid #dce6e3; border-radius: 12px; background: #f8fbfa; }
+.comparison-grid span { color: #35645c; font-size: .76rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.comparison-grid p { margin: .55rem 0 0; line-height: 1.45; }
+.recommendation { margin-top: 1.5rem; padding: 1.2rem; border-left: 4px solid #28766a; border-radius: 10px; background: #edf7f4; }
+.recommendation h2 { margin: .25rem 0 .4rem; }
+.recommendation p:last-child { margin-bottom: 0; }
+.analysis-details { margin-top: 1.2rem; border: 1px solid #dce6e3; border-radius: 10px; }
+.analysis-details summary { padding: .9rem 1rem; cursor: pointer; color: #275d55; font-weight: 750; }
+.analysis-details .briefing { margin: 0; padding: 0 1rem 1rem; }
 ul { padding-left: 1.25rem; line-height: 1.55; }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.2rem; }
 .boundary, .muted { color: #667b76; font-size: .82rem; margin-top: 1rem; }
 small { color: #73857f; font-weight: 500; }
+@media (max-width: 560px) {
+  .claim-heading { align-items: flex-start; flex-direction: column; }
+  .actions { display: grid; }
+  .actions button { width: 100%; }
+}

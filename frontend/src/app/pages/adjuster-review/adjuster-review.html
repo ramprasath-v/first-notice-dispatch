@@ -18,22 +18,46 @@
         <p>{{ item.reason }}</p>
       </section>
 
-      <section class="briefing">
-        <h2>Workflow briefing</h2>
-        <p>{{ item.briefing.summary }}</p>
-        @if (item.briefing.known_facts.length) {
-          <h3>Known facts</h3>
-          <ul>@for (fact of item.briefing.known_facts; track fact) { <li>{{ fact }}</li> }</ul>
+      @if (comparisonFacts().length) {
+        <section class="comparison-grid" aria-label="Evidence comparison">
+          @for (fact of comparisonFacts(); track fact.source + fact.finding) {
+            <article>
+              <span>{{ fact.source }}</span>
+              <p>{{ fact.finding }}</p>
+            </article>
+          }
+        </section>
+      }
+
+      <section class="recommendation" aria-labelledby="recommendation-title">
+        <p class="kicker" id="recommendation-title">AI recommendation</p>
+        <h2>{{ item.recommended_remediation.label }}</h2>
+        <p>{{ item.recommended_remediation.instruction }}</p>
+        @if (!item.recommended_remediation.can_request) {
+          <p class="muted">FirstNotice found multiple possible targets and will not choose one automatically.</p>
         }
-        @if (item.briefing.conflicts.length) {
-          <h3>Conflicts</h3>
-          <ul>@for (conflict of item.briefing.conflicts; track conflict) { <li>{{ conflict }}</li> }</ul>
-        }
-        <h3>What to verify</h3>
-        <ul>@for (question of item.briefing.unresolved_questions; track question) { <li>{{ question }}</li> }</ul>
-        <h3>Recommended next step</h3>
-        <p>{{ item.briefing.recommended_next_action }}</p>
       </section>
+
+      <details class="analysis-details">
+        <summary>View AI analysis</summary>
+        <section class="briefing">
+          <p>{{ item.briefing.summary }}</p>
+          @if (item.briefing.conflicts.length) {
+            <h3>Conflicts</h3>
+            <ul>@for (conflict of item.briefing.conflicts; track conflict) { <li>{{ conflict }}</li> }</ul>
+          }
+          <h3>What to verify</h3>
+          <ul>@for (question of item.briefing.unresolved_questions; track question) { <li>{{ question }}</li> }</ul>
+          @if ((item.source_references ?? []).length) {
+            <h3>Evidence sources</h3>
+            <ul>
+              @for (source of item.source_references ?? []; track source.filename) {
+                <li>{{ source.filename }} · {{ humanize(source.document_type) }}</li>
+              }
+            </ul>
+          }
+        </section>
+      </details>
 
       @if (completedMessage()) {
         <div class="alert success-alert" role="status">{{ completedMessage() }}</div>
@@ -47,8 +71,10 @@
           <button class="primary" type="button" [disabled]="deciding()" (click)="approve()">
             {{ deciding() ? 'Recording…' : 'Approve & Continue' }}
           </button>
-          <button class="secondary" type="button" [disabled]="deciding()" (click)="requestCorrection()">
-            Request Correction
+          <button class="secondary" type="button"
+            [disabled]="deciding() || !item.recommended_remediation.can_request"
+            (click)="requestMoreInformation()">
+            Request More Information
           </button>
         </div>
         <p class="boundary">This decision resumes operational intake only. It does not approve coverage, liability, or payment.</p>
