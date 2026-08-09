@@ -21,22 +21,24 @@ const claim = (status: string, extra: Partial<ClaimSummary> = {}): ClaimSummary 
 });
 
 const awaitingClaim = claim('awaiting_documents', {
-  missing_documents: [
-    { type: 'vehicle_identity' },
-    { type: 'license_plate_photo' },
+  missing_documents: [{ type: 'vehicle_identity' }, { type: 'license_plate_photo' }],
+  requested_evidence: [
+    {
+      document_type: 'license_plate_photo',
+      label: 'License Plate Photo',
+      instruction: "Please upload a clear photo of your vehicle's license plate.",
+      satisfies_requirements: ['license_plate_photo', 'vehicle_identity'],
+      replacement_required: false,
+    },
   ],
-  requested_evidence: [{
-    document_type: 'license_plate_photo',
-    label: 'License Plate Photo',
-    instruction: "Please upload a clear photo of your vehicle's license plate.",
-    satisfies_requirements: ['license_plate_photo', 'vehicle_identity'],
-    replacement_required: false,
-  }],
 });
 
 describe('ClaimStatusPage', () => {
   const api = {
-    getClaim: vi.fn(), getClaimEvents: vi.fn(), uploadDocument: vi.fn(), submitCorrection: vi.fn(),
+    getClaim: vi.fn(),
+    getClaimEvents: vi.fn(),
+    uploadDocument: vi.fn(),
+    submitCorrection: vi.fn(),
   };
 
   beforeEach(() => {
@@ -45,7 +47,9 @@ describe('ClaimStatusPage', () => {
     api.getClaim.mockReturnValue(of(awaitingClaim));
     api.getClaimEvents.mockReturnValue(of([]));
     api.uploadDocument.mockReturnValue(of({ status: 'received' }));
-    api.submitCorrection.mockReturnValue(of({ claim_id: 'CLM-ABC12345', event_id: 'evt', status: 'received' }));
+    api.submitCorrection.mockReturnValue(
+      of({ claim_id: 'CLM-ABC12345', event_id: 'evt', status: 'received' }),
+    );
   });
 
   afterEach(() => vi.useRealTimers());
@@ -55,7 +59,10 @@ describe('ClaimStatusPage', () => {
       imports: [ClaimStatusPage],
       providers: [
         { provide: ClaimApiService, useValue: api },
-        { provide: ActivatedRoute, useValue: { snapshot: { paramMap: { get: () => 'CLM-ABC12345' } } } },
+        {
+          provide: ActivatedRoute,
+          useValue: { snapshot: { paramMap: { get: () => 'CLM-ABC12345' } } },
+        },
       ],
     }).compileComponents();
     const fixture = TestBed.createComponent(ClaimStatusPage);
@@ -75,46 +82,105 @@ describe('ClaimStatusPage', () => {
   it('renders awaiting_documents with one upload action for equivalent identity gaps', async () => {
     const fixture = await create();
     expect(fixture.nativeElement.textContent).toContain('More information needed');
-    expect(fixture.nativeElement.textContent).toContain("clear photo of your vehicle's license plate");
+    expect(fixture.nativeElement.textContent).toContain(
+      "clear photo of your vehicle's license plate",
+    );
+    expect(fixture.nativeElement.querySelectorAll('.missing-item')).toHaveLength(1);
+    expect(fixture.nativeElement.textContent).not.toContain('Why we need this');
+    expect(fixture.nativeElement.textContent).toContain('What to do');
+  });
+
+  it('renders the backend-grounded title, reason, and upload instruction', async () => {
+    api.getClaim.mockReturnValue(
+      of({
+        ...awaitingClaim,
+        action_display: {
+          title: 'Vehicle identity not verified',
+          explanation:
+            'The submitted damage photo does not show a readable license plate, so FirstNotice cannot verify the vehicle identity.',
+        },
+      }),
+    );
+
+    const fixture = await create();
+
+    expect(fixture.nativeElement.textContent).toContain('Vehicle identity not verified');
+    expect(fixture.nativeElement.textContent).toContain('Why we need this');
+    expect(fixture.nativeElement.textContent).toContain('cannot verify the vehicle identity');
+    expect(fixture.nativeElement.textContent).toContain('What to do');
     expect(fixture.nativeElement.querySelectorAll('.missing-item')).toHaveLength(1);
   });
 
   it('renders enter_text as the existing text correction UI', async () => {
-    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
-      requested_actions: [{
-        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
-        field_name: 'policy_number', instruction: 'Please confirm your policy number.',
-      }],
-    })));
+    api.getClaim.mockReturnValue(
+      of(
+        claim('awaiting_documents', {
+          action_display: {
+            title: "Policy information doesn't match",
+            explanation: 'The submitted policy information contains different policy numbers.',
+          },
+          requested_actions: [
+            {
+              action_type: 'enter_text',
+              action_id: 'ACT-TEXT',
+              review_id: 'HRV-1',
+              field_name: 'policy_number',
+              instruction: 'Please confirm your policy number.',
+            },
+          ],
+        }),
+      ),
+    );
     const fixture = await create();
     expect(fixture.nativeElement.querySelector('.correction-card input')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
     expect(fixture.nativeElement.querySelector('input[type=file]')).toBeNull();
     expect(fixture.nativeElement.textContent).toContain('Please confirm your policy number');
+    expect(fixture.nativeElement.textContent).toContain("Policy information doesn't match");
+    expect(fixture.nativeElement.textContent).toContain('Why we need this');
+    expect(fixture.nativeElement.textContent).toContain('What to do');
   });
 
   it('renders upload_document as one file picker without a correction text box', async () => {
-    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
-      requested_actions: [{
-        action_type: 'upload_document', action_id: 'ACT-REPLACE', review_id: 'HRV-1',
-        document_type: 'damage_evidence', instruction: 'Please upload the correct damage photo.',
-        replaces_document_id: 'DOC-OLD',
-      }],
-    })));
+    api.getClaim.mockReturnValue(
+      of(
+        claim('awaiting_documents', {
+          requested_actions: [
+            {
+              action_type: 'upload_document',
+              action_id: 'ACT-REPLACE',
+              review_id: 'HRV-1',
+              document_type: 'damage_evidence',
+              instruction: 'Please upload the correct damage photo.',
+              replaces_document_id: 'DOC-OLD',
+            },
+          ],
+        }),
+      ),
+    );
     const fixture = await create();
     expect(fixture.nativeElement.querySelectorAll('input[type=file]')).toHaveLength(1);
     expect(fixture.nativeElement.querySelector('.correction-card input')).toBeNull();
   });
 
   it('prioritizes a human-review action over ordinary missing evidence', async () => {
-    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
-      requested_evidence: awaitingClaim.requested_evidence,
-      requested_actions: [{
-        action_type: 'upload_document', action_id: 'ACT-REPLACE', review_id: 'HRV-1',
-        document_type: 'damage_evidence', instruction: 'Please upload the correct damage photo.',
-        replaces_document_id: 'DOC-OLD',
-      }],
-    })));
+    api.getClaim.mockReturnValue(
+      of(
+        claim('awaiting_documents', {
+          requested_evidence: awaitingClaim.requested_evidence,
+          requested_actions: [
+            {
+              action_type: 'upload_document',
+              action_id: 'ACT-REPLACE',
+              review_id: 'HRV-1',
+              document_type: 'damage_evidence',
+              instruction: 'Please upload the correct damage photo.',
+              replaces_document_id: 'DOC-OLD',
+            },
+          ],
+        }),
+      ),
+    );
     const fixture = await create();
     expect(fixture.nativeElement.querySelectorAll('input[type=file]')).toHaveLength(1);
     expect(fixture.nativeElement.textContent).toContain('Please upload the correct damage photo');
@@ -125,14 +191,18 @@ describe('ClaimStatusPage', () => {
     const twoRequests = [
       ...awaitingClaim.requested_evidence,
       {
-        document_type: 'police_report', label: 'Police report',
-        instruction: 'Please upload the police report.', satisfies_requirements: ['police_report'],
+        document_type: 'police_report',
+        label: 'Police report',
+        instruction: 'Please upload the police report.',
+        satisfies_requirements: ['police_report'],
         replacement_required: false,
       },
     ];
     api.getClaim
       .mockReturnValueOnce(of(claim('awaiting_documents', { requested_evidence: twoRequests })))
-      .mockReturnValueOnce(of(claim('awaiting_documents', { requested_evidence: twoRequests.slice(1) })));
+      .mockReturnValueOnce(
+        of(claim('awaiting_documents', { requested_evidence: twoRequests.slice(1) })),
+      );
     const fixture = await create();
     expect(fixture.nativeElement.querySelectorAll('input[type=file]')).toHaveLength(1);
     expect(fixture.nativeElement.textContent).toContain("vehicle's license plate");
@@ -157,23 +227,37 @@ describe('ClaimStatusPage', () => {
   });
 
   it('sends requested_action_id and resumes polling for replacement upload', async () => {
-    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
-      requested_actions: [{
-        action_type: 'upload_document', action_id: 'ACT-REPLACE', review_id: 'HRV-1',
-        document_type: 'damage_evidence', instruction: 'Upload the correct damage photo.',
-        replaces_document_id: 'DOC-OLD',
-      }],
-    })));
+    api.getClaim.mockReturnValue(
+      of(
+        claim('awaiting_documents', {
+          requested_actions: [
+            {
+              action_type: 'upload_document',
+              action_id: 'ACT-REPLACE',
+              review_id: 'HRV-1',
+              document_type: 'damage_evidence',
+              instruction: 'Upload the correct damage photo.',
+              replaces_document_id: 'DOC-OLD',
+            },
+          ],
+        }),
+      ),
+    );
     const fixture = await create();
     const callsBeforeUpload = api.getClaim.mock.calls.length;
     fixture.componentInstance.uploadDocument({
-      documentType: 'damage_evidence', file: new File(['x'], 'correct.jpg'),
-      requestedActionId: 'ACT-REPLACE', idempotencyKey: 'stable-upload-key',
+      documentType: 'damage_evidence',
+      file: new File(['x'], 'correct.jpg'),
+      requestedActionId: 'ACT-REPLACE',
+      idempotencyKey: 'stable-upload-key',
     });
 
     expect(api.uploadDocument).toHaveBeenCalledWith(
-      'CLM-ABC12345', 'damage_evidence', expect.any(File),
-      'ACT-REPLACE', 'stable-upload-key',
+      'CLM-ABC12345',
+      'damage_evidence',
+      expect.any(File),
+      'ACT-REPLACE',
+      'stable-upload-key',
     );
     expect(api.getClaim.mock.calls.length).toBe(callsBeforeUpload + 1);
     expect(fixture.componentInstance.rechecking()).toBe(true);
@@ -185,8 +269,12 @@ describe('ClaimStatusPage', () => {
 
     expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
     expect(fixture.nativeElement.textContent).toContain('Reviewing your new evidence');
-    expect(fixture.nativeElement.textContent).toContain('received your upload and is re-checking your claim');
-    expect(fixture.nativeElement.querySelector('.workflow-heartbeat .indeterminate-progress')).not.toBeNull();
+    expect(fixture.nativeElement.textContent).toContain(
+      'received your upload and is re-checking your claim',
+    );
+    expect(
+      fixture.nativeElement.querySelector('.workflow-heartbeat .indeterminate-progress'),
+    ).not.toBeNull();
 
     upload(fixture);
     expect(api.uploadDocument).toHaveBeenCalledOnce();
@@ -204,10 +292,15 @@ describe('ClaimStatusPage', () => {
 
   it('immediately hides a successful text correction and reuses claim refresh', async () => {
     const textClaim = claim('awaiting_documents', {
-      requested_actions: [{
-        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
-        field_name: 'policy_number', instruction: 'Please enter policy number.',
-      }],
+      requested_actions: [
+        {
+          action_type: 'enter_text',
+          action_id: 'ACT-TEXT',
+          review_id: 'HRV-1',
+          field_name: 'policy_number',
+          instruction: 'Please enter policy number.',
+        },
+      ],
     });
     api.getClaim.mockReturnValue(of(textClaim));
     const fixture = await create();
@@ -221,7 +314,9 @@ describe('ClaimStatusPage', () => {
     expect(api.getClaim.mock.calls.length).toBe(callsBeforeCorrection + 1);
     expect(fixture.nativeElement.querySelector('.correction-card')).toBeNull();
     expect(fixture.nativeElement.textContent).toContain('Reviewing your response');
-    expect(fixture.nativeElement.textContent).toContain('received your information and is continuing your claim');
+    expect(fixture.nativeElement.textContent).toContain(
+      'received your information and is continuing your claim',
+    );
 
     fixture.componentInstance.correctionValue = 'POL-1001';
     fixture.componentInstance.submitCorrection('policy_number');
@@ -231,10 +326,15 @@ describe('ClaimStatusPage', () => {
   it('keeps the correction handoff through a stale timestamp-only GET, then accepts the fresh state', async () => {
     const textClaim = claim('awaiting_documents', {
       updated_at: '2026-08-07T12:00:00Z',
-      requested_actions: [{
-        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
-        field_name: 'policy_number', instruction: 'Please enter policy number.',
-      }],
+      requested_actions: [
+        {
+          action_type: 'enter_text',
+          action_id: 'ACT-TEXT',
+          review_id: 'HRV-1',
+          field_name: 'policy_number',
+          instruction: 'Please enter policy number.',
+        },
+      ],
     });
     const timestampOnlyUpdate = { ...textClaim, updated_at: '2026-08-07T12:00:10Z' };
     const nextState = claim('inspection_ready', { updated_at: '2026-08-07T12:00:20Z' });
@@ -267,12 +367,21 @@ describe('ClaimStatusPage', () => {
   });
 
   it('leaves a failed text correction available for retry', async () => {
-    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
-      requested_actions: [{
-        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
-        field_name: 'policy_number', instruction: 'Please enter policy number.',
-      }],
-    })));
+    api.getClaim.mockReturnValue(
+      of(
+        claim('awaiting_documents', {
+          requested_actions: [
+            {
+              action_type: 'enter_text',
+              action_id: 'ACT-TEXT',
+              review_id: 'HRV-1',
+              field_name: 'policy_number',
+              instruction: 'Please enter policy number.',
+            },
+          ],
+        }),
+      ),
+    );
     api.submitCorrection.mockReturnValue(throwError(() => new Error('correction failed')));
     const fixture = await create();
     fixture.componentInstance.correctionValue = 'POL-1001';
@@ -283,15 +392,23 @@ describe('ClaimStatusPage', () => {
     expect(fixture.componentInstance.rechecking()).toBe(false);
     expect(fixture.nativeElement.querySelector('.correction-card')).not.toBeNull();
     expect(fixture.nativeElement.textContent).toContain('could not submit that correction');
-    expect((fixture.nativeElement.querySelector('.correction-card button') as HTMLButtonElement).disabled).toBe(false);
+    expect(
+      (fixture.nativeElement.querySelector('.correction-card button') as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
   });
 
   it('queues one forced refresh when correction succeeds during an active poll', async () => {
     const textClaim = claim('awaiting_documents', {
-      requested_actions: [{
-        action_type: 'enter_text', action_id: 'ACT-TEXT', review_id: 'HRV-1',
-        field_name: 'policy_number', instruction: 'Please enter policy number.',
-      }],
+      requested_actions: [
+        {
+          action_type: 'enter_text',
+          action_id: 'ACT-TEXT',
+          review_id: 'HRV-1',
+          field_name: 'policy_number',
+          instruction: 'Please enter policy number.',
+        },
+      ],
     });
     const activePoll = new Subject<ClaimSummary>();
     api.getClaim
@@ -315,11 +432,16 @@ describe('ClaimStatusPage', () => {
   it('makes an unusable replacement actionable again after same-state review completion', async () => {
     const replacementClaim = claim('awaiting_documents', {
       updated_at: '2026-08-07T12:00:00Z',
-      requested_actions: [{
-        action_type: 'upload_document', action_id: 'ACT-REPLACE', review_id: 'HRV-1',
-        document_type: 'damage_evidence', instruction: 'Upload the correct damage photo.',
-        replaces_document_id: 'DOC-OLD',
-      }],
+      requested_actions: [
+        {
+          action_type: 'upload_document',
+          action_id: 'ACT-REPLACE',
+          review_id: 'HRV-1',
+          document_type: 'damage_evidence',
+          instruction: 'Upload the correct damage photo.',
+          replaces_document_id: 'DOC-OLD',
+        },
+      ],
     });
     api.getClaim
       .mockReturnValueOnce(of(replacementClaim))
@@ -327,15 +449,19 @@ describe('ClaimStatusPage', () => {
       .mockReturnValueOnce(of({ ...replacementClaim, updated_at: '2026-08-07T12:01:00Z' }));
     const fixture = await create();
     fixture.componentInstance.uploadDocument({
-      documentType: 'damage_evidence', file: new File(['x'], 'blurry.jpg'),
-      requestedActionId: 'ACT-REPLACE', idempotencyKey: 'stable-upload-key',
+      documentType: 'damage_evidence',
+      file: new File(['x'], 'blurry.jpg'),
+      requestedActionId: 'ACT-REPLACE',
+      idempotencyKey: 'stable-upload-key',
     });
     vi.advanceTimersByTime(3000);
     fixture.detectChanges();
 
     expect(fixture.componentInstance.rechecking()).toBe(false);
     expect(fixture.nativeElement.textContent).toContain('still need a usable document');
-    expect(fixture.nativeElement.querySelector('.file-button').classList.contains('disabled')).toBe(false);
+    expect(fixture.nativeElement.querySelector('.file-button').classList.contains('disabled')).toBe(
+      false,
+    );
   });
 
   it('shows Analyzed as the current waiting stage for awaiting_documents', async () => {
@@ -353,7 +479,9 @@ describe('ClaimStatusPage', () => {
     const steps = fixture.nativeElement.querySelectorAll('.step');
     expect(steps[1].dataset.state).toBe('active');
     expect(steps[1].textContent).toContain('Human review required');
-    expect(fixture.nativeElement.textContent).toContain('An adjuster is reviewing the evidence package');
+    expect(fixture.nativeElement.textContent).toContain(
+      'An adjuster is reviewing the evidence package',
+    );
   });
 
   it('shows Inspection active while an appointment is being prepared', async () => {
@@ -379,7 +507,9 @@ describe('ClaimStatusPage', () => {
     const fixture = await create();
     const steps = [...fixture.nativeElement.querySelectorAll('.step')] as HTMLElement[];
     expect(steps.every((step) => step.dataset['state'] === 'complete')).toBe(true);
-    expect(fixture.nativeElement.textContent).toContain('inspection details have been prepared and shared');
+    expect(fixture.nativeElement.textContent).toContain(
+      'inspection details have been prepared and shared',
+    );
   });
 
   it('resumes polling immediately after document upload', async () => {
@@ -389,7 +519,9 @@ describe('ClaimStatusPage', () => {
     upload(fixture);
 
     expect(api.uploadDocument).toHaveBeenCalledWith(
-      'CLM-ABC12345', 'license_plate_photo', expect.any(File),
+      'CLM-ABC12345',
+      'license_plate_photo',
+      expect.any(File),
     );
     expect(api.getClaim.mock.calls.length).toBe(callsBeforeUpload + 1);
     expect(fixture.nativeElement.textContent).toContain('Document received. Rechecking your claim');
@@ -415,15 +547,21 @@ describe('ClaimStatusPage', () => {
   });
 
   it('updates inspection_pending to inspection_scheduled automatically', async () => {
-    api.getClaim
-      .mockReturnValueOnce(of(claim('inspection_pending')))
-      .mockReturnValueOnce(of(claim('inspection_scheduled', {
-        inspection: {
-          appointment_id: 'APT-1', inspection_type: 'virtual', status: 'scheduled',
-          scheduled_start: '2026-08-08T17:00:00Z', scheduled_end: '2026-08-08T18:00:00Z',
-          location_type: 'virtual', location_details: 'Secure video call',
-        },
-      })));
+    api.getClaim.mockReturnValueOnce(of(claim('inspection_pending'))).mockReturnValueOnce(
+      of(
+        claim('inspection_scheduled', {
+          inspection: {
+            appointment_id: 'APT-1',
+            inspection_type: 'virtual',
+            status: 'scheduled',
+            scheduled_start: '2026-08-08T17:00:00Z',
+            scheduled_end: '2026-08-08T18:00:00Z',
+            location_type: 'virtual',
+            location_details: 'Secure video call',
+          },
+        }),
+      ),
+    );
     const fixture = await create();
 
     vi.advanceTimersByTime(3000);
@@ -451,7 +589,7 @@ describe('ClaimStatusPage', () => {
   it('continues polling while rendering human_review_required', async () => {
     api.getClaim.mockReturnValue(of(claim('human_review_required')));
     const fixture = await create();
-    expect(fixture.nativeElement.textContent).toContain('Additional review required');
+    expect(fixture.nativeElement.textContent).toContain('Adjuster review required');
     const callsBeforePoll = api.getClaim.mock.calls.length;
     vi.advanceTimersByTime(3000);
     expect(api.getClaim).toHaveBeenCalledTimes(callsBeforePoll + 1);
@@ -487,17 +625,35 @@ describe('ClaimStatusPage', () => {
       .mockReturnValueOnce(of(claim('human_review_required')))
       .mockReturnValueOnce(of(claim('inspection_pending')));
     api.getClaimEvents
-      .mockReturnValueOnce(of([{
-        action: 'human_review_requested', actor: 'firstnoticeai', timestamp: '2026-08-07T12:00:00Z',
-        details: {}, correlation_id: 'review-1',
-      }]))
-      .mockReturnValueOnce(of([{
-        action: 'human_review_approved', actor: 'adjuster', timestamp: '2026-08-07T12:01:00Z',
-        details: { review_id: 'REV-1' }, correlation_id: 'review-1',
-      }, {
-        action: 'human_review_resumed', actor: 'firstnoticeai', timestamp: '2026-08-07T12:01:01Z',
-        details: { review_id: 'REV-1' }, correlation_id: 'review-1',
-      }]));
+      .mockReturnValueOnce(
+        of([
+          {
+            action: 'human_review_requested',
+            actor: 'firstnoticeai',
+            timestamp: '2026-08-07T12:00:00Z',
+            details: {},
+            correlation_id: 'review-1',
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        of([
+          {
+            action: 'human_review_approved',
+            actor: 'adjuster',
+            timestamp: '2026-08-07T12:01:00Z',
+            details: { review_id: 'REV-1' },
+            correlation_id: 'review-1',
+          },
+          {
+            action: 'human_review_resumed',
+            actor: 'firstnoticeai',
+            timestamp: '2026-08-07T12:01:01Z',
+            details: { review_id: 'REV-1' },
+            correlation_id: 'review-1',
+          },
+        ]),
+      );
     const fixture = await create();
     expect(fixture.nativeElement.textContent).toContain('Paused the claim for human review');
 
@@ -505,7 +661,9 @@ describe('ClaimStatusPage', () => {
     fixture.detectChanges();
 
     expect(fixture.nativeElement.textContent).toContain('Human approval received');
-    expect(fixture.nativeElement.textContent).toContain('Automatically resumed the claim after human review');
+    expect(fixture.nativeElement.textContent).toContain(
+      'Automatically resumed the claim after human review',
+    );
     expect(api.getClaimEvents).toHaveBeenCalledTimes(2);
   });
 
@@ -582,12 +740,17 @@ describe('ClaimStatusPage', () => {
 
   it('maps each major state without exposing raw status values', () => {
     expect(workflowSteps('new')[0].state).toBe('active');
-    expect(workflowSteps('awaiting_documents')[1]).toMatchObject({ state: 'active', note: 'Waiting for information' });
+    expect(workflowSteps('awaiting_documents')[1]).toMatchObject({
+      state: 'active',
+      note: 'Waiting for information',
+    });
     expect(workflowSteps('awaiting_documents', true)[1].note).toBe('Rechecking evidence');
     expect(workflowSteps('human_review_required')[1].note).toBe('Human review required');
     expect(workflowSteps('inspection_pending')[2].state).toBe('active');
     expect(workflowSteps('inspection_scheduled')[3].state).toBe('active');
-    expect(workflowSteps('adjuster_notified').every((step) => step.state === 'complete')).toBe(true);
+    expect(workflowSteps('adjuster_notified').every((step) => step.state === 'complete')).toBe(
+      true,
+    );
   });
 
   it('renders active processing with a live heartbeat and indeterminate bar', async () => {
@@ -607,7 +770,10 @@ describe('ClaimStatusPage', () => {
       imports: [ClaimStatusPage],
       providers: [
         { provide: ClaimApiService, useValue: api },
-        { provide: ActivatedRoute, useValue: { snapshot: { paramMap: { get: () => 'CLM-ABC12345' } } } },
+        {
+          provide: ActivatedRoute,
+          useValue: { snapshot: { paramMap: { get: () => 'CLM-ABC12345' } } },
+        },
       ],
     }).compileComponents();
     const fixture = TestBed.createComponent(ClaimStatusPage);
@@ -633,7 +799,9 @@ describe('ClaimStatusPage', () => {
   it('renders scheduled and completed heartbeat states without processing animation', async () => {
     api.getClaim.mockReturnValueOnce(of(claim('inspection_scheduled')));
     const scheduled = await create();
-    expect(scheduled.nativeElement.querySelector('.workflow-heartbeat').dataset.mode).toBe('scheduled');
+    expect(scheduled.nativeElement.querySelector('.workflow-heartbeat').dataset.mode).toBe(
+      'scheduled',
+    );
     expect(scheduled.nativeElement.querySelector('.indeterminate-progress')).toBeNull();
     scheduled.destroy();
 
@@ -641,15 +809,23 @@ describe('ClaimStatusPage', () => {
     const completed = TestBed.createComponent(ClaimStatusPage);
     vi.advanceTimersByTime(0);
     completed.detectChanges();
-    expect(completed.nativeElement.querySelector('.workflow-heartbeat').dataset.mode).toBe('complete');
+    expect(completed.nativeElement.querySelector('.workflow-heartbeat').dataset.mode).toBe(
+      'complete',
+    );
     expect(completed.nativeElement.textContent).toContain('Inspection coordination complete');
   });
 
   it('keeps exactly one action panel ahead of the consolidated activity card', async () => {
     const fixture = await create();
-    const actions = fixture.nativeElement.querySelectorAll('app-missing-documents, .correction-card');
+    const actions = fixture.nativeElement.querySelectorAll(
+      'app-missing-documents, .correction-card',
+    );
     expect(actions).toHaveLength(1);
     expect(fixture.nativeElement.querySelectorAll('app-claim-timeline')).toHaveLength(1);
-    expect(actions[0].compareDocumentPosition(fixture.nativeElement.querySelector('app-claim-timeline')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      actions[0].compareDocumentPosition(
+        fixture.nativeElement.querySelector('app-claim-timeline'),
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

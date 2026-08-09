@@ -534,6 +534,10 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
             set(request.satisfies_requirements),
             {"vehicle_identity", "license_plate_photo"},
         )
+        self.assertEqual(
+            response.action_display.title, "Vehicle identity not verified"
+        )
+        self.assertIn("readable license plate", response.action_display.explanation)
 
     def test_get_claim_exposes_one_upload_action_for_flow_3_remediation(self) -> None:
         self.repository.get_claim.return_value = {
@@ -567,6 +571,31 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
                     "replaces_document_id": "DOC-FRONT",
                 }
             ],
+            "source_aware_conflicts": [{
+                "fingerprint": "CFP-FLOW-3",
+                "field": "vehicle_identity_and_damage_location",
+                "selected_outlier_document_id": "DOC-FRONT",
+                "assertions": [
+                    {
+                        "field": "damage_location",
+                        "value": "rear",
+                        "source_identity": "document:DOC-REPORT",
+                        "filename": "police-report.pdf",
+                        "document_id": "DOC-REPORT",
+                        "document_type": "police_report",
+                        "replaceable": False,
+                    },
+                    {
+                        "field": "damage_location",
+                        "value": "front",
+                        "source_identity": "document:DOC-FRONT",
+                        "filename": "front.jpg",
+                        "document_id": "DOC-FRONT",
+                        "document_type": "damage_evidence",
+                        "replaceable": True,
+                    },
+                ],
+            }],
             "updated_at": NOW,
         }
         self.repository.get_scheduled_appointment.return_value = None
@@ -579,6 +608,11 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
         self.assertEqual(
             response.requested_actions[0].action_id, "ACT-FLOW-3"
         )
+        self.assertEqual(response.action_display.title, "Evidence doesn't match")
+        display_json = response.action_display.model_dump_json()
+        self.assertNotIn("DOC-", display_json)
+        self.assertNotIn("ACT-", display_json)
+        self.assertNotIn("AUTONOMOUS-", display_json)
 
 
 class ClaimantApiEndpointTests(unittest.TestCase):

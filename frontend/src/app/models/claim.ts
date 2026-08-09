@@ -28,6 +28,11 @@ export interface ClaimantEvidenceRequest {
   requested_action_id?: string;
 }
 
+export interface ClaimantActionDisplay {
+  title: string;
+  explanation: string;
+}
+
 export interface InspectionAppointment {
   appointment_id: string;
   inspection_type: 'virtual' | 'physical';
@@ -45,6 +50,7 @@ export interface ClaimSummary {
   missing_documents: MissingDocument[];
   requested_evidence: ClaimantEvidenceRequest[];
   requested_actions?: RequestedAction[];
+  action_display?: ClaimantActionDisplay | null;
   inspection?: InspectionAppointment | null;
   updated_at: string;
 }

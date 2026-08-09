@@ -3,6 +3,7 @@ import unittest
 
 from app.domain.evidence_reasoning import (
     canonical_active_evidence,
+    select_corroborated_image_outlier,
     shape_source_aware_conflicts,
     shape_source_aware_uncertainties,
 )
@@ -183,6 +184,95 @@ class EvidenceReasoningTests(unittest.TestCase):
             "vehicle_identity",
             {capability for item in snapshot for capability in item.supported_capabilities},
         )
+
+    def test_live_flow_4_shape_selects_bad_followup_across_order_and_issue_shapes(
+        self,
+    ) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type="police_report", filename="police-report.pdf",
+                document_id="DOC-REPORT", source_identity="document:DOC-REPORT",
+                document_type="police_report", usable=True,
+                evidence_findings=["Rear-end collision with rear damage."],
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="IMG_5418.png",
+                document_id="DOC-ORIGINAL", source_identity="document:DOC-ORIGINAL",
+                document_type="damage_evidence", usable=True,
+                evidence_findings=["Rear bumper and left tail light damage."],
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="IMG_5420.png",
+                document_id="DOC-BAD", source_identity="document:DOC-BAD",
+                document_type="license_plate_photo", usable=True,
+                evidence_findings=[
+                    "A silver SUV has front-end damage.",
+                    "A material safety concern is visible.",
+                ],
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="IMG_5419.png",
+                document_id="DOC-CORRECT", source_identity="document:DOC-CORRECT",
+                document_type="license_plate_photo", usable=True,
+                evidence_findings=["A grey sedan has rear damage and a readable plate."],
+            ),
+            UploadedEvidence(
+                evidence_type="vehicle_identity", filename="IMG_5419.png",
+                document_id="DOC-CORRECT", source_identity="document:DOC-CORRECT",
+                document_type="license_plate_photo", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="license_plate_photo", filename="IMG_5419.png",
+                document_id="DOC-CORRECT", source_identity="document:DOC-CORRECT",
+                document_type="license_plate_photo", usable=True,
+            ),
+        ]
+        findings = [
+            CurrentEvidenceFinding(source=item.filename, finding=finding)
+            for item in uploaded
+            for finding in item.evidence_findings
+        ]
+        conflict_shapes = [
+            EvidenceConflict(
+                field="vehicle_identity",
+                values=["different vehicles", "identified vehicle"],
+                sources=["IMG_5420.png", "IMG_5419.png"],
+                reason="The images show different vehicles.",
+            ),
+            EvidenceConflict(
+                field="vehicle_identity_and_damage_location",
+                values=["silver/front", "grey/rear"],
+                sources=["IMG_5420.png", "IMG_5419.png"],
+                reason="Vehicle and damage evidence disagree.",
+            ),
+            EvidenceConflict(
+                field="DAMAGE-LOCATION-AND-VEHICLE-IDENTITY",
+                values=["silver/front", "grey/rear"],
+                sources=["img_5420.PNG", "img_5419.PNG"],
+                reason="Equivalent conflict with alternate casing and ordering.",
+            ),
+        ]
+        uncertainty = UnresolvedUncertainty(
+            uncertainty=(
+                "The front-damage vehicle may not be the same vehicle as the "
+                "rear-damage vehicle."
+            ),
+            sources=["img_5419.PNG", "IMG_5420.png"],
+        )
+
+        results = []
+        for ordered in (uploaded, list(reversed(uploaded))):
+            for conflict in conflict_shapes:
+                results.append(select_corroborated_image_outlier(
+                    [conflict], [], list(reversed(findings)), ordered
+                ))
+            results.append(select_corroborated_image_outlier(
+                [], [uncertainty], findings, ordered
+            ))
+
+        self.assertTrue(results)
+        self.assertEqual({item.document_id for item in results if item}, {"DOC-BAD"})
+        self.assertTrue(all(item is not None for item in results))
 
 
 if __name__ == "__main__":

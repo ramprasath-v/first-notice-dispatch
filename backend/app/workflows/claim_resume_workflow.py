@@ -3,14 +3,21 @@ from uuid import uuid4
 from google.genai import types
 
 from app.domain.claim_status import ClaimStatus
-from app.domain.evidence_reasoning import REPLACEABLE_DOCUMENT_TYPES
+from app.domain.evidence_reasoning import (
+    REPLACEABLE_DOCUMENT_TYPES,
+    select_corroborated_image_outlier,
+)
 from app.models.claim_document import (
     ClaimDocument,
     DocumentExtractionResult,
     ResumeClaimResult,
 )
 from app.models.intake_result import IntakeResult, intake_result_from_claim
-from app.models.review_result import ClaimEvidenceMetadata, UploadedEvidence
+from app.models.review_result import (
+    ClaimEvidenceMetadata,
+    ReviewResult,
+    UploadedEvidence,
+)
 from app.models.requested_action import (
     UploadDocumentRequestedAction,
     parse_requested_actions,
@@ -286,21 +293,53 @@ class ClaimResumeWorkflow:
             metadata,
             evidence_parts=_build_review_evidence_parts(review_documents),
         )
+        replacement_document = (
+            next(
+                item
+                for item in review_documents
+                if item.document_id == document.document_id
+            )
+            if extraction.usable and explicit_replacement
+            else None
+        )
+        if extraction.usable and not explicit_replacement:
+            reconciled = _reconcile_current_document_as_replacement(
+                current_document=next(
+                    item
+                    for item in review_documents
+                    if item.document_id == document.document_id
+                ),
+                review_result=review_result,
+                metadata=metadata,
+            )
+            if reconciled is not None:
+                document = reconciled
+                documents = [
+                    reconciled
+                    if item.document_id == reconciled.document_id
+                    else item
+                    for item in documents
+                ]
+                review_documents = _documents_for_resumed_review(
+                    documents, reconciled, extraction
+                )
+                review_result = self._review_service.review(
+                    _current_review_intake_result(claim, review_documents),
+                    _build_review_metadata(
+                        claim=claim,
+                        documents=review_documents,
+                        conflicts=[],
+                    ),
+                    evidence_parts=_build_review_evidence_parts(review_documents),
+                )
+                replacement_document = reconciled
         final_status = self._repository.save_review_result(
             claim_id,
             review_result,
             correlation_id=correlation_id,
             resume_document_id=document.document_id,
             resume_idempotency_key=idempotency_key,
-            replacement_document=(
-                next(
-                    item
-                    for item in review_documents
-                    if item.document_id == document.document_id
-                )
-                if extraction.usable and explicit_replacement
-                else None
-            ),
+            replacement_document=replacement_document,
             retry_replacement_action_id=(
                 document.requested_action_id
                 if explicit_replacement and not extraction.usable
@@ -466,6 +505,69 @@ def _bind_server_authorized_replacement(
             "requested_action_id": action.action_id,
             "replaces_document_id": action.replaces_document_id,
             "document_type": action.document_type,
+        }
+    )
+
+
+def _reconcile_current_document_as_replacement(
+    *,
+    current_document: ClaimDocument,
+    review_result: ReviewResult,
+    metadata: ClaimEvidenceMetadata,
+) -> ClaimDocument | None:
+    """Bind current evidence only when deterministic review proves its target."""
+    if current_document.requested_action_id or current_document.replaces_document_id:
+        return None
+    capabilities = set(current_document.supported_capabilities)
+    if "damage_evidence" not in capabilities or not (
+        {"license_plate_photo", "vehicle_identity"} & capabilities
+    ):
+        return None
+
+    outlier = select_corroborated_image_outlier(
+        review_result.conflicts,
+        review_result.unresolved_uncertainties,
+        review_result.current_evidence_findings,
+        metadata.uploaded_evidence,
+    )
+    if (
+        outlier is None
+        or outlier.document_id == current_document.document_id
+        or current_document.document_id not in outlier.corroborating_document_ids
+    ):
+        return None
+
+    actions = [
+        action
+        for action in review_result.requested_actions
+        if isinstance(action, UploadDocumentRequestedAction)
+        and action.replaces_document_id == outlier.document_id
+    ]
+    if len(actions) != 1 or len(review_result.requested_actions) != 1:
+        return None
+
+    assessments = [
+        *review_result.source_aware_conflicts,
+        *review_result.source_aware_uncertainties,
+    ]
+    if not assessments or any(
+        assessment.selected_outlier_document_id != outlier.document_id
+        for assessment in assessments
+    ):
+        return None
+    if any(
+        uncertainty.source_attribution_incomplete
+        for uncertainty in review_result.unresolved_uncertainties
+    ):
+        return None
+    if review_result.missing_documents or review_result.unusable_evidence:
+        return None
+
+    return current_document.model_copy(
+        update={
+            "requested_action_id": actions[0].action_id,
+            "replaces_document_id": outlier.document_id,
+            "status": "validated",
         }
     )
 

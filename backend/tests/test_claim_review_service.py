@@ -559,6 +559,98 @@ class ClaimReviewServiceTests(unittest.TestCase):
             review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
         )
 
+    def test_live_flow_4_safety_outlier_routes_to_claimant_remediation(self) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type="police_report", filename="police-report.pdf",
+                document_id="DOC-REPORT", source_identity="document:DOC-REPORT",
+                document_type="police_report", usable=True,
+                evidence_findings=[
+                    "Rear-end collision with rear bumper and left tail light damage."
+                ],
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="IMG_5418.png",
+                document_id="DOC-ORIGINAL", source_identity="document:DOC-ORIGINAL",
+                document_type="damage_evidence", usable=True,
+                evidence_findings=["Rear bumper and left tail light damage."],
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="IMG_5420.png",
+                document_id="DOC-BAD", source_identity="document:DOC-BAD",
+                document_type="license_plate_photo", usable=True,
+                evidence_findings=[
+                    "A silver SUV has front-end damage.",
+                    "A material vehicle safety concern is visible.",
+                ],
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="IMG_5419.png",
+                document_id="DOC-CORRECT", source_identity="document:DOC-CORRECT",
+                document_type="license_plate_photo", usable=True,
+                evidence_findings=[
+                    "A grey sedan has rear damage and California plate 7ABX123."
+                ],
+            ),
+            UploadedEvidence(
+                evidence_type="vehicle_identity", filename="IMG_5419.png",
+                document_id="DOC-CORRECT", source_identity="document:DOC-CORRECT",
+                document_type="license_plate_photo", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="license_plate_photo", filename="IMG_5419.png",
+                document_id="DOC-CORRECT", source_identity="document:DOC-CORRECT",
+                document_type="license_plate_photo", usable=True,
+            ),
+        ]
+        model_review = ai_review(
+            conflicts=[EvidenceConflict(
+                field="vehicle_identity_and_damage_location",
+                values=["silver SUV/front", "grey sedan/rear"],
+                sources=["IMG_5420.png", "IMG_5419.png"],
+                reason="The vehicle and damage evidence disagree.",
+            )],
+            current_evidence_findings=[
+                CurrentEvidenceFinding(
+                    source=item.filename, finding=finding
+                )
+                for item in uploaded
+                for finding in item.evidence_findings
+            ],
+            unresolved_uncertainties=[UnresolvedUncertainty(
+                uncertainty=(
+                    "The silver front-damage vehicle and grey rear-damage vehicle "
+                    "may not be the same vehicle."
+                ),
+                sources=["IMG_5420.png", "IMG_5419.png"],
+            )],
+            operational_indicators=OperationalIndicators(
+                safety_concern=True,
+                significant_damage=True,
+                high_operational_uncertainty=True,
+            ),
+        )
+
+        review = self.run_review(
+            metadata=complete_metadata(
+                uploaded_evidence=list(reversed(uploaded)),
+                vehicle_identity_clear=True,
+                safety_concern=True,
+            ),
+            model_review=model_review,
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        self.assertEqual(len(review.requested_actions), 1)
+        self.assertEqual(
+            review.requested_actions[0].replaces_document_id, "DOC-BAD"
+        )
+        self.assertEqual(
+            review.source_aware_conflicts[0].selected_outlier_document_id,
+            "DOC-BAD",
+        )
+
     def test_unverified_flow_3_safety_observation_requests_grounded_evidence(self) -> None:
         metadata = complete_metadata(
             uploaded_evidence=[

@@ -1,5 +1,5 @@
 import { Component, EventEmitter, Input, Output, signal } from '@angular/core';
-import { ClaimantEvidenceRequest } from '../../models/claim';
+import { ClaimantActionDisplay, ClaimantEvidenceRequest } from '../../models/claim';
 
 export interface DocumentUploadRequest {
   documentType: string;
@@ -17,6 +17,7 @@ export class MissingDocuments {
   @Input({ required: true }) requests: ClaimantEvidenceRequest[] = [];
   @Input() uploading = false;
   @Input() processing = false;
+  @Input() displayReason: ClaimantActionDisplay | null = null;
   @Output() uploadDocument = new EventEmitter<DocumentUploadRequest>();
   readonly selected = signal<Record<string, { file: File; idempotencyKey: string }>>({});
 

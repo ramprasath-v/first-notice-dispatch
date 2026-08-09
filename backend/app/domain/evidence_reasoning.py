@@ -33,6 +33,14 @@ class CanonicalEvidenceArtifact:
         return self.document_type in REPLACEABLE_DOCUMENT_TYPES
 
 
+@dataclass(frozen=True)
+class CorroboratedImageOutlier:
+    document_id: str
+    filename: str
+    authoritative_damage_location: str
+    corroborating_document_ids: tuple[str, ...]
+
+
 def canonical_active_evidence(
     uploaded_evidence: list[UploadedEvidence],
 ) -> list[CanonicalEvidenceArtifact]:
@@ -73,6 +81,98 @@ def canonical_active_evidence(
         )
         for identity, value in sorted(grouped.items())
     ]
+
+
+def select_corroborated_image_outlier(
+    conflicts: list[EvidenceConflict],
+    uncertainties: list[UnresolvedUncertainty],
+    findings: list[CurrentEvidenceFinding],
+    uploaded_evidence: list[UploadedEvidence],
+) -> CorroboratedImageOutlier | None:
+    """Select one image contradicted by report-backed, identified evidence.
+
+    This operates on normalized active-artifact facts rather than provider field
+    wording. A target is safe only when a non-replaceable source and a distinct
+    identity-capable image agree on damage location, while exactly one
+    replaceable artifact named by the current issue disagrees.
+    """
+    artifacts = canonical_active_evidence(uploaded_evidence)
+    findings_by_source: dict[str, list[str]] = {}
+    for finding in findings:
+        findings_by_source.setdefault(_normalize_text(finding.source), []).append(
+            finding.finding
+        )
+    locations: dict[str, str] = {}
+    for artifact in artifacts:
+        source_findings = [
+            *findings_by_source.get(_normalize_text(artifact.filename), []),
+            *artifact.findings,
+        ]
+        location = _assertion_value("damage_location", source_findings)
+        if location is not None:
+            locations[artifact.source_identity] = location
+
+    issue_sources = {
+        _normalize_text(source)
+        for conflict in conflicts
+        if _canonical_issue_field(conflict.field) in {
+            "damage_location", "vehicle_identity", "vehicle_evidence_disagreement"
+        }
+        for source in conflict.sources
+    } | {
+        _normalize_text(source)
+        for uncertainty in uncertainties
+        if _uncertainty_category(uncertainty.uncertainty) in {
+            "damage_location", "vehicle_identity", "vehicle_evidence_disagreement"
+        }
+        for source in uncertainty.sources
+    }
+    if not issue_sources:
+        return None
+
+    candidates: dict[str, CorroboratedImageOutlier] = {}
+    for authoritative in artifacts:
+        authoritative_location = locations.get(authoritative.source_identity)
+        if authoritative.replaceable or authoritative_location is None:
+            continue
+        identified_support = [
+            artifact
+            for artifact in artifacts
+            if artifact.replaceable
+            and artifact.source_identity != authoritative.source_identity
+            and locations.get(artifact.source_identity) == authoritative_location
+            and bool(
+                {"vehicle_identity", "license_plate_photo"}
+                & set(artifact.supported_capabilities)
+            )
+        ]
+        if not identified_support:
+            continue
+        disagreements = [
+            artifact
+            for artifact in artifacts
+            if artifact.replaceable
+            and artifact.document_id
+            and _normalize_text(artifact.filename) in issue_sources
+            and locations.get(artifact.source_identity) is not None
+            and locations[artifact.source_identity] != authoritative_location
+        ]
+        if len({item.document_id for item in disagreements}) != 1:
+            continue
+        candidate = disagreements[0]
+        candidates[candidate.document_id] = CorroboratedImageOutlier(
+            document_id=candidate.document_id,
+            filename=candidate.filename,
+            authoritative_damage_location=authoritative_location,
+            corroborating_document_ids=tuple(
+                sorted(
+                    item.document_id
+                    for item in identified_support
+                    if item.document_id is not None
+                )
+            ),
+        )
+    return next(iter(candidates.values())) if len(candidates) == 1 else None
 
 
 def shape_source_aware_conflicts(
@@ -359,17 +459,27 @@ def _assertions_for_sources(
 def _normalize_assertion(field: str, value: str) -> str | None:
     normalized = _normalize_text(value)
     if field == "damage_location":
-        locations = {
+        longitudinal = {
             location
             for location, pattern in {
                 "front": r"\bfront(?: end)?\b",
                 "rear": r"\brear(?: end)?\b|\bfrom behind\b",
+            }.items()
+            if re.search(pattern, normalized)
+        }
+        if len(longitudinal) == 1:
+            return next(iter(longitudinal))
+        if longitudinal:
+            return None
+        lateral = {
+            location
+            for location, pattern in {
                 "left": r"\bleft(?: side)?\b",
                 "right": r"\bright(?: side)?\b",
             }.items()
             if re.search(pattern, normalized)
         }
-        return next(iter(locations)) if len(locations) == 1 else None
+        return next(iter(lateral)) if len(lateral) == 1 else None
     if field == "vehicle_drivability":
         if re.search(r"\bnot drivable\b|\bundrivable\b|\btowed\b", normalized):
             return "not_drivable"
@@ -380,13 +490,40 @@ def _normalize_assertion(field: str, value: str) -> str | None:
 
 def _uncertainty_category(value: str) -> str:
     normalized = _normalize_text(value)
-    if any(term in normalized for term in ("front", "rear", "damage location")):
+    has_damage = any(
+        term in normalized for term in ("front", "rear", "damage location")
+    )
+    has_identity = any(
+        term in normalized
+        for term in (
+            "different vehicle",
+            "same vehicle",
+            "two vehicle",
+            "vehicle identity",
+        )
+    )
+    if has_damage and has_identity:
+        return "vehicle_evidence_disagreement"
+    if has_damage:
         return "damage_location"
-    if any(term in normalized for term in ("different vehicle", "vehicle identity")):
+    if has_identity:
         return "vehicle_identity"
     if any(term in normalized for term in ("drivable", "towed")):
         return "vehicle_drivability"
     return "operational_uncertainty"
+
+
+def _canonical_issue_field(value: str) -> str:
+    normalized = _normalize_text(value).replace(" ", "_")
+    if normalized in {
+        "vehicle_identity_and_damage_location",
+        "damage_location_and_vehicle_identity",
+        "vehicle_and_damage_mismatch",
+    }:
+        return "vehicle_evidence_disagreement"
+    if normalized in {"damage_location", "vehicle_identity"}:
+        return normalized
+    return normalized
 
 
 def _deduplicate_assertions(

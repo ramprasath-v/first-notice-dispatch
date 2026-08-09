@@ -24,6 +24,15 @@ describe('SubmitClaim', () => {
     component = fixture.componentInstance;
   });
 
+  function setRequiredFiles(): void {
+    component.damagePhotos.set([
+      new File(['x'], 'damage.jpg', { type: 'image/jpeg' }),
+    ]);
+    component.policeReport.set(
+      new File(['report'], 'police-report.pdf', { type: 'application/pdf' }),
+    );
+  }
+
   it('rejects submission without a damage photo', () => {
     component.form.controls.incidentDescription.setValue('Rear-ended');
     component.submit();
@@ -52,7 +61,7 @@ describe('SubmitClaim', () => {
     const response = new Subject<unknown>();
     api.submitClaim.mockReturnValue(response);
     component.form.controls.incidentDescription.setValue('Rear-ended at a stoplight');
-    component.damagePhotos.set([new File(['x'], 'damage.jpg', { type: 'image/jpeg' })]);
+    setRequiredFiles();
 
     component.submit();
     fixture.detectChanges();
@@ -69,7 +78,7 @@ describe('SubmitClaim', () => {
   it('ignores duplicate submit attempts while the original request is active', () => {
     api.submitClaim.mockReturnValue(new Subject<unknown>());
     component.form.controls.incidentDescription.setValue('Rear-ended');
-    component.damagePhotos.set([new File(['x'], 'damage.jpg', { type: 'image/jpeg' })]);
+    setRequiredFiles();
 
     component.submit();
     component.submit();
@@ -80,7 +89,7 @@ describe('SubmitClaim', () => {
   it('restores the form and existing error handling when submission fails', () => {
     api.submitClaim.mockReturnValue(throwError(() => new Error('network')));
     component.form.controls.incidentDescription.setValue('Rear-ended');
-    component.damagePhotos.set([new File(['x'], 'damage.jpg', { type: 'image/jpeg' })]);
+    setRequiredFiles();
 
     component.submit();
     fixture.detectChanges();
@@ -104,7 +113,7 @@ describe('SubmitClaim', () => {
         claim_id: 'CLM-ABC12345', status: 'new', event_id: 'evt', message: 'received',
       }})));
     component.form.controls.incidentDescription.setValue('Rear-ended');
-    component.damagePhotos.set([new File(['x'], 'damage.jpg', { type: 'image/jpeg' })]);
+    setRequiredFiles();
 
     component.submit();
     component.submit();

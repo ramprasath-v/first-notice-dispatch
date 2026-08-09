@@ -9,6 +9,7 @@ from app.events.claim_events import (
     ClaimSubmittedEvent,
     DocumentReceivedPayload,
 )
+from app.domain.claimant_action_display import build_claimant_action_display
 from app.domain.claimant_evidence_requests import build_claimant_evidence_requests
 from app.events.pubsub_publisher import ClaimEventPublisher
 from app.models.claim_api import (
@@ -349,6 +350,7 @@ class ClaimSubmissionService:
             missing_documents=list(claim.get("missing_documents", [])),
             requested_evidence=requested_evidence,
             requested_actions=requested_actions,
+            action_display=build_claimant_action_display(claim, requested_actions),
             inspection=(
                 appointment.model_dump(mode="python") if appointment else None
             ),

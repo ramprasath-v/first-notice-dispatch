@@ -13,6 +13,7 @@ from app.domain.intake_requirements import (
 from app.domain.evidence_reasoning import (
     canonical_active_evidence,
     fingerprint_uncertainties,
+    select_corroborated_image_outlier,
     shape_source_aware_conflicts,
     shape_source_aware_uncertainties,
 )
@@ -357,6 +358,51 @@ Deterministic checklist evaluations:
             if assessment.fingerprint not in approved_fingerprints
         ]
         current_uncertainties.sort(key=lambda item: item.fingerprint or "")
+        corroborated_outlier = select_corroborated_image_outlier(
+            conflicts,
+            current_uncertainties,
+            current_findings,
+            metadata.uploaded_evidence,
+        )
+        if corroborated_outlier is not None:
+            target_id = corroborated_outlier.document_id
+            target_filename = _normalized_source_name(
+                corroborated_outlier.filename
+            )
+            source_aware = [
+                assessment.model_copy(
+                    update={"selected_outlier_document_id": target_id}
+                )
+                if (
+                    any(
+                        assertion.document_id == target_id
+                        for assertion in assessment.assertions
+                    )
+                    or target_filename
+                    in {
+                        _normalized_source_name(source)
+                        for source in conflict.sources
+                    }
+                )
+                else assessment
+                for conflict, assessment in zip(conflicts, source_aware)
+            ]
+            uncertainty_sources = {
+                uncertainty.fingerprint: {
+                    _normalized_source_name(source)
+                    for source in uncertainty.sources
+                }
+                for uncertainty in current_uncertainties
+            }
+            source_aware_uncertainties = [
+                assessment.model_copy(
+                    update={"selected_outlier_document_id": target_id}
+                )
+                if target_filename
+                in uncertainty_sources.get(assessment.fingerprint, set())
+                else assessment
+                for assessment in source_aware_uncertainties
+            ]
         indicators = ai_review.operational_indicators
         incident_text = intake_result.incident_summary.lower()
         explicitly_no_injury = any(
@@ -392,9 +438,15 @@ Deterministic checklist evaluations:
             has_identity_provenance_gap=has_identity_provenance_gap,
         )
         grounded_safety_concern = (
-            safety_concern and not has_identity_provenance_gap
+            safety_concern
+            and not has_identity_provenance_gap
+            and corroborated_outlier is None
         )
-        unresolved_reasoning = bool(conflicts or current_uncertainties)
+        blocking_uncertainty = (
+            high_uncertainty
+            and bool(current_uncertainties)
+        )
+        unresolved_reasoning = bool(conflicts) or blocking_uncertainty
         unsupported_discrepancy = (
             unresolved_reasoning
             and not has_resolvable_evidence_gap
@@ -432,7 +484,7 @@ Deterministic checklist evaluations:
         requires_human_review = priority == "urgent_human_review"
         human_review_reason = priority_reason if requires_human_review else None
         intake_complete = not (
-            missing or unusable or conflicts or current_uncertainties
+            missing or unusable or conflicts or blocking_uncertainty
         )
 
         return ReviewResult(

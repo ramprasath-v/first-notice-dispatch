@@ -48,14 +48,18 @@
     @if (current.status === 'awaiting_documents' && !rechecking()) {
       @if (evidenceRequests(current.requested_evidence, current.requested_actions); as requests) {
         @if (requests.length) {
-          <app-missing-documents [requests]="requests" [uploading]="uploading()" [processing]="rechecking()" (uploadDocument)="uploadDocument($event)" />
+          <app-missing-documents [requests]="requests" [displayReason]="current.action_display || null" [uploading]="uploading()" [processing]="rechecking()" (uploadDocument)="uploadDocument($event)" />
         }
       }
       @if (textAction(current.requested_actions); as action) {
         <section class="card correction-card">
-          <p class="kicker">More information needed</p>
+          <p class="kicker">Action needed</p>
           <p class="action-count">1 item needed to continue</p>
-          <h2>{{ action.instruction }}</h2>
+          <h2>{{ current.action_display?.title || 'More information needed' }}</h2>
+          @if (current.action_display) {
+            <div class="correction-context"><strong>Why we need this</strong><p>{{ current.action_display.explanation }}</p></div>
+          }
+          <p class="what-to-do"><strong>What to do</strong>{{ action.instruction }}</p>
           <label class="field">
             <span>Your response</span>
             <input [(ngModel)]="correctionValue" maxlength="256" autocomplete="off" />

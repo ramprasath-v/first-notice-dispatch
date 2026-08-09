@@ -22,6 +22,9 @@
 .error-state { padding: 2rem; text-align: center; }
 .correction-card { padding: 1.5rem; }
 .correction-card h2 { font-size: 1.15rem; }
+.correction-context { margin: .8rem 0 1rem; padding-left: .8rem; border-left: 3px solid #d8b85e; }
+.correction-context strong, .what-to-do strong { display: block; margin-bottom: .25rem; color: #5f4b1c; font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; }
+.correction-context p, .what-to-do { color: #667b76; line-height: 1.45; }
 .action-count, .supporting-copy { color: #667b76; }
 .supporting-copy { margin: 1rem 0 0; font-size: .88rem; }
 @media (max-width: 760px) { .status-hero { align-items: stretch; flex-direction: column; } .heartbeat-heading { grid-template-columns: 1fr; gap: .45rem; } .poll-row { flex-wrap: wrap; } .poll-row small { width: 100%; margin-left: 1.45rem; } .stepper { padding-inline: .7rem; } .stepper small { width: 76px; font-size: .68rem; } .stepper small em { white-space: normal; font-size: .58rem; } }

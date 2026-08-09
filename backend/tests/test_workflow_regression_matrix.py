@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from app.domain.claim_status import ClaimStatus, review_target_status, validate_claim_status_transition
+from app.domain.evidence_reasoning import shape_source_aware_conflicts
 from app.models.adjuster_packet import AdjusterNotificationDraft
 from app.models.claim_document import ClaimDocument, DocumentExtractionResult
 from app.models.notification import AdjusterNotification
@@ -14,6 +15,8 @@ from app.models.review_result import (
     MissingEvidence,
     OperationalIndicators,
     ReviewResult,
+    UnresolvedUncertainty,
+    UploadedEvidence,
 )
 from app.services.adjuster_dispatch_service import AdjusterDispatchService
 from app.services.claim_review_service import ClaimReviewError
@@ -68,6 +71,73 @@ def identity_missing_review(
         requested_actions=[action] if action else [],
         current_evidence_findings=findings or [],
         operational_indicators=OperationalIndicators(),
+    )
+
+
+def auto_reconciliation_review() -> ReviewResult:
+    conflict = EvidenceConflict(
+        field="damage_location",
+        values=["rear", "front", "rear"],
+        sources=["police-report.pdf", "bad-front.jpg", "correct-rear-plate.jpg"],
+        reason="One image conflicts with corroborated current evidence.",
+    )
+    findings = [
+        CurrentEvidenceFinding(
+            source="police-report.pdf", finding="Rear-end collision with rear damage."
+        ),
+        CurrentEvidenceFinding(
+            source="bad-front.jpg", finding="A different silver SUV has front damage."
+        ),
+        CurrentEvidenceFinding(
+            source="correct-rear-plate.jpg",
+            finding="The identified grey sedan has rear damage.",
+        ),
+    ]
+    uploaded = [
+        UploadedEvidence(
+            evidence_type="police_report", filename="police-report.pdf",
+            document_id="DOC-REPORT", source_identity="document:DOC-REPORT",
+            document_type="police_report",
+            evidence_findings=["Rear-end collision with rear damage."],
+        ),
+        UploadedEvidence(
+            evidence_type="damage_evidence", filename="bad-front.jpg",
+            document_id="DOC-BAD", source_identity="document:DOC-BAD",
+            document_type="license_plate_photo",
+            evidence_findings=["A different silver SUV has front damage."],
+        ),
+        UploadedEvidence(
+            evidence_type="damage_evidence", filename="correct-rear-plate.jpg",
+            document_id="DOC-CURRENT", source_identity="document:DOC-CURRENT",
+            document_type="license_plate_photo",
+            evidence_findings=["The identified grey sedan has rear damage."],
+        ),
+        UploadedEvidence(
+            evidence_type="vehicle_identity", filename="correct-rear-plate.jpg",
+            document_id="DOC-CURRENT", source_identity="document:DOC-CURRENT",
+            document_type="license_plate_photo",
+        ),
+    ]
+    return ReviewResult(
+        intake_complete=False,
+        intake_priority="expedited",
+        priority_reason="Claimant evidence can resolve the discrepancy.",
+        confidence=0.9,
+        inspection_required=True,
+        conflicts=[conflict],
+        source_aware_conflicts=shape_source_aware_conflicts(
+            [conflict], findings, uploaded
+        ),
+        current_evidence_findings=findings,
+        requested_actions=[UploadDocumentRequestedAction(
+            action_id="ACT-AUTO-RECONCILE",
+            review_id="AUTONOMOUS-AUTO-RECONCILE",
+            document_type="damage_evidence",
+            instruction="Upload the correct rear damage and plate image.",
+            replaces_document_id="DOC-BAD",
+        )],
+        requires_human_review=False,
+        operational_indicators=OperationalIndicators(safety_concern=True),
     )
 
 
@@ -543,13 +613,39 @@ class FrozenWorkflowRegressionMatrixTests(unittest.TestCase):
 
     def test_flow_4_bad_followup_gets_claimant_remediation_then_resolves(self):
         harness = WorkflowMatrixHarness([
-            doc("DOC-REPORT", "police-report.pdf", "police_report"),
-            doc("DOC-REAR", "rear.jpg", "damage_evidence", capabilities=("damage_evidence",)),
+            doc(
+                "DOC-REPORT", "police-report.pdf", "police_report",
+                findings=(
+                    "Rear-end collision with rear bumper and left tail light damage; "
+                    "the vehicle was drivable and no injuries were reported.",
+                ),
+            ),
+            doc(
+                "DOC-REAR", "IMG_5418.png", "damage_evidence",
+                capabilities=("damage_evidence",),
+                findings=("Rear bumper and left tail light damage.",),
+            ),
         ])
         harness.submit(identity_missing_review())
-        bad = doc("DOC-BAD", "wrong-front.jpg", "license_plate_photo")
+        bad = doc("DOC-BAD", "IMG_5420.png", "license_plate_photo")
+        first = harness.deliver(
+            bad,
+            DocumentExtractionResult(
+                usable=True,
+                reason="Damage is visible, but the requested identity is not readable.",
+                supported_capabilities=["damage_evidence"],
+                evidence_findings=[
+                    "A silver Honda SUV has front-end damage.",
+                    "A material safety concern is visible on that vehicle.",
+                ],
+            ),
+            identity_missing_review(),
+        )
+        self.assertEqual(first.final_status, "awaiting_documents")
+
+        correct = doc("DOC-CORRECT", "IMG_5419.png", "license_plate_photo")
         provider = MagicMock()
-        provider.models.generate_content.return_value.text = ReviewResult(
+        conflicted_review = ReviewResult(
             intake_complete=False,
             intake_priority="routine",
             priority_reason="Claimant evidence can resolve the discrepancy.",
@@ -557,51 +653,161 @@ class FrozenWorkflowRegressionMatrixTests(unittest.TestCase):
             inspection_required=True,
             conflicts=[EvidenceConflict(
                 field="vehicle_identity_and_damage_location",
-                values=["dark grey vehicle with rear damage", "silver SUV with front damage"],
-                sources=["rear.jpg", "wrong-front.jpg"],
-                reason="The follow-up shows a different vehicle and damage location.",
+                values=["silver SUV/front", "grey sedan/rear"],
+                sources=["IMG_5420.png", "IMG_5419.png"],
+                reason="The follow-up images show different vehicles and damage locations.",
             )],
             current_evidence_findings=[
-                CurrentEvidenceFinding(source="rear.jpg", finding="Rear damage is visible."),
-                CurrentEvidenceFinding(source="wrong-front.jpg", finding="A silver SUV has front damage."),
+                CurrentEvidenceFinding(
+                    source="police-report.pdf",
+                    finding="Rear-end collision; rear damage; drivable; no injuries.",
+                ),
+                CurrentEvidenceFinding(
+                    source="IMG_5418.png",
+                    finding="Rear bumper and left tail light damage.",
+                ),
+                CurrentEvidenceFinding(
+                    source="IMG_5420.png",
+                    finding="A silver Honda SUV has front damage and a safety concern.",
+                ),
+                CurrentEvidenceFinding(
+                    source="IMG_5419.png",
+                    finding="A grey sedan has rear damage and California plate 7ABX123.",
+                ),
             ],
+            unresolved_uncertainties=[UnresolvedUncertainty(
+                uncertainty=(
+                    "The silver front-damage vehicle may not be the same vehicle "
+                    "as the identified grey rear-damage vehicle."
+                ),
+                sources=["IMG_5420.png", "IMG_5419.png"],
+            )],
             requires_human_review=False,
             operational_indicators=OperationalIndicators(
-                safety_concern=True, high_operational_uncertainty=True
-            ),
-        ).model_dump_json()
-        harness.resume._review_service = ClaimReviewService(provider, "mock-model")
-        first = harness.deliver(
-            bad,
-            DocumentExtractionResult(
-                usable=False,
-                reason="The follow-up does not contain the requested readable plate.",
-                supported_capabilities=["damage_evidence", "vehicle_identity"],
-                evidence_findings=["A silver SUV has front damage."],
+                safety_concern=True,
+                significant_damage=True,
+                high_operational_uncertainty=True,
             ),
         )
-        self.assertEqual(first.final_status, "awaiting_documents")
-        self.assertFalse(harness.snapshot()["requires_human_review"])
-        actions = parse_requested_actions(harness.repository.claim["requested_actions"])
-        self.assertEqual(len(actions), 1)
-        self.assertIsInstance(actions[0], UploadDocumentRequestedAction)
-        self.assertEqual(actions[0].replaces_document_id, "DOC-BAD")
-
-        correct = doc("DOC-CORRECT", "correct-rear-plate.jpg", "license_plate_photo")
-        harness.resume._review_service = harness.review
+        provider.models.generate_content.side_effect = [
+            SimpleNamespace(text=conflicted_review.model_dump_json()),
+            SimpleNamespace(text=complete_review(findings=[
+                CurrentEvidenceFinding(
+                    source="IMG_5419.png",
+                    finding=(
+                        "The identified grey sedan has rear damage and plate 7ABX123."
+                    ),
+                )
+            ]).model_dump_json()),
+        ]
+        harness.resume._review_service = ClaimReviewService(provider, "mock-model")
         second = harness.deliver(
             correct,
             DocumentExtractionResult(
-                usable=True, reason="Correct rear damage and identity are readable.",
-                supported_capabilities=["damage_evidence", "license_plate_photo", "vehicle_identity"],
+                usable=True,
+                reason="Rear damage and vehicle identity are readable.",
+                supported_capabilities=[
+                    "damage_evidence", "license_plate_photo", "vehicle_identity"
+                ],
+                evidence_findings=[
+                    "A grey sedan has rear damage and California plate 7ABX123."
+                ],
+            ),
+        )
+        self.assertEqual(second.final_status, "inspection_ready")
+        self.assertFalse(harness.snapshot()["requires_human_review"])
+        actions = parse_requested_actions(harness.repository.claim["requested_actions"])
+        self.assertEqual(actions, [])
+        snapshot = harness.snapshot()
+        self.assertEqual(snapshot["superseded_document_ids"], ["DOC-BAD"])
+        committed = harness.repository.documents["DOC-CORRECT"]
+        self.assertEqual(committed.replaces_document_id, "DOC-BAD")
+        self.assertIsNotNone(committed.requested_action_id)
+        self.assertFalse(snapshot["operational_indicators"]["safety_concern"])
+        self.assertEqual(harness.repository.supersession_writes, 1)
+        self.assertEqual(snapshot["decision_generations"], 1)
+
+    def test_flow_4_existing_explicit_second_replacement_remains_supported(self):
+        action = UploadDocumentRequestedAction(
+            action_id="ACT-FLOW-4-LEGACY",
+            review_id="AUTONOMOUS-FLOW-4-LEGACY",
+            document_type="damage_evidence",
+            instruction="Upload the correct rear damage and plate image.",
+            replaces_document_id="DOC-BAD",
+        )
+        harness = WorkflowMatrixHarness([
+            doc("DOC-REPORT", "police-report.pdf", "police_report"),
+            doc("DOC-BAD", "bad-front.jpg", "damage_evidence"),
+        ])
+        harness.submit(identity_missing_review(action=action))
+
+        replacement = doc(
+            "DOC-LEGACY-REPLACEMENT", "correct-rear-plate.jpg",
+            "license_plate_photo",
+        )
+        result = harness.deliver(
+            replacement,
+            DocumentExtractionResult(
+                usable=True,
+                reason="Rear damage and the plate are readable.",
+                supported_capabilities=[
+                    "damage_evidence", "license_plate_photo", "vehicle_identity"
+                ],
             ),
             complete_review(),
         )
-        self.assertEqual(second.final_status, "inspection_ready")
-        snapshot = harness.snapshot()
-        self.assertEqual(snapshot["superseded_document_ids"], ["DOC-BAD"])
-        self.assertNotIn("wrong-front.jpg", harness.review.active_sources[-1])
-        self.assertEqual(snapshot["decision_generations"], 1)
+
+        self.assertEqual(result.final_status, "inspection_ready")
+        self.assertEqual(harness.snapshot()["superseded_document_ids"], ["DOC-BAD"])
+        self.assertEqual(harness.repository.supersession_writes, 1)
+
+    def test_flow_4_auto_reconciliation_retry_does_not_repeat_supersession(self):
+        harness = WorkflowMatrixHarness([
+            doc(
+                "DOC-REPORT", "police-report.pdf", "police_report",
+                findings=("Rear-end collision with rear damage.",),
+            ),
+            doc(
+                "DOC-BAD", "bad-front.jpg", "license_plate_photo",
+                capabilities=("damage_evidence",),
+                findings=("A different silver SUV has front damage.",),
+            ),
+        ])
+        harness.submit(identity_missing_review())
+        current = doc("DOC-CURRENT", "correct-rear-plate.jpg", "license_plate_photo")
+        extraction = DocumentExtractionResult(
+            usable=True,
+            reason="Rear damage and vehicle identity are readable.",
+            supported_capabilities=[
+                "damage_evidence", "license_plate_photo", "vehicle_identity"
+            ],
+            evidence_findings=["The identified grey sedan has rear damage."],
+        )
+
+        with self.assertRaisesRegex(ClaimReviewError, "429"):
+            harness.deliver(
+                current,
+                extraction,
+                auto_reconciliation_review(),
+                ClaimReviewError("429 RESOURCE_EXHAUSTED"),
+            )
+        self.assertEqual(harness.repository.supersession_writes, 0)
+        document_count = len(harness.repository.documents)
+
+        result = harness.deliver(
+            current,
+            extraction,
+            auto_reconciliation_review(),
+            complete_review(),
+        )
+
+        self.assertEqual(result.final_status, "inspection_ready")
+        self.assertEqual(len(harness.repository.documents), document_count)
+        self.assertEqual(harness.repository.supersession_writes, 1)
+        self.assertEqual(harness.repository.action_consumptions, 1)
+        replay = harness.resume.resume(CLAIM_ID, current)
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(harness.repository.supersession_writes, 1)
 
     def test_flows_2_to_4_retryable_review_matrix_is_same_operation_safe(self):
         for flow in (2, 3, 4):
