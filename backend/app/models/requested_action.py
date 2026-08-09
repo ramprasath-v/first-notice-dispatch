@@ -31,7 +31,7 @@ class UploadDocumentRequestedAction(BaseModel):
     review_id: str
     document_type: str
     instruction: str
-    replaces_document_id: str
+    replaces_document_id: str | None = None
 
 
 RequestedAction = Annotated[

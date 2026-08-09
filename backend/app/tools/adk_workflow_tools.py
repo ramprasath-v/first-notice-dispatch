@@ -103,7 +103,8 @@ class ClaimWorkflowToolAdapter:
         claim = self.repository.get_claim(claim_id)
         if claim is None:
             raise ValueError(f"Claim {claim_id} does not exist.")
-        if claim.get("status") != "intake_complete":
+        current_status = str(claim.get("status"))
+        if current_status not in {"intake_complete", "review_processing"}:
             raise ValueError(
                 f"Claim {claim_id} cannot review from status {claim.get('status')!r}."
             )
@@ -134,7 +135,8 @@ class ClaimWorkflowToolAdapter:
             except (FileNotFoundError, ValueError):
                 continue
 
-        self.repository.update_claim_status(claim_id, "review_processing")
+        if current_status == "intake_complete":
+            self.repository.update_claim_status(claim_id, "review_processing")
         review_result = self.review_service.review(
             intake_result,
             metadata,

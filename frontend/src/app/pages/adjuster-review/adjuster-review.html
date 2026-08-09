@@ -1,7 +1,7 @@
 <main class="page review-page">
   <section class="review-shell card">
     <p class="kicker">FirstNotice Dispatch</p>
-    <h1>Adjuster Review</h1>
+    <h1>Inspection Decision</h1>
 
     @if (loading()) {
       <p class="muted">Loading the secure review checkpoint…</p>
@@ -10,33 +10,44 @@
     } @else if (review(); as item) {
       <div class="claim-heading">
         <div><span>Claim</span><strong>{{ item.claim_id }}</strong></div>
-        <span class="status">Human Review Required</span>
+        <span class="status">Intake Complete</span>
       </div>
 
-      <section>
-        <h2>Why FirstNotice paused</h2>
-        <p>{{ item.reason }}</p>
+      <section class="recommendation" aria-labelledby="recommendation-title">
+        <p class="kicker" id="recommendation-title">AI recommendation</p>
+        <h2>Physical inspection recommended</h2>
+        <p>{{ item.ai_recommendation || item.briefing.summary }}</p>
       </section>
 
+      @if (snapshotEntries().length) {
+        <section>
+          <p class="kicker">Claim snapshot</p>
+          <div class="comparison-grid snapshot-grid">
+            @for (entry of snapshotEntries(); track entry.label) {
+              <article><span>{{ entry.label }}</span><p>{{ entry.value }}</p></article>
+            }
+          </div>
+        </section>
+      }
+
       @if (comparisonFacts().length) {
+        <section><p class="kicker">Evidence comparison</p>
         <section class="comparison-grid" aria-label="Evidence comparison">
           @for (fact of comparisonFacts(); track fact.source + fact.finding) {
             <article>
-              <span>{{ fact.source }}</span>
+              <span>{{ humanize(fact.source) }}</span>
               <p>{{ fact.finding }}</p>
             </article>
           }
         </section>
+        </section>
       }
 
-      <section class="recommendation" aria-labelledby="recommendation-title">
-        <p class="kicker" id="recommendation-title">AI recommendation</p>
-        <h2>{{ item.recommended_remediation.label }}</h2>
-        <p>{{ item.recommended_remediation.instruction }}</p>
-        @if (!item.recommended_remediation.can_request) {
-          <p class="muted">FirstNotice found multiple possible targets and will not choose one automatically.</p>
-        }
-      </section>
+      @if ((item.resolution_history ?? []).length) {
+        <section><p class="kicker">Resolution history</p><ul class="resolution-list">
+          @for (entry of item.resolution_history ?? []; track entry) { <li>✓ {{ entry }}</li> }
+        </ul></section>
+      }
 
       <details class="analysis-details">
         <summary>View AI analysis</summary>
@@ -46,7 +57,7 @@
             <h3>Conflicts</h3>
             <ul>@for (conflict of item.briefing.conflicts; track conflict) { <li>{{ conflict }}</li> }</ul>
           }
-          <h3>What to verify</h3>
+          <h3>Decision context</h3>
           <ul>@for (question of item.briefing.unresolved_questions; track question) { <li>{{ question }}</li> }</ul>
           @if ((item.source_references ?? []).length) {
             <h3>Evidence sources</h3>
@@ -62,22 +73,24 @@
       @if (completedMessage()) {
         <div class="alert success-alert" role="status">{{ completedMessage() }}</div>
       } @else {
-        <label class="field">
-          <span>Decision note <small>Optional</small></span>
-          <textarea [(ngModel)]="decisionNote" rows="3" maxlength="1000"
-            placeholder="Add a concise operational note"></textarea>
-        </label>
+        @if (requestInfoOpen()) {
+          <label class="field more-info-field">
+            <span>What additional information do you need?</span>
+            <textarea [(ngModel)]="decisionNote" rows="3" maxlength="1000"
+              placeholder="Please upload a clearer photo of the passenger-side rear damage."></textarea>
+          </label>
+        }
         <div class="actions">
-          <button class="primary" type="button" [disabled]="deciding()" (click)="approve()">
-            {{ deciding() ? 'Recording…' : 'Approve & Continue' }}
-          </button>
           <button class="secondary" type="button"
-            [disabled]="deciding() || !item.recommended_remediation.can_request"
+            [disabled]="deciding() || (requestInfoOpen() && !decisionNote.trim())"
             (click)="requestMoreInformation()">
-            Request More Information
+            {{ requestInfoOpen() ? 'Send Request' : 'Request More Info' }}
+          </button>
+          <button class="primary" type="button" [disabled]="deciding()" (click)="approve()">
+            {{ deciding() ? 'Recording…' : 'Approve Inspection' }}
           </button>
         </div>
-        <p class="boundary">This decision resumes operational intake only. It does not approve coverage, liability, or payment.</p>
+        <p class="boundary">Approve Inspection authorizes physical inspection only. It does not approve coverage, liability, or payment.</p>
       }
     }
   </section>

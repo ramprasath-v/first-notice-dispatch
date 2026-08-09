@@ -68,7 +68,7 @@ class HumanReviewRecord(BaseModel):
         default_factory=_legacy_remediation
     )
     recommended_target_document_id: str | None = None
-    correction_type: Literal["text", "replace_document"] | None = None
+    correction_type: Literal["text", "upload_document", "replace_document"] | None = None
     target_document_id: str | None = None
     token_hash: str = Field(min_length=64, max_length=64, exclude=True)
     created_at: datetime
@@ -102,6 +102,10 @@ class HumanReviewPublicResponse(BaseModel):
     recommended_remediation: RecommendedRemediation = Field(
         default_factory=_legacy_remediation
     )
+    ai_recommendation: str = "Physical inspection recommended."
+    claim_snapshot: dict[str, str | bool | None] = Field(default_factory=dict)
+    evidence_comparison: list[dict[str, str]] = Field(default_factory=list)
+    resolution_history: list[str] = Field(default_factory=list)
     expires_at: datetime
     decision_at: datetime | None = None
 
@@ -109,7 +113,7 @@ class HumanReviewPublicResponse(BaseModel):
 class HumanReviewDecisionRequest(BaseModel):
     decision_note: str | None = Field(default=None, max_length=1000)
     reviewer_label: str | None = Field(default=None, max_length=100)
-    correction_type: Literal["text", "replace_document"] | None = None
+    correction_type: Literal["text", "upload_document", "replace_document"] | None = None
     target_document_id: str | None = Field(default=None, max_length=128)
 
 

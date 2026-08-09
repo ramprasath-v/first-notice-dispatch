@@ -8,6 +8,7 @@ class ClaimStatus(StrEnum):
     INTAKE_COMPLETE = "intake_complete"
     REVIEW_PROCESSING = "review_processing"
     AWAITING_DOCUMENTS = "awaiting_documents"
+    INSPECTION_READY = "inspection_ready"
     INSPECTION_PENDING = "inspection_pending"
     INSPECTION_SCHEDULED = "inspection_scheduled"
     ADJUSTER_NOTIFIED = "adjuster_notified"
@@ -20,7 +21,7 @@ ALLOWED_TRANSITIONS: dict[ClaimStatus, frozenset[ClaimStatus]] = {
     ClaimStatus.REVIEW_PROCESSING: frozenset(
         {
             ClaimStatus.AWAITING_DOCUMENTS,
-            ClaimStatus.INSPECTION_PENDING,
+            ClaimStatus.INSPECTION_READY,
             ClaimStatus.HUMAN_REVIEW_REQUIRED,
         }
     ),
@@ -28,6 +29,12 @@ ALLOWED_TRANSITIONS: dict[ClaimStatus, frozenset[ClaimStatus]] = {
         {
             ClaimStatus.AWAITING_DOCUMENTS,
             ClaimStatus.REVIEW_PROCESSING,
+        }
+    ),
+    ClaimStatus.INSPECTION_READY: frozenset(
+        {
+            ClaimStatus.AWAITING_DOCUMENTS,
+            ClaimStatus.INSPECTION_PENDING,
         }
     ),
     ClaimStatus.INSPECTION_PENDING: frozenset(
@@ -71,4 +78,4 @@ def review_target_status(review_result: ReviewResult) -> ClaimStatus:
         return ClaimStatus.HUMAN_REVIEW_REQUIRED
     if not review_result.intake_complete:
         return ClaimStatus.AWAITING_DOCUMENTS
-    return ClaimStatus.INSPECTION_PENDING
+    return ClaimStatus.INSPECTION_READY

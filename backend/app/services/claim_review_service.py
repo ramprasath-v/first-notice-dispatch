@@ -1,4 +1,5 @@
 import json
+import hashlib
 from dataclasses import asdict
 from typing import Any, Sequence
 
@@ -10,19 +11,29 @@ from app.domain.intake_requirements import (
     evaluate_intake_requirements,
 )
 from app.domain.evidence_reasoning import (
+    canonical_active_evidence,
     fingerprint_uncertainties,
     shape_source_aware_conflicts,
     shape_source_aware_uncertainties,
 )
 from app.models.intake_result import IntakeResult
+from app.models.gemini_review_result import GeminiReviewResult
 from app.models.review_result import (
     ClaimEvidenceMetadata,
     CurrentEvidenceFinding,
     EvidenceConflict,
     MissingEvidence,
     ReviewResult,
+    SourceAwareConflict,
+    SourceAwareUncertainty,
     UnresolvedUncertainty,
     UnusableEvidence,
+    UploadedEvidence,
+)
+from app.models.requested_action import (
+    EnterTextRequestedAction,
+    RequestedAction,
+    UploadDocumentRequestedAction,
 )
 
 
@@ -39,6 +50,14 @@ MATERIAL_OPERATIONAL_CONFLICT_FIELDS = {
     "damage_location",
     "vehicle_drivability",
 }
+
+
+def review_generation_config() -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        temperature=0.1,
+        response_mime_type="application/json",
+        response_schema=GeminiReviewResult,
+    )
 
 
 class ClaimReviewService:
@@ -65,11 +84,7 @@ class ClaimReviewService:
                         parts=[types.Part.from_text(text=prompt), *evidence_parts],
                     )
                 ],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    response_schema=ReviewResult,
-                ),
+                config=review_generation_config(),
             )
         except Exception as exc:
             raise ClaimReviewError(f"Gemini evidence review failed: {exc}") from exc
@@ -78,7 +93,9 @@ class ClaimReviewService:
             raise ClaimReviewError("Gemini returned an empty evidence review response.")
 
         try:
-            ai_review = ReviewResult.model_validate_json(response.text)
+            ai_review = GeminiReviewResult.model_validate_json(
+                response.text
+            ).to_domain()
         except ValidationError as exc:
             raise ClaimReviewError(
                 f"Gemini evidence review failed ReviewResult validation: {exc}"
@@ -129,9 +146,13 @@ Safety and scope rules:
 11. For every unresolved uncertainty that compares two or more evidence
    artifacts, enumerate every participating submitted filename in sources. Do
    not summarize a comparison of multiple photos with only one source.
-12. Return only the required ReviewResult structure.
+12. During resumed review, evidence-derived IntakeResult summaries may be blank
+   because their original source was superseded. A blank damage summary or
+   parts list is not conflicting evidence. Recompute current findings only from
+   claimant-entered facts and the active submitted evidence.
+13. Return only the required ReviewResult structure.
 
-Validated IntakeResult:
+Current review context:
 {intake_result.model_dump_json(indent=2)}
 
 Uploaded evidence metadata:
@@ -234,11 +255,14 @@ Deterministic checklist evaluations:
                 for existing in conflicts
             ):
                 conflicts.append(conflict)
-        current_findings = [
-            CurrentEvidenceFinding(source=evidence.filename, finding=finding)
-            for evidence in metadata.uploaded_evidence
-            for finding in evidence.evidence_findings
-        ]
+        current_findings: list[CurrentEvidenceFinding] = []
+        for evidence in metadata.uploaded_evidence:
+            for finding in evidence.evidence_findings:
+                candidate = CurrentEvidenceFinding(
+                    source=evidence.filename, finding=finding
+                )
+                if candidate not in current_findings:
+                    current_findings.append(candidate)
         for finding in ai_review.current_evidence_findings:
             source_key = _submitted_source_key(
                 finding.source,
@@ -333,10 +357,6 @@ Deterministic checklist evaluations:
             if assessment.fingerprint not in approved_fingerprints
         ]
         current_uncertainties.sort(key=lambda item: item.fingerprint or "")
-        significant_conflict = any(
-            conflict.field in SIGNIFICANT_CONFLICT_FIELDS for conflict in conflicts
-        )
-
         indicators = ai_review.operational_indicators
         incident_text = intake_result.incident_summary.lower()
         explicitly_no_injury = any(
@@ -357,32 +377,44 @@ Deterministic checklist evaluations:
             and bool(current_uncertainties)
         )
         has_resolvable_evidence_gap = bool(missing or unusable)
-        material_operational_conflict = (
-            not has_resolvable_evidence_gap
-            and any(
-                conflict.field in MATERIAL_OPERATIONAL_CONFLICT_FIELDS
-                for conflict in conflicts
-            )
+        has_identity_provenance_gap = any(
+            item.type in {"vehicle_identity", "license_plate_photo"}
+            for item in missing
+        ) or any(
+            item.evidence_type in {"vehicle_identity", "license_plate_photo"}
+            for item in unusable
+        )
+        requested_actions = _autonomous_claimant_actions(
+            conflicts=conflicts,
+            source_aware_conflicts=source_aware,
+            source_aware_uncertainties=source_aware_uncertainties,
+            uploaded_evidence=metadata.uploaded_evidence,
+            has_identity_provenance_gap=has_identity_provenance_gap,
+        )
+        grounded_safety_concern = (
+            safety_concern and not has_identity_provenance_gap
+        )
+        unresolved_reasoning = bool(conflicts or current_uncertainties)
+        unsupported_discrepancy = (
+            unresolved_reasoning
+            and not has_resolvable_evidence_gap
+            and not requested_actions
         )
 
         if possible_injury:
             priority = "urgent_human_review"
             priority_reason = "Possible injury requires prompt human review."
-        elif safety_concern:
+        elif grounded_safety_concern:
             priority = "urgent_human_review"
             priority_reason = "A reported safety concern requires human review."
-        elif significant_conflict:
-            priority = "urgent_human_review"
-            priority_reason = "A significant factual conflict requires human review."
-        elif material_operational_conflict:
-            priority = "urgent_human_review"
-            priority_reason = (
-                "Current submitted evidence contains a material operational conflict."
-            )
-        elif high_uncertainty and not has_resolvable_evidence_gap:
+        elif unsupported_discrepancy or (
+            high_uncertainty
+            and not has_resolvable_evidence_gap
+            and not requested_actions
+        ):
             priority = "urgent_human_review"
             priority_reason = (
-                "High uncertainty affects the next operational routing step."
+                "FirstNotice could not formulate a safe claimant remediation."
             )
         elif (
             intake_result.vehicle_drivable is False
@@ -399,11 +431,8 @@ Deterministic checklist evaluations:
 
         requires_human_review = priority == "urgent_human_review"
         human_review_reason = priority_reason if requires_human_review else None
-        intake_complete = (
-            not missing
-            and not unusable
-            and not significant_conflict
-            and not material_operational_conflict
+        intake_complete = not (
+            missing or unusable or conflicts or current_uncertainties
         )
 
         return ReviewResult(
@@ -419,10 +448,164 @@ Deterministic checklist evaluations:
             source_aware_uncertainties=source_aware_uncertainties,
             current_evidence_findings=current_findings,
             unresolved_uncertainties=current_uncertainties,
+            requested_actions=requested_actions,
             requires_human_review=requires_human_review,
             human_review_reason=human_review_reason,
             operational_indicators=indicators,
         )
+
+
+def _autonomous_claimant_actions(
+    *,
+    conflicts: list[EvidenceConflict],
+    source_aware_conflicts: list[SourceAwareConflict],
+    source_aware_uncertainties: list[SourceAwareUncertainty],
+    uploaded_evidence: list[UploadedEvidence],
+    has_identity_provenance_gap: bool,
+) -> list[RequestedAction]:
+    """Return at most one deterministic, allowlisted claimant action."""
+    for field_name, instruction in (
+        ("policy_number", "Please confirm your policy number."),
+        ("incident_date", "Please confirm the incident date."),
+    ):
+        conflict = next((item for item in conflicts if item.field == field_name), None)
+        if conflict is not None:
+            fingerprint = _action_fingerprint(field_name, conflict.sources)
+            return [EnterTextRequestedAction(
+                action_id=f"ACT-{fingerprint}",
+                review_id=f"AUTONOMOUS-{fingerprint}",
+                field_name=field_name,
+                instruction=instruction,
+            )]
+
+    selected = {
+        item.selected_outlier_document_id
+        for item in [*source_aware_conflicts, *source_aware_uncertainties]
+        if item.selected_outlier_document_id
+    }
+    if not selected and has_identity_provenance_gap:
+        selected = _single_unusable_conflicting_artifact(
+            conflicts, uploaded_evidence
+        )
+    if not selected:
+        report_backed_targets = {
+            assertion.document_id
+            for assessment in [*source_aware_conflicts, *source_aware_uncertainties]
+            if getattr(assessment, "field", getattr(assessment, "category", None))
+            == "damage_location"
+            and any(not item.replaceable for item in assessment.assertions)
+            for assertion in assessment.assertions
+            if assertion.replaceable and assertion.document_id
+            and assertion.value
+            not in {
+                item.value
+                for item in assessment.assertions
+                if not item.replaceable
+            }
+        }
+        if len(report_backed_targets) == 1:
+            selected = report_backed_targets
+    if not selected and has_identity_provenance_gap:
+        selected = _single_referenced_damage_artifact(
+            conflicts, uploaded_evidence
+        )
+    if len(selected) != 1:
+        return []
+    target = next(iter(selected))
+    related = next(
+        (
+            item
+            for item in [*source_aware_conflicts, *source_aware_uncertainties]
+            if item.selected_outlier_document_id == target
+            or any(assertion.document_id == target for assertion in item.assertions)
+        ),
+        None,
+    )
+    fingerprint = (
+        related.fingerprint.removeprefix("CFP-")[:16]
+        if related is not None
+        else _action_fingerprint("damage_evidence", [target])
+    )
+    instruction = (
+        "Please upload a clear photo of the vehicle involved in this incident "
+        "showing the reported damage and a readable license plate."
+        if has_identity_provenance_gap
+        else "Please upload the correct damage photo for this claim."
+    )
+    return [UploadDocumentRequestedAction(
+        action_id=f"ACT-{fingerprint}",
+        review_id=f"AUTONOMOUS-{fingerprint}",
+        document_type="damage_evidence",
+        instruction=instruction,
+        replaces_document_id=target,
+    )]
+
+
+def _single_referenced_damage_artifact(
+    conflicts: list[EvidenceConflict],
+    uploaded_evidence: list[UploadedEvidence],
+) -> set[str]:
+    """Return one auditable artifact named by a report/photo damage conflict."""
+    damage_sources = {
+        _normalized_source_name(source)
+        for conflict in conflicts
+        if conflict.field == "damage_location"
+        for source in conflict.sources
+    }
+    if not damage_sources:
+        return set()
+    artifacts = canonical_active_evidence(uploaded_evidence)
+    referenced = [
+        artifact
+        for artifact in artifacts
+        if _normalized_source_name(artifact.filename) in damage_sources
+    ]
+    candidates = {
+        artifact.document_id
+        for artifact in referenced
+        if artifact.replaceable and artifact.document_id
+    }
+    if len(candidates) != 1 or not any(
+        not artifact.replaceable for artifact in referenced
+    ):
+        return set()
+    return candidates
+
+
+def _single_unusable_conflicting_artifact(
+    conflicts: list[EvidenceConflict],
+    uploaded_evidence: list[UploadedEvidence],
+) -> set[str]:
+    """Select one failed claimant artifact that introduced a current conflict."""
+    conflict_sources = {
+        _normalized_source_name(source)
+        for conflict in conflicts
+        if conflict.field in {
+            "damage_location",
+            "vehicle_identity",
+            "vehicle_identity_and_damage_location",
+        }
+        for source in conflict.sources
+    }
+    if not conflict_sources:
+        return set()
+    return {
+        artifact.document_id
+        for artifact in canonical_active_evidence(uploaded_evidence)
+        if artifact.document_id
+        and artifact.replaceable
+        and artifact.status == "unusable"
+        and _normalized_source_name(artifact.filename) in conflict_sources
+    }
+
+
+def _normalized_source_name(value: str) -> str:
+    return " ".join(value.casefold().replace("-", " ").split())
+
+
+def _action_fingerprint(field_name: str, sources: list[str]) -> str:
+    payload = f"{field_name}:{'|'.join(sorted(source.casefold() for source in sources))}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16].upper()
 
 
 def _append_unique_missing(

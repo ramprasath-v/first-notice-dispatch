@@ -1,28 +1,24 @@
-@if (activity.length) {
-  <section class="card activity-card">
-    <div class="section-heading"><div><p class="kicker">Autonomous workflow</p><h2>Agent Activity</h2></div><span class="live-dot"><i></i> Live workflow · persisted events</span></div>
-    <div class="activity-list">
-      @for (item of activity; track item.key) {
-        <div><span>{{ item.agent }}</span><strong>{{ item.description }}</strong><time>{{ item.timestamp | date:'h:mm:ss a' }}</time></div>
-      }
-    </div>
-  </section>
-}
+<section class="card timeline-card activity-card">
+  <div class="section-heading">
+    <div><p class="kicker">Live claim updates</p><h2>Your claim activity</h2></div>
+    <span class="live-dot"><i></i> Persisted events</span>
+  </div>
 
-<section class="card timeline-card">
-  <div class="section-heading"><div><p class="kicker">Claimant milestones</p><h2>Claim timeline</h2></div></div>
   <ol class="timeline">
     @for (item of presented; track item.key) {
       <li><span class="dot"></span><div><strong>{{ item.title }}</strong><p>{{ item.description }}</p><time>{{ item.timestamp | date:'MMM d, h:mm a' }}</time></div></li>
     } @empty { <li class="empty">Your first update will appear here shortly.</li> }
   </ol>
-</section>
 
-@if (technical.length) {
-  <details class="technical">
-    <summary>Technical trace <span>{{ technical.length }} events</span></summary>
-    @for (event of technical; track event.timestamp + event.action + event.correlation_id) {
-      <div><code>{{ technicalName(event) }}</code><time>{{ event.timestamp | date:'mediumTime' }}</time></div>
-    }
-  </details>
-}
+  @if (activity.length || technical.length) {
+    <details class="technical">
+      <summary>View technical activity <span>{{ activity.length + technical.length }} events</span></summary>
+      @for (item of activity; track item.key) {
+        <div class="technical-activity"><code>{{ item.agent }}</code><strong>{{ item.description }}</strong><time>{{ item.timestamp | date:'mediumTime' }}</time></div>
+      }
+      @for (event of technical; track event.timestamp + event.action + event.correlation_id) {
+        <div><code>{{ technicalName(event) }}</code><time>{{ event.timestamp | date:'mediumTime' }}</time></div>
+      }
+    </details>
+  }
+</section>

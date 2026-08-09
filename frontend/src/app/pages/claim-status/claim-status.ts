@@ -18,6 +18,7 @@ export const STATUS_LABELS: Record<string, string> = {
   intake_complete: 'Evidence analyzed',
   review_processing: 'Reviewing claim requirements',
   awaiting_documents: 'More information needed',
+  inspection_ready: 'Ready for inspection decision',
   inspection_pending: 'Preparing inspection',
   inspection_scheduled: 'Inspection scheduled',
   adjuster_notified: 'Ready for adjuster review',
@@ -32,6 +33,7 @@ export const STATUS_DESCRIPTIONS: Record<string, string> = {
   intake_complete: 'Your evidence has been analyzed and the intake requirements are being reviewed.',
   review_processing: 'FirstNotice is checking the evidence and requirements needed to continue.',
   awaiting_documents: 'FirstNotice needs additional evidence before processing can continue.',
+  inspection_ready: 'FirstNotice completed your claim intake. Your evidence package is ready for an adjuster inspection decision.',
   inspection_pending: 'Your claim has cleared intake review and FirstNotice is arranging the inspection.',
   inspection_scheduled: 'Your inspection has been scheduled.',
   adjuster_notified: 'Your intake is complete and the claim information has been sent to the adjuster.',
@@ -50,9 +52,9 @@ export function workflowSteps(status: string, rechecking = false): WorkflowStep[
     'intake_processing', 'intake_complete', 'review_processing',
     'awaiting_documents', 'human_review_required',
   ].includes(status);
-  const inspectionReached = ['inspection_pending', 'inspection_scheduled', 'adjuster_notified', 'closed'].includes(status);
+  const inspectionReached = ['inspection_ready', 'inspection_pending', 'inspection_scheduled', 'adjuster_notified', 'closed'].includes(status);
   const inspectionComplete = ['inspection_scheduled', 'adjuster_notified', 'closed'].includes(status);
-  const adjusterReached = ['inspection_scheduled', 'adjuster_notified', 'closed'].includes(status);
+  const adjusterReached = ['inspection_ready', 'inspection_pending', 'inspection_scheduled', 'adjuster_notified', 'closed'].includes(status);
   const adjusterComplete = ['adjuster_notified', 'closed'].includes(status);
   const analyzedNote = rechecking
     ? 'Rechecking evidence'
@@ -83,7 +85,7 @@ export function workflowSteps(status: string, rechecking = false): WorkflowStep[
     {
       label: 'Adjuster',
       state: adjusterComplete ? 'complete' : adjusterReached ? 'active' : 'upcoming',
-      note: adjusterComplete ? 'Notified' : adjusterReached ? 'Preparing handoff' : 'Up next',
+      note: adjusterComplete ? 'Notified' : status === 'inspection_ready' ? 'Decision needed' : adjusterReached ? 'Preparing handoff' : 'Up next',
     },
   ];
 }
@@ -212,7 +214,10 @@ export class ClaimStatusPage {
       return { active: false, title: 'Waiting for your information', detail: 'Complete the action below when you are ready.' };
     }
     if (status === 'human_review_required') {
-      return { active: false, title: 'Waiting for adjuster review', detail: 'An adjuster is reviewing the current evidence.' };
+      return { active: false, title: 'Processing paused safely', detail: 'FirstNotice could not safely determine the next automated action.' };
+    }
+    if (status === 'inspection_ready') {
+      return { active: false, title: 'Waiting for adjuster decision', detail: 'No action is needed from you. This page updates automatically.' };
     }
     return { active: false, title: 'Current step complete', detail: 'Your latest claim status is shown above.' };
   }

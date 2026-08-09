@@ -147,10 +147,10 @@ describe('ClaimStatusPage', () => {
     expect(fixture.nativeElement.textContent).toContain('Waiting for your information');
     expect(fixture.nativeElement.querySelector('.workflow-indicator').classList.contains('active')).toBe(false);
 
-    api.getClaim.mockReturnValue(of(claim('human_review_required')));
+    api.getClaim.mockReturnValue(of(claim('inspection_ready')));
     fixture.componentInstance.refreshNow();
     fixture.detectChanges();
-    expect(fixture.nativeElement.textContent).toContain('Waiting for adjuster review');
+    expect(fixture.nativeElement.textContent).toContain('Waiting for adjuster decision');
     expect(fixture.nativeElement.querySelector('.workflow-indicator').classList.contains('active')).toBe(false);
   });
 

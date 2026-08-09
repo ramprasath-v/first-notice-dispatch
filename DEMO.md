@@ -120,21 +120,19 @@ Use a rights-cleared image that already contains sufficient damage and readable 
 
 1. Submit the claim with the exact conflicting policy values above.
 2. Observe intake and review without manually intervening.
-3. The claim reaches **Additional review required**.
-   - Stepper: Received ✓; Analyzed active with **Human review required**.
-   - Claim Timeline: **Additional review required**.
-   - Agent Activity: Review Agent detected conflicting policy information; Workflow paused.
-4. Open `firstnotice.adjuster@gmail.com` and show the secure review request.
-5. Open its review link in the prepared second browser tab.
-6. Confirm the briefing contains the policy conflict and operational-only safety boundary.
-7. Click **Approve & Continue**.
+3. FirstNotice requests the policy correction directly from the claimant and automatically resumes the same claim.
+4. The claim reaches **Ready for inspection decision**.
+   - The live indicator says **Waiting for adjuster decision**.
+   - **Your claim activity** shows the persisted autonomous resolution history.
+5. Open `firstnotice.adjuster@gmail.com` and show the secure inspection-decision request.
+6. Open its review link and show the concise packet, evidence comparison, and resolution history.
+7. Click **Approve Inspection**.
 8. Return to the already-open claimant status page; do not refresh.
-9. Polling should show **Human approval received** and **Automatically resumed the claim after human review**.
-10. The stepper automatically advances to Inspection.
-11. Show the new Calendar inspection and final Gmail handoff.
-12. Confirm the claimant page reaches **Ready for adjuster review** and all four major steps are complete.
+9. The stepper automatically advances to Inspection.
+10. Show the new Calendar inspection and final Gmail handoff.
+11. Confirm the claimant page reaches **Ready for adjuster review**.
 
-If approval legitimately reveals an unresolved ordinary evidence requirement, the correct result is `awaiting_documents`, not forced inspection. Fix the demo fixture rather than bypassing that guardrail.
+Use **Request More Info** to demonstrate an adjuster-authored natural-language request returning the same claim to `awaiting_documents`; a new decision generation is created only after that response is resolved.
 
 ## Recovery and troubleshooting
 

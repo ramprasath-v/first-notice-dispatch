@@ -17,6 +17,10 @@ export interface HumanReview {
   source_references?: EvidenceSourceReference[];
   generation?: number;
   recommended_remediation: RecommendedRemediation;
+  ai_recommendation?: string;
+  claim_snapshot?: Record<string, string | boolean | null>;
+  evidence_comparison?: Array<{ source: string; finding: string }>;
+  resolution_history?: string[];
   expires_at: string;
   decision_at?: string | null;
 }

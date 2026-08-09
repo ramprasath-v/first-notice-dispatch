@@ -1,8 +1,11 @@
 import base64
 import binascii
+import logging
 from functools import lru_cache
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.api.claims import create_claims_router
@@ -16,6 +19,9 @@ from app.events.claim_event_handler import (
 from app.events.claim_events import ClaimEvent, parse_claim_event_json
 from app.services.claim_submission_service import ClaimSubmissionService
 from app.services.human_review_service import HumanReviewService
+
+
+logger = logging.getLogger(__name__)
 
 
 class PubSubPushMessage(BaseModel):
@@ -55,6 +61,27 @@ def create_app(
     human_review_service: HumanReviewService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="FirstNotice Dispatch API", version="1.0.0")
+
+    @app.exception_handler(RequestValidationError)
+    async def log_request_validation(
+        request: Request, exc: RequestValidationError
+    ):
+        if request.url.path == "/events/pubsub":
+            logger.warning(
+                "Pub/Sub request validation failed before event handling.",
+                extra={
+                    "workflow_stage": "request_validation",
+                    "request_path": request.url.path,
+                    "validation_errors": [
+                        {
+                            "location": ".".join(str(item) for item in error["loc"]),
+                            "type": error["type"],
+                        }
+                        for error in exc.errors()
+                    ],
+                },
+            )
+        return await request_validation_exception_handler(request, exc)
     configure_cors(app, allowed_origins)
     app.include_router(
         create_claims_router(
@@ -86,6 +113,25 @@ def create_app(
         try:
             result = await active_handler.handle(event)
         except ClaimEventProcessingError as exc:
+            underlying = exc.__cause__ or exc
+            safe_traceback_exception = RuntimeError(str(exc))
+            logger.error(
+                "Pub/Sub claim event processing failed.",
+                extra={
+                    "exception_type": type(underlying).__name__,
+                    "exception_message": str(exc),
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "claim_id": event.claim_id,
+                    "pubsub_message_id": envelope.message.message_id,
+                    "workflow_stage": exc.stage,
+                },
+                exc_info=(
+                    RuntimeError,
+                    safe_traceback_exception,
+                    underlying.__traceback__,
+                ),
+            )
             status_code = 503 if exc.retryable else 422
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return result.model_dump(mode="json")

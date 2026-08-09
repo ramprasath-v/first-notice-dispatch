@@ -1,7 +1,9 @@
+import json
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+from google.genai import models as genai_models
 from pydantic import ValidationError
 
 from app.domain.claim_status import (
@@ -12,6 +14,14 @@ from app.domain.claim_status import (
 )
 from app.models.claim_document import ClaimDocument, DocumentExtractionResult
 from app.models.intake_result import ImageEvidenceCapabilities, IntakeResult
+from app.models.gemini_review_result import (
+    GeminiRequestedAction,
+    GeminiReviewResult,
+)
+from app.models.requested_action import (
+    EnterTextRequestedAction,
+    UploadDocumentRequestedAction,
+)
 from app.models.review_result import (
     ClaimEvidenceMetadata,
     CurrentEvidenceFinding,
@@ -23,7 +33,10 @@ from app.models.review_result import (
     UnusableEvidence,
     UploadedEvidence,
 )
-from app.services.claim_review_service import ClaimReviewService
+from app.services.claim_review_service import (
+    ClaimReviewService,
+    review_generation_config,
+)
 from app.services.document_extraction_service import GeminiDocumentExtractor
 from app.tools.adk_workflow_tools import build_initial_review_metadata
 
@@ -98,18 +111,110 @@ class ClaimReviewServiceTests(unittest.TestCase):
             intake or intake_result(), metadata or complete_metadata()
         )
 
-    def test_complete_intake_routes_to_inspection_pending(self) -> None:
+    def test_complete_intake_routes_to_inspection_ready(self) -> None:
         review = self.run_review()
 
         self.assertTrue(review.intake_complete)
         self.assertEqual(review.intake_priority, "routine")
         self.assertEqual(
-            review_target_status(review), ClaimStatus.INSPECTION_PENDING
+            review_target_status(review), ClaimStatus.INSPECTION_READY
         )
         call = self.client.models.generate_content.call_args
         self.assertEqual(call.kwargs["model"], "configured-model-id")
         self.assertEqual(call.kwargs["config"].temperature, 0.1)
-        self.assertIs(call.kwargs["config"].response_schema, ReviewResult)
+        self.assertIs(call.kwargs["config"].response_schema, GeminiReviewResult)
+
+    def test_production_review_schema_compiles_with_vertex_sdk(self) -> None:
+        config = review_generation_config()
+        api_client = MagicMock(vertexai=True)
+
+        serialized = genai_models._GenerateContentConfig_to_vertex(
+            api_client, config, {}
+        )
+
+        action_schema = serialized["responseSchema"].properties[
+            "requested_actions"
+        ].items
+        schema_text = str(action_schema.model_dump(mode="json", exclude_none=True))
+        self.assertNotIn("one_of", schema_text)
+        self.assertNotIn("discriminator", schema_text)
+
+    def test_gemini_enter_text_action_converts_to_domain_action(self) -> None:
+        gemini_action = GeminiRequestedAction(
+            action_type="enter_text",
+            action_id="ACT-TEXT",
+            review_id="HRV-1",
+            field_name="policy_number",
+            document_type="police_report",
+            replaces_document_id="DOC-IGNORED",
+            instruction="Please confirm your policy number.",
+        )
+        action = gemini_action.to_domain()
+
+        self.assertIsNone(gemini_action.document_type)
+        self.assertIsNone(gemini_action.replaces_document_id)
+        self.assertIsInstance(action, EnterTextRequestedAction)
+        self.assertEqual(action.field_name, "policy_number")
+
+    def test_gemini_upload_action_converts_to_domain_action(self) -> None:
+        gemini_action = GeminiRequestedAction(
+            action_type="upload_document",
+            action_id="ACT-UPLOAD",
+            review_id="HRV-1",
+            document_type="damage_evidence",
+            field_name="incident_summary",
+            instruction="Please upload the correct damage photo.",
+            replaces_document_id="DOC-ORIGINAL",
+        )
+        action = gemini_action.to_domain()
+
+        self.assertIsNone(gemini_action.field_name)
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertIsNone(action.replaces_document_id)
+
+    def test_gemini_action_rejects_missing_relevant_fields(self) -> None:
+        invalid_actions = [
+            {
+                "action_type": "enter_text",
+                "action_id": "ACT-1",
+                "review_id": "HRV-1",
+                "instruction": "Confirm the value.",
+            },
+            {
+                "action_type": "upload_document",
+                "action_id": "ACT-2",
+                "review_id": "HRV-1",
+                "instruction": "Upload evidence.",
+            },
+        ]
+
+        for candidate in invalid_actions:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(ValidationError):
+                    GeminiRequestedAction.model_validate(candidate)
+
+    def test_gemini_action_rejects_unknown_type_and_unknown_fields(self) -> None:
+        invalid_actions = [
+            {
+                "action_type": "delete_document",
+                "action_id": "ACT-1",
+                "review_id": "HRV-1",
+                "instruction": "Delete evidence.",
+            },
+            {
+                "action_type": "enter_text",
+                "action_id": "ACT-2",
+                "review_id": "HRV-1",
+                "field_name": "policy_number",
+                "instruction": "Confirm the value.",
+                "backend_operation": "replace_any_document",
+            },
+        ]
+
+        for candidate in invalid_actions:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(ValidationError):
+                    GeminiRequestedAction.model_validate(candidate)
 
     def test_missing_license_plate_routes_to_awaiting_documents(self) -> None:
         metadata = complete_metadata(
@@ -368,7 +473,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
             review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
         )
 
-    def test_low_confidence_with_major_conflict_still_requires_human_review(
+    def test_low_confidence_with_resolvable_conflict_requests_claimant(
         self,
     ) -> None:
         uncertain_intake = intake_result().model_copy(
@@ -399,10 +504,11 @@ class ClaimReviewServiceTests(unittest.TestCase):
             model_review=ai_review(confidence=0.1),
         )
 
-        self.assertTrue(review.requires_human_review)
-        self.assertEqual(review.intake_priority, "urgent_human_review")
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.intake_priority, "routine")
+        self.assertEqual(review.requested_actions[0].action_type, "enter_text")
         self.assertEqual(
-            review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
+            review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
         )
 
     def test_vehicle_not_drivable_is_expedited(self) -> None:
@@ -453,6 +559,82 @@ class ClaimReviewServiceTests(unittest.TestCase):
             review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
         )
 
+    def test_unverified_flow_3_safety_observation_requests_grounded_evidence(self) -> None:
+        metadata = complete_metadata(
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="police-report.pdf",
+                    document_id="DOC-REPORT",
+                    source_identity="document:DOC-REPORT",
+                    document_type="police_report",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="vehicle_damage_front.jpg",
+                    document_id="DOC-FRONT",
+                    source_identity="document:DOC-FRONT",
+                    document_type="damage_evidence",
+                    usable=True,
+                ),
+            ],
+            vehicle_identity_clear=False,
+        )
+        model_review = ai_review(
+            conflicts=[
+                EvidenceConflict(
+                    field="vehicle_drivability",
+                    values=["drivable", "potentially not drivable"],
+                    sources=["police-report.pdf", "vehicle_damage_front.jpg"],
+                    reason="The report and questionable photo disagree.",
+                ),
+                EvidenceConflict(
+                    field="damage_location",
+                    values=["rear", "front"],
+                    sources=["police-report.pdf", "vehicle_damage_front.jpg"],
+                    reason="The photo damage differs from the report.",
+                ),
+            ],
+            current_evidence_findings=[
+                CurrentEvidenceFinding(
+                    source="police-report.pdf",
+                    finding="Rear damage is reported and the vehicle is drivable.",
+                ),
+                CurrentEvidenceFinding(
+                    source="vehicle_damage_front.jpg",
+                    finding="Front damage and steam from the radiator are visible.",
+                ),
+            ],
+            unresolved_uncertainties=[
+                UnresolvedUncertainty(
+                    uncertainty="Vehicle identity cannot be verified.",
+                    sources=["vehicle_damage_front.jpg"],
+                )
+            ],
+            operational_indicators=OperationalIndicators(
+                safety_concern=True,
+                significant_damage=True,
+                high_operational_uncertainty=True,
+            ),
+        )
+
+        review = self.run_review(metadata=metadata, model_review=model_review)
+
+        self.assertEqual(
+            {item.type for item in review.missing_documents},
+            {"vehicle_identity", "license_plate_photo"},
+        )
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(
+            review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
+        )
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertEqual(action.replaces_document_id, "DOC-FRONT")
+        self.assertIn("readable license plate", action.instruction)
+
     def test_consequential_uncertainty_after_complete_evidence_requires_human_review(
         self,
     ) -> None:
@@ -487,7 +669,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertTrue(review.requires_human_review)
         self.assertEqual(
             review.human_review_reason,
-            "High uncertainty affects the next operational routing step.",
+            "FirstNotice could not formulate a safe claimant remediation.",
         )
 
     def test_historical_uncertainty_count_alone_does_not_trigger_human_review(
@@ -595,6 +777,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
             },
         )
         self.assertTrue(review.requires_human_review)
+        self.assertEqual(review.requested_actions, [])
         self.assertEqual(review.intake_priority, "urgent_human_review")
 
     def test_approved_fingerprint_suppresses_only_unchanged_current_issue(self) -> None:
@@ -725,12 +908,72 @@ class ClaimReviewServiceTests(unittest.TestCase):
             model_review=model,
         )
 
-        self.assertTrue(review.requires_human_review)
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.requested_actions[0].action_type, "upload_document")
         self.assertEqual(review.conflicts, [])
         self.assertEqual(
             review.source_aware_uncertainties[0].selected_outlier_document_id,
             "DOC-FRONT",
         )
+
+    def test_flow_3_report_and_wrong_damage_photo_request_replacement(self) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type="police_report", filename="police-report.pdf",
+                document_id="DOC-REPORT", source_identity="document:DOC-REPORT",
+                document_type="police_report", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="front.jpg",
+                document_id="DOC-FRONT", source_identity="document:DOC-FRONT",
+                document_type="damage_evidence", usable=True,
+            ),
+        ]
+        conflict = EvidenceConflict(
+            field="damage_location", values=["rear", "front"],
+            sources=["police-report.pdf", "front.jpg"],
+            reason="The photo damage location differs from the report.",
+        )
+
+        model_review = ai_review(
+            conflicts=[conflict],
+            current_evidence_findings=[
+                CurrentEvidenceFinding(
+                    source="police-report.pdf", finding="Rear-end damage."
+                ),
+                CurrentEvidenceFinding(
+                    source="front.jpg", finding="Front-end damage."
+                ),
+            ],
+        )
+        response_payload = model_review.model_dump(mode="json")
+        response_payload["requested_actions"] = [
+            {
+                "action_type": "upload_document",
+                "action_id": "ACT-GEMINI",
+                "review_id": "HRV-GEMINI",
+                "field_name": "incident_summary",
+                "document_type": "damage_evidence",
+                "instruction": "Please upload the correct damage photo.",
+                "replaces_document_id": "DOC-GEMINI-CANNOT-AUTHORIZE",
+            }
+        ]
+        self.client.models.generate_content.return_value.text = json.dumps(
+            response_payload
+        )
+
+        review = self.service.review(
+            intake_result(),
+            complete_metadata(
+                uploaded_evidence=uploaded, vehicle_identity_clear=True
+            ),
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        action = review.requested_actions[0]
+        self.assertEqual(action.action_type, "upload_document")
+        self.assertEqual(action.replaces_document_id, "DOC-FRONT")
 
     def test_changed_evidence_set_produces_new_review_fingerprint(self) -> None:
         base = [
@@ -798,7 +1041,8 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertNotEqual(
             changed.source_aware_conflicts[0].fingerprint, approved_fingerprint
         )
-        self.assertTrue(changed.requires_human_review)
+        self.assertFalse(changed.requires_human_review)
+        self.assertEqual(len(changed.requested_actions), 1)
 
     def test_two_image_uncertainty_preserves_both_grounded_sources(self) -> None:
         metadata = complete_metadata(
@@ -937,7 +1181,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertEqual(review.intake_priority, "routine")
         self.assertFalse(review.requires_human_review)
 
-    def test_minor_conflict_does_not_block_operational_completeness(self) -> None:
+    def test_unresolved_minor_conflict_blocks_operational_completeness(self) -> None:
         model_review = ai_review(
             intake_complete=False,
             conflicts=[
@@ -952,10 +1196,10 @@ class ClaimReviewServiceTests(unittest.TestCase):
 
         review = self.run_review(model_review=model_review)
 
-        self.assertTrue(review.intake_complete)
-        self.assertFalse(review.requires_human_review)
+        self.assertFalse(review.intake_complete)
+        self.assertTrue(review.requires_human_review)
 
-    def test_major_conflicting_evidence_requires_human_review(self) -> None:
+    def test_structured_conflict_requests_claimant_correction(self) -> None:
         model_review = ai_review(
             intake_complete=False,
             conflicts=[
@@ -970,10 +1214,11 @@ class ClaimReviewServiceTests(unittest.TestCase):
 
         review = self.run_review(model_review=model_review)
 
-        self.assertEqual(review.intake_priority, "urgent_human_review")
-        self.assertTrue(review.requires_human_review)
+        self.assertEqual(review.intake_priority, "routine")
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.requested_actions[0].action_type, "enter_text")
         self.assertEqual(
-            review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
+            review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
         )
 
     def test_missing_referenced_police_report_page_is_retained(self) -> None:

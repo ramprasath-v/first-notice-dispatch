@@ -107,6 +107,11 @@ class CoordinatorRoutingTests(unittest.TestCase):
             route_claim_state("intake_complete"), CoordinatorAction.RUN_REVIEW
         )
 
+    def test_review_processing_retries_review(self) -> None:
+        self.assertEqual(
+            route_claim_state("review_processing"), CoordinatorAction.RUN_REVIEW
+        )
+
     def test_awaiting_documents_stops(self) -> None:
         self.assertEqual(
             route_claim_state("awaiting_documents"),
@@ -174,6 +179,21 @@ class AdkRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             final["result"]["stop_reason"], "awaiting_external_evidence"
         )
+
+    async def test_review_processing_resumes_review_after_retry(self) -> None:
+        tools = FakeWorkflowTools("review_processing")
+        coordinator = build_firstnotice_coordinator(
+            extraction_service=FakeExtractionService(), workflow_tools=tools
+        )
+
+        outputs = await run_agent(
+            coordinator,
+            {"claim_id": tools.claim_id, "stop_after_review": True},
+        )
+
+        self.assertEqual(tools.review_calls, 1)
+        final = next(item for item in outputs if item.get("kind") == "coordinator_result")
+        self.assertEqual(final["result"]["final_status"], "awaiting_documents")
 
     async def test_duplicate_coordinator_execution_does_not_duplicate_dispatch(self) -> None:
         tools = FakeWorkflowTools("inspection_pending")
@@ -269,6 +289,49 @@ class AdkToolAdapterTests(unittest.TestCase):
         self.review_service.review.assert_called_once()
         self.repository.save_review_result.assert_called_once()
         self.assertEqual(state.status, "awaiting_documents")
+
+    def test_review_adapter_retries_after_failure_without_repeating_transition(self) -> None:
+        initial_claim = {
+            "claim_id": "CLM-ADK00001",
+            "status": "intake_complete",
+            **intake_result().model_dump(mode="python"),
+        }
+        processing_claim = {**initial_claim, "status": "review_processing"}
+        ready_claim = {**initial_claim, "status": "inspection_ready"}
+        self.repository.get_claim.side_effect = [
+            initial_claim,
+            processing_claim,
+            ready_claim,
+        ]
+        self.repository.get_documents.return_value = []
+        completed_review = ReviewResult(
+            intake_complete=True,
+            intake_priority="routine",
+            priority_reason="Complete evidence.",
+            confidence=0.95,
+            inspection_required=True,
+            missing_documents=[],
+            requires_human_review=False,
+        )
+        self.review_service.review.side_effect = [
+            RuntimeError("temporary review failure"),
+            completed_review,
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "temporary review failure"):
+            self.adapter.run_claim_review("CLM-ADK00001")
+        state = self.adapter.run_claim_review("CLM-ADK00001")
+
+        self.repository.update_claim_status.assert_called_once_with(
+            "CLM-ADK00001", "review_processing"
+        )
+        self.assertEqual(self.review_service.review.call_count, 2)
+        self.repository.save_review_result.assert_called_once_with(
+            "CLM-ADK00001",
+            completed_review,
+            review_generation_key="CLM-ADK00001:submitted-review:v1",
+        )
+        self.assertEqual(state.status, "inspection_ready")
 
     def test_resume_and_dispatch_adapters_delegate_without_duplication(self) -> None:
         self.resume_workflow.resume.return_value.model_dump.return_value = {

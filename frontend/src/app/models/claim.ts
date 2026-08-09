@@ -63,7 +63,7 @@ export interface UploadDocumentRequestedAction {
   review_id: string;
   document_type: string;
   instruction: string;
-  replaces_document_id: string;
+  replaces_document_id?: string | null;
 }
 
 export type RequestedAction = EnterTextRequestedAction | UploadDocumentRequestedAction;

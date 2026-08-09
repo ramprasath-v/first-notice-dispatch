@@ -24,6 +24,7 @@ class CoordinatorResult(BaseModel):
     stop_reason: Literal[
         "awaiting_external_evidence",
         "human_review_required",
+        "awaiting_inspection_decision",
         "workflow_complete",
         "event_boundary_reached",
     ]

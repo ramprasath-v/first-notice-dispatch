@@ -26,10 +26,10 @@ This is not a chatbot. The claimant starts a workflow; FirstNotice coordinates d
 
 - **Event-driven:** typed Pub/Sub events wake work at durable boundaries.
 - **Long-running and stateful:** Firestore preserves claim state across browser sessions, service restarts, evidence waits, and human review.
-- **Autonomous routing:** deterministic guardrails choose `awaiting_documents`, `human_review_required`, or `inspection_pending` from validated review output.
+- **Autonomous routing:** deterministic guardrails loop through `awaiting_documents` until current evidence is sufficient, then enter `inspection_ready` for an adjuster inspection decision.
 - **Multiple actors and systems:** claimant, Angular, Cloud Run, Cloud Storage, Firestore, Pub/Sub, ADK, Vertex AI, Calendar, Gmail, and an adjuster participate asynchronously.
 - **Real actions:** the workflow creates a Google Calendar inspection and sends Gmail messages.
-- **Human only when needed:** routine evidence gaps remain self-service; consequential conflicts and safety signals stop for review.
+- **Meaningful human decision:** routine evidence gaps and safely resolvable conflicts remain self-service; the adjuster authorizes inspection only after autonomous intake is complete.
 - **Heavy lifting after one request:** no user guides each internal agent or manually resumes the workflow.
 
 See [Taskmaster mapping](docs/TASKMASTER.md) for a criterion-by-criterion account.
@@ -38,11 +38,11 @@ See [Taskmaster mapping](docs/TASKMASTER.md) for a criterion-by-criterion accoun
 
 ### Missing evidence
 
-A damage photo has useful damage evidence but no readable vehicle identity. FirstNotice records the gap and pauses at `awaiting_documents`. The claimant uploads one clear license-plate image. That event validates all compatible evidence capabilities, resumes the same claim, schedules an inspection in Google Calendar, sends the final Gmail handoff, and reaches `adjuster_notified`.
+A damage photo has useful damage evidence but no readable vehicle identity. FirstNotice records the gap and pauses at `awaiting_documents`. The claimant uploads one clear license-plate image. That event validates compatible evidence capabilities, resumes the same claim, and reaches `inspection_ready`. After the adjuster authorizes inspection, the existing Calendar and final Gmail dispatch reaches `adjuster_notified`.
 
-### Human review
+### Inspection decision
 
-The claimant enters `POL-DEMO-9999` while the synthetic police report states `POL-DEMO-1001`. The significant policy conflict routes to `human_review_required`. Gmail sends a secure review link; the adjuster approves operational continuation; the approval event resumes the same claim and proceeds to Calendar and Gmail dispatch.
+FirstNotice resolves ordinary discrepancies directly with the claimant. Once current evidence is sufficient and consistent, the claim reaches `inspection_ready`. Gmail sends one secure inspection-decision link; **Approve Inspection** publishes the existing dispatch boundary, while **Request More Info** converts the adjuster's natural-language instruction into one validated claimant action.
 
 Use the practical [demo operator guide](DEMO.md) and [three-minute narration](docs/DEMO_SCRIPT.md).
 
@@ -124,8 +124,8 @@ The primary event contract is defined in `backend/app/events/claim_events.py`:
 |---|---|
 | `claim.submitted` | Start intake and review after the API has durably created the claim and evidence metadata |
 | `claim.document.received` | Inspect new evidence and resume an awaiting claim |
-| `claim.human_review.approved` | Resume after an adjuster approves operational continuation |
-| `claim.human_review.correction_requested` | Route a human decision back to claimant remediation |
+| `claim.human_review.approved` | Start inspection dispatch after an adjuster authorizes inspection |
+| `claim.human_review.correction_requested` | Route an adjuster's constrained information request to the claimant |
 | `claim.correction.received` | Resume after the claimant supplies a requested correction |
 | `claim.inspection.ready` | Wake the existing dispatch workflow after durable state reaches `inspection_pending` |
 
@@ -140,7 +140,7 @@ For each delivery: reserve the event ID → load durable claim state → run onl
 - Appointment, Calendar, dispatch, notification, and human-review IDs derive from stable workflow keys.
 - Calendar handles duplicate creation by reading the existing deterministic event.
 - Durable state is reloaded before emitting the inspection-ready boundary, including duplicate recovery.
-- Resume checks never schedule from unresolved `awaiting_documents` or `human_review_required` state.
+- Resume checks never schedule from `awaiting_documents`, `inspection_ready`, or `human_review_required`; only an idempotent approval may move `inspection_ready` to `inspection_pending`.
 - Gmail uses a deterministic message ID and Firestore notification record. It cannot promise provider-level exactly-once delivery if Gmail accepts a send and the process fails before persistence; a retry could send again.
 
 ## Security

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from app.api.claimant import create_claimant_app
+from app.domain.claim_status import ClaimStatus
 from app.events.claim_events import (
     ClaimHumanReviewApprovedEvent,
     ClaimHumanReviewCorrectionRequestedEvent,
@@ -120,6 +121,21 @@ class HumanReviewServiceTests(unittest.TestCase):
         self.assertEqual(review.notification_status, "sent")
         self.assertEqual(created.generation, 1)
         self.assertEqual(created.review_id, human_review_id(CLAIM_ID, 1))
+
+    def test_inspection_ready_creates_one_secure_decision_email(self) -> None:
+        self.repository.get_claim.return_value.update({
+            "status": "inspection_ready",
+            "conflicts": [],
+            "human_review_reason": None,
+        })
+
+        self.service.ensure_review_requested(CLAIM_ID, correlation_id="corr-ready")
+
+        created = self.repository.create_human_review.call_args.args[0]
+        request = self.gmail.send_human_review_email.call_args.args[0]
+        self.assertIn("Inspection Decision Ready", request.subject)
+        self.assertIn("ready for an inspection decision", created.reason)
+        self.gmail.send_human_review_email.assert_called_once()
 
     def test_policy_conflict_recommends_enter_text(self) -> None:
         self.service.ensure_review_requested(CLAIM_ID, correlation_id="corr-review")
@@ -773,6 +789,46 @@ class HumanReviewServiceTests(unittest.TestCase):
             ClaimHumanReviewCorrectionRequestedEvent,
         )
 
+    def test_inspection_decision_more_info_maps_prose_to_allowlisted_upload(self) -> None:
+        pending = record()
+        self.repository.get_human_review_by_token_hash.return_value = pending
+        self.repository.get_claim.return_value.update({
+            "status": "inspection_ready",
+            "current_human_review_id": REVIEW_ID,
+        })
+        decided = pending.model_copy(update={
+            "status": "correction_requested",
+            "correction_type": "upload_document",
+            "decision_note": "Please upload a clearer rear damage photo.",
+            "decision_at": NOW,
+            "decision_event_id": f"{CLAIM_ID}:{REVIEW_ID}:correction_requested:v1",
+            "decision_publish_status": "pending",
+        })
+        self.repository.decide_human_review.return_value = (decided, False)
+
+        self.service.request_correction(
+            "secure-token",
+            HumanReviewDecisionRequest(
+                decision_note="Please upload a clearer rear damage photo."
+            ),
+        )
+
+        decision = self.repository.decide_human_review.call_args.kwargs
+        self.assertEqual(decision["correction_type"], "upload_document")
+        self.assertIsNone(decision["target_document_id"])
+
+    def test_stale_inspection_decision_generation_cannot_mutate_claim(self) -> None:
+        self.repository.get_human_review_by_token_hash.return_value = record()
+        self.repository.get_claim.return_value.update({
+            "status": "inspection_ready",
+            "current_human_review_id": "HRV-NEWER",
+        })
+
+        with self.assertRaisesRegex(HumanReviewConflictError, "no longer current"):
+            self.service.approve("secure-token", HumanReviewDecisionRequest())
+
+        self.repository.decide_human_review.assert_not_called()
+
 
 class HumanReviewResumeWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -792,6 +848,47 @@ class HumanReviewResumeWorkflowTests(unittest.TestCase):
         result = self.workflow.resume_approved(CLAIM_ID, REVIEW_ID, "corr")
 
         self.assertEqual(result["final_status"], "inspection_pending")
+
+    def test_inspection_ready_approval_starts_existing_dispatch_boundary(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "inspection_ready",
+            "current_human_review_id": REVIEW_ID,
+            "conflicts": [], "missing_documents": [], "unusable_evidence": [],
+        }
+        self.repository.get_human_review.return_value = record(status="approved")
+
+        result = self.workflow.resume_approved(CLAIM_ID, REVIEW_ID, "corr")
+
+        self.assertEqual(result["final_status"], "inspection_pending")
+        self.assertEqual(
+            self.repository.complete_human_review_resume.call_args.kwargs[
+                "target_status"
+            ],
+            ClaimStatus.INSPECTION_PENDING,
+        )
+
+    def test_adjuster_prose_creates_non_replacement_upload_action(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "inspection_ready",
+            "current_human_review_id": REVIEW_ID,
+            "conflicts": [], "missing_documents": [], "unusable_evidence": [],
+        }
+        self.repository.get_human_review.return_value = record(
+            status="correction_requested",
+            correction_type="upload_document",
+            decision_note="Please upload a clearer passenger-side rear damage photo.",
+        )
+
+        result = self.workflow.request_correction(CLAIM_ID, REVIEW_ID, "corr")
+
+        action = self.repository.complete_human_review_resume.call_args.kwargs[
+            "requested_actions"
+        ][0]
+        self.assertEqual(result["final_status"], "awaiting_documents")
+        self.assertEqual(action["document_type"], "damage_evidence")
+        self.assertIsNone(action["replaces_document_id"])
         call = self.repository.complete_human_review_resume.call_args.kwargs
         self.assertEqual(call["claim_id"], CLAIM_ID)
         self.assertEqual(call["conflicts"], [])

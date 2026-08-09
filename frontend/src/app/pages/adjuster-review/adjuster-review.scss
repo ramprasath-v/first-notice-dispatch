@@ -21,6 +21,10 @@ h3 { font-size: .9rem; margin: 1.25rem 0 .4rem; color: #35645c; }
 .analysis-details .briefing { margin: 0; padding: 0 1rem 1rem; }
 ul { padding-left: 1.25rem; line-height: 1.55; }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.2rem; }
+.more-info-field { display: grid; gap: .45rem; margin-top: 1.25rem; }
+.more-info-field textarea { width: 100%; box-sizing: border-box; }
+.resolution-list { list-style: none; padding: 0; color: #275d55; }
+.resolution-list li { margin: .45rem 0; }
 .boundary, .muted { color: #667b76; font-size: .82rem; margin-top: 1rem; }
 small { color: #73857f; font-weight: 500; }
 @media (max-width: 560px) {

@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.models.requested_action import RequestedAction
+
 
 class UploadedEvidence(BaseModel):
     evidence_type: str = Field(description="Deterministic evidence category.")
@@ -140,6 +142,7 @@ class ReviewResult(BaseModel):
     unresolved_uncertainties: list[UnresolvedUncertainty] = Field(
         default_factory=list
     )
+    requested_actions: list[RequestedAction] = Field(default_factory=list)
     requires_human_review: bool
     human_review_reason: str | None = None
     operational_indicators: OperationalIndicators = Field(
@@ -193,6 +196,7 @@ def review_result_from_claim(claim: dict[str, object]) -> ReviewResult:
             UnresolvedUncertainty.model_validate(item)
             for item in claim.get("unresolved_uncertainties", [])
         ],
+        requested_actions=claim.get("requested_actions", []),
         requires_human_review=bool(claim.get("requires_human_review", False)),
         human_review_reason=claim.get("human_review_reason"),
         operational_indicators=OperationalIndicators.model_validate(

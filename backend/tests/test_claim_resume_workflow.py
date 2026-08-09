@@ -13,11 +13,13 @@ from app.models.review_result import (
     ReviewResult,
 )
 from app.services.claim_review_service import ClaimReviewService
+from app.services.claim_review_service import ClaimReviewError
 from app.tools.firestore_repository import FirestoreWriteError
 from app.workflows.claim_resume_workflow import (
     ClaimResumeError,
     ClaimResumeWorkflow,
     _build_review_metadata,
+    match_missing_requirement,
 )
 
 
@@ -29,6 +31,7 @@ def awaiting_claim() -> dict[str, object]:
         "damage_type": "Rear bumper damage",
         "parts_affected": ["rear bumper"],
         "incident_summary": "The vehicle was struck from behind.",
+        "incident_description": "The vehicle was struck from behind.",
         "policy_number": "POL-123",
         "incident_date": "2026-08-05",
         "vehicle_drivable": True,
@@ -100,6 +103,15 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.repository.add_document.side_effect = self._add_document
         self.repository.mark_document_validated.side_effect = self._mark_validated
         self.repository.mark_document_unusable.side_effect = self._mark_unusable
+        self.repository.begin_document_resume_review.side_effect = (
+            self._begin_document_resume_review
+        )
+        self.repository.save_document_resume_extraction.side_effect = (
+            self._save_document_resume_extraction
+        )
+        self.repository.mark_document_resume_quality_processed.side_effect = (
+            self._mark_document_resume_quality_processed
+        )
         self.repository.update_claim_status.side_effect = self._update_status
         self.repository.save_review_result.side_effect = self._save_review
         self.workflow = ClaimResumeWorkflow(
@@ -127,9 +139,73 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.claim["status"] = ClaimStatus(status).value
         return ClaimStatus(status)
 
+    def _begin_document_resume_review(
+        self,
+        claim_id: str,
+        document_id: str,
+        *,
+        idempotency_key: str,
+        matched_requirement: str,
+        correlation_id: str,
+        replacement_action_id: str | None = None,
+        replaces_document_id: str | None = None,
+        replacement_document_type: str | None = None,
+    ) -> bool:
+        self.claim.update(
+            {
+                "status": "review_processing",
+                "active_resume_document_id": document_id,
+                "active_resume_idempotency_key": idempotency_key,
+                "active_resume_correlation_id": correlation_id,
+            }
+        )
+        self.documents[document_id] = self.documents[document_id].model_copy(
+            update={
+                "resume_idempotency_key": idempotency_key,
+                "resume_correlation_id": correlation_id,
+                "resume_matched_requirement": matched_requirement,
+                "resume_started_at": datetime.now(timezone.utc),
+                "requested_action_id": replacement_action_id,
+                "replaces_document_id": replaces_document_id,
+                **(
+                    {"document_type": replacement_document_type}
+                    if replacement_document_type
+                    else {}
+                ),
+            }
+        )
+        return True
+
+    def _save_document_resume_extraction(
+        self,
+        claim_id: str,
+        document_id: str,
+        extraction: DocumentExtractionResult,
+    ) -> None:
+        self.documents[document_id] = self.documents[document_id].model_copy(
+            update={"resume_extraction_result": extraction}
+        )
+
+    def _mark_document_resume_quality_processed(
+        self, claim_id: str, document_id: str
+    ) -> None:
+        self.documents[document_id] = self.documents[document_id].model_copy(
+            update={"resume_quality_processed_at": datetime.now(timezone.utc)}
+        )
+
     def _save_review(self, claim_id: str, review: ReviewResult, **kwargs) -> ClaimStatus:
         status = review_target_status(review)
         self.claim["status"] = status.value
+        replacement = kwargs.get("replacement_document")
+        if replacement is not None:
+            self.documents[replacement.document_id] = replacement
+            target = self.documents[replacement.replaces_document_id]
+            self.documents[target.document_id] = target.model_copy(
+                update={
+                    "status": "superseded",
+                    "superseded_by_document_id": replacement.document_id,
+                }
+            )
         document_id = kwargs.get("resume_document_id")
         if document_id:
             self.documents[document_id] = self.documents[document_id].model_copy(
@@ -139,9 +215,116 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
                     "resume_result_status": status.value,
                 }
             )
+            self.claim.pop("active_resume_document_id", None)
+            self.claim.pop("active_resume_idempotency_key", None)
+            self.claim.pop("active_resume_correlation_id", None)
         return status
 
-    def test_valid_missing_document_resumes_to_inspection_pending(self) -> None:
+    def test_retryable_review_failure_resumes_same_replacement_once(self) -> None:
+        self.claim["missing_documents"] = [
+            {
+                "type": "vehicle_identity",
+                "reason": "Vehicle identity is required.",
+                "source_requirement": "always_required",
+            },
+            {
+                "type": "license_plate_photo",
+                "reason": "A readable plate is required.",
+                "source_requirement": "license_plate_photo",
+            },
+        ]
+        self.claim["requested_actions"] = [
+            {
+                "action_id": "ACT-FLOW-3",
+                "action_type": "upload_document",
+                "review_id": "AUTONOMOUS-FLOW-3",
+                "document_type": "damage_evidence",
+                "instruction": "Upload corrected identifiable damage evidence.",
+                "replaces_document_id": "DOC-WRONG",
+            }
+        ]
+        self.documents["DOC-WRONG"] = ClaimDocument(
+            document_id="DOC-WRONG",
+            claim_id="CLM-A1B2C3D4",
+            document_type="damage_evidence",
+            filename="wrong-front.jpg",
+            status="validated",
+            received_at=datetime.now(timezone.utc),
+        )
+        replacement = ClaimDocument(
+            document_id="DOC-CORRECT",
+            claim_id="CLM-A1B2C3D4",
+            document_type="damage_evidence",
+            filename="correct-rear-plate.jpg",
+            storage_path="/demo/correct-rear-plate.jpg",
+            requested_action_id="ACT-FLOW-3",
+            replaces_document_id="DOC-WRONG",
+            received_at=datetime.now(timezone.utc),
+        )
+        self.documents[replacement.document_id] = replacement
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="Rear damage and a readable plate are visible.",
+            supported_capabilities=[
+                "damage_evidence",
+                "license_plate_photo",
+                "vehicle_identity",
+            ],
+        )
+        self.review_service.review.side_effect = [
+            ClaimReviewError("Gemini evidence review failed: 429 RESOURCE_EXHAUSTED"),
+            review_result(complete=True),
+        ]
+
+        with self.assertRaisesRegex(ClaimReviewError, "429 RESOURCE_EXHAUSTED"):
+            self.workflow.resume("CLM-A1B2C3D4", replacement)
+
+        self.assertEqual(self.claim["status"], "review_processing")
+        result = self.workflow.resume("CLM-A1B2C3D4", replacement)
+
+        self.assertEqual(result.final_status, "inspection_ready")
+        self.assertEqual(self.extractor.extract.call_count, 1)
+        self.repository.begin_document_resume_review.assert_called_once()
+        self.repository.save_document_resume_extraction.assert_called_once()
+        self.repository.mark_document_resume_quality_processed.assert_called_once()
+        self.repository.add_document.assert_not_called()
+        self.repository.save_review_result.assert_called_once()
+        replacement_arg = self.repository.save_review_result.call_args.kwargs[
+            "replacement_document"
+        ]
+        self.assertEqual(replacement_arg.replaces_document_id, "DOC-WRONG")
+        self.repository.mark_document_superseded.assert_not_called()
+
+    def test_different_document_cannot_join_active_resume_retry(self) -> None:
+        active = document(document_id="DOC-ACTIVE")
+        active_key = "CLM-A1B2C3D4:DOC-ACTIVE:resume"
+        self.documents[active.document_id] = active.model_copy(
+            update={
+                "resume_idempotency_key": active_key,
+                "resume_correlation_id": "corr-active",
+                "resume_matched_requirement": "license_plate_photo",
+            }
+        )
+        self.claim.update(
+            {
+                "status": "review_processing",
+                "active_resume_document_id": active.document_id,
+                "active_resume_idempotency_key": active_key,
+                "active_resume_correlation_id": "corr-active",
+            }
+        )
+        other = document(document_id="DOC-OTHER")
+        self.documents[other.document_id] = other
+
+        with self.assertRaisesRegex(
+            ClaimResumeError, "same in-progress document resume operation"
+        ):
+            self.workflow.resume("CLM-A1B2C3D4", other)
+
+        self.extractor.extract.assert_not_called()
+        self.review_service.review.assert_not_called()
+
+    def test_valid_missing_document_resumes_to_inspection_ready(self) -> None:
         self.extractor.extract.return_value = DocumentExtractionResult(
             usable=True,
             reason="The license plate is readable.",
@@ -151,7 +334,7 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
 
         result = self.workflow.resume("CLM-A1B2C3D4", document())
 
-        self.assertEqual(result.final_status, "inspection_pending")
+        self.assertEqual(result.final_status, "inspection_ready")
         self.assertTrue(result.evidence_usable)
         self.repository.add_document.assert_called_once()
         self.review_service.review.assert_called_once()
@@ -163,7 +346,63 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.assertIn("document_quality_checked", actions)
         self.assertIn("claim_review_resumed", actions)
         self.assertIn("missing_requirement_satisfied", actions)
-        self.assertIn("claim_moved_to_inspection_pending", actions)
+        self.assertIn("claim_moved_to_inspection_ready", actions)
+
+    def test_adjuster_more_info_upload_action_matches_without_replacement(self) -> None:
+        self.claim["missing_documents"] = []
+        self.claim["requested_actions"] = [{
+            "action_type": "upload_document",
+            "action_id": "ACT-MORE-INFO",
+            "review_id": "HRV-2",
+            "document_type": "damage_evidence",
+            "instruction": "Please upload a clearer rear damage photo.",
+            "replaces_document_id": None,
+        }]
+
+        matched = match_missing_requirement(
+            self.claim,
+            "damage_evidence",
+            requested_action_id="ACT-MORE-INFO",
+            replaces_document_id=None,
+        )
+
+        self.assertEqual(matched, "damage_evidence")
+
+    def test_adjuster_more_info_upload_resumes_without_replacement_binding(self) -> None:
+        self.claim["missing_documents"] = []
+        self.claim["requested_actions"] = [{
+            "action_type": "upload_document",
+            "action_id": "ACT-MORE-INFO",
+            "review_id": "HRV-2",
+            "document_type": "damage_evidence",
+            "instruction": "Please upload a clearer rear damage photo.",
+            "replaces_document_id": None,
+        }]
+        additional = ClaimDocument(
+            document_id="DOC-MORE-INFO",
+            claim_id="CLM-A1B2C3D4",
+            document_type="damage_evidence",
+            filename="rear-detail.jpg",
+            status="received",
+            requested_action_id="ACT-MORE-INFO",
+            received_at=datetime.now(timezone.utc),
+        )
+        self.documents[additional.document_id] = additional
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="The requested rear damage detail is clear.",
+            supported_capabilities=["damage_evidence"],
+        )
+        self.review_service.review.return_value = review_result(complete=True)
+
+        result = self.workflow.resume("CLM-A1B2C3D4", additional)
+
+        self.assertEqual(result.final_status, "inspection_ready")
+        begin = self.repository.begin_document_resume_review.call_args.kwargs
+        self.assertIsNone(begin["replacement_action_id"])
+        saved = self.repository.save_review_result.call_args.kwargs
+        self.assertIsNone(saved["replacement_document"])
+        self.repository.mark_document_superseded.assert_not_called()
 
     def test_license_plate_audit_type_alone_does_not_satisfy_identity(self) -> None:
         plate = document().model_copy(update={"status": "validated"})
@@ -229,7 +468,7 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.assertEqual(saved_review.missing_documents, [])
         self.assertEqual(saved_review.unusable_evidence, [])
         self.assertTrue(saved_review.intake_complete)
-        self.assertEqual(result.final_status, "inspection_pending")
+        self.assertEqual(result.final_status, "inspection_ready")
         self.extractor.extract.assert_called_once()
 
     def test_followup_image_adds_damage_capability_and_keeps_original_active(
@@ -294,7 +533,7 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         ):
             result = self.workflow.resume("CLM-A1B2C3D4", document())
 
-        self.assertEqual(result.final_status, "inspection_pending")
+        self.assertEqual(result.final_status, "inspection_ready")
         self.assertEqual(self.documents["DOC-ORIGINAL"].status, "received")
         self.assertEqual(
             set(self.documents["DOC-12345678"].supported_capabilities),
@@ -369,7 +608,8 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             result = workflow.resume("CLM-A1B2C3D4", followup)
 
         saved = self.repository.save_review_result.call_args.args[1]
-        self.assertEqual(result.final_status, "human_review_required")
+        self.assertEqual(result.final_status, "awaiting_documents")
+        self.assertEqual(saved.requested_actions[0].action_type, "upload_document")
         self.assertEqual(saved.missing_documents, [])
         self.assertEqual(
             saved.source_aware_conflicts[0].selected_outlier_document_id,
@@ -418,7 +658,7 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         saved_review = self.repository.save_review_result.call_args.args[1]
         self.assertEqual(saved_review.unresolved_uncertainties, [])
         self.assertFalse(saved_review.requires_human_review)
-        self.assertEqual(result.final_status, "inspection_pending")
+        self.assertEqual(result.final_status, "inspection_ready")
 
     def test_explicit_replacement_supersedes_only_named_artifact(self) -> None:
         self.claim["requested_actions"] = [
@@ -525,9 +765,106 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         committed = self.repository.save_review_result.call_args.kwargs[
             "replacement_document"
         ]
-        self.assertEqual(result.final_status, "inspection_pending")
+        self.assertEqual(result.final_status, "inspection_ready")
         self.assertEqual(committed.replaces_document_id, "DOC-FRONT")
         self.assertEqual(committed.status, "validated")
+
+    def test_autonomous_replacement_without_client_action_id_supersedes_wrong_photo(
+        self,
+    ) -> None:
+        self.claim["missing_documents"] = [
+            {
+                "type": "vehicle_identity",
+                "reason": "Vehicle identity is required.",
+                "source_requirement": "always_required",
+            },
+            {
+                "type": "license_plate_photo",
+                "reason": "A readable plate is required.",
+                "source_requirement": "license_plate_photo",
+            },
+        ]
+        self.claim["requested_actions"] = [{
+            "action_id": "ACT-AUTONOMOUS-FLOW-3",
+            "action_type": "upload_document",
+            "review_id": "AUTONOMOUS-FLOW-3",
+            "document_type": "damage_evidence",
+            "instruction": "Upload correct rear damage with a readable plate.",
+            "replaces_document_id": "DOC-FRONT",
+        }]
+        self.documents["DOC-REPORT"] = ClaimDocument(
+            document_id="DOC-REPORT", claim_id="CLM-A1B2C3D4",
+            document_type="police_report", filename="police-report.pdf",
+            storage_path="/demo/police-report.pdf", status="received",
+            received_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        )
+        self.documents["DOC-FRONT"] = ClaimDocument(
+            document_id="DOC-FRONT", claim_id="CLM-A1B2C3D4",
+            document_type="damage_evidence", filename="vehicle_damage_front.jpg",
+            storage_path="/demo/vehicle_damage_front.jpg", status="validated",
+            supported_capabilities=["damage_evidence"],
+            evidence_findings=[
+                "Silver SUV with front damage and steam from the radiator."
+            ], received_at=datetime(2026, 8, 5, 0, 1, tzinfo=timezone.utc),
+        )
+        replacement = ClaimDocument(
+            document_id="DOC-CORRECT", claim_id="CLM-A1B2C3D4",
+            document_type="license_plate_photo",
+            filename="vehicle_damage_license.jpg",
+            storage_path="/demo/vehicle_damage_license.jpg", status="received",
+            received_at=datetime.now(timezone.utc),
+        )
+        self.documents[replacement.document_id] = replacement
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="Rear damage and plate 7ABX123 are readable.",
+            supported_capabilities=[
+                "damage_evidence", "license_plate_photo", "vehicle_identity"
+            ],
+            evidence_findings=[
+                "Dark grey sedan with rear damage and readable plate 7ABX123."
+            ],
+        )
+
+        def review_active_only(intake, metadata, *, evidence_parts):
+            sources = {item.filename for item in metadata.uploaded_evidence}
+            self.assertNotIn("vehicle_damage_front.jpg", sources)
+            self.assertIn("vehicle_damage_license.jpg", sources)
+            self.assertTrue(metadata.vehicle_identity_clear)
+            evidence_text = " ".join(
+                part.text or "" for part in evidence_parts if part.text is not None
+            )
+            self.assertNotIn("vehicle_damage_front.jpg", evidence_text)
+            self.assertIn("vehicle_damage_license.jpg", evidence_text)
+            return review_result(complete=True)
+
+        self.review_service.review.side_effect = review_active_only
+
+        raw_part = types.Part.from_bytes(data=b"evidence", mime_type="image/jpeg")
+        with patch(
+            "app.workflows.claim_resume_workflow.evidence_part",
+            return_value=raw_part,
+        ):
+            result = self.workflow.resume("CLM-A1B2C3D4", replacement)
+
+        self.assertEqual(result.final_status, "inspection_ready")
+        saved = self.repository.save_review_result.call_args.args[1]
+        self.assertFalse(saved.requires_human_review)
+        self.assertFalse(saved.operational_indicators.safety_concern)
+        self.assertEqual(self.documents["DOC-FRONT"].status, "superseded")
+        self.assertEqual(
+            self.documents["DOC-FRONT"].superseded_by_document_id, "DOC-CORRECT"
+        )
+        self.assertEqual(
+            self.documents["DOC-CORRECT"].replaces_document_id, "DOC-FRONT"
+        )
+        begin = self.repository.begin_document_resume_review.call_args.kwargs
+        self.assertEqual(begin["replacement_action_id"], "ACT-AUTONOMOUS-FLOW-3")
+        self.assertEqual(begin["replaces_document_id"], "DOC-FRONT")
+
+        replay = self.workflow.resume("CLM-A1B2C3D4", replacement)
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(self.repository.save_review_result.call_count, 1)
 
     def test_replacement_does_not_preserve_identity_from_superseded_target(self) -> None:
         self.claim["missing_documents"] = []
@@ -586,7 +923,7 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             "DOC-FRONT",
         )
 
-    def test_unusable_explicit_replacement_keeps_target_and_action_retryable(
+    def test_unusable_implicit_replacement_keeps_target_and_action_retryable(
         self,
     ) -> None:
         self.claim["requested_actions"] = [
@@ -616,8 +953,6 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             filename="replacement.jpg",
             status="received",
             received_at=datetime.now(timezone.utc),
-            requested_action_id="ACT-REPLACE",
-            replaces_document_id="DOC-OLD",
         )
         self.extractor.extract.return_value = DocumentExtractionResult(
             usable=False,
@@ -634,6 +969,44 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             save_kwargs["retry_replacement_action_id"], "ACT-REPLACE"
         )
         self.assertEqual(self.documents["DOC-OLD"].status, "received")
+
+    def test_unrelated_ordinary_upload_does_not_join_replacement_action(self) -> None:
+        self.claim["missing_documents"] = [{
+            "type": "police_report",
+            "reason": "The police report is required.",
+            "source_requirement": "police_report",
+        }]
+        self.claim["requested_actions"] = [{
+            "action_id": "ACT-REPLACE",
+            "action_type": "upload_document",
+            "review_id": "AUTONOMOUS-1",
+            "document_type": "damage_evidence",
+            "instruction": "Upload the correct damage photo.",
+            "replaces_document_id": "DOC-OLD",
+        }]
+        self.documents["DOC-OLD"] = ClaimDocument(
+            document_id="DOC-OLD", claim_id="CLM-A1B2C3D4",
+            document_type="damage_evidence", filename="wrong.jpg",
+            status="validated", received_at=datetime.now(timezone.utc),
+        )
+        report = ClaimDocument(
+            document_id="DOC-REPORT", claim_id="CLM-A1B2C3D4",
+            document_type="police_report", filename="report.pdf",
+            status="received", received_at=datetime.now(timezone.utc),
+        )
+        self.documents[report.document_id] = report
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True, reason="The police report is readable."
+        )
+        self.review_service.review.return_value = review_result(complete=False)
+
+        self.workflow.resume("CLM-A1B2C3D4", report)
+
+        kwargs = self.repository.save_review_result.call_args.kwargs
+        self.assertIsNone(kwargs["replacement_document"])
+        self.assertEqual(self.documents["DOC-OLD"].status, "validated")
+        begin = self.repository.begin_document_resume_review.call_args.kwargs
+        self.assertIsNone(begin["replacement_action_id"])
 
     def test_blurry_document_stays_awaiting_documents(self) -> None:
         self.extractor.extract.return_value = DocumentExtractionResult(

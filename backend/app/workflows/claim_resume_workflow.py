@@ -3,12 +3,13 @@ from uuid import uuid4
 from google.genai import types
 
 from app.domain.claim_status import ClaimStatus
+from app.domain.evidence_reasoning import REPLACEABLE_DOCUMENT_TYPES
 from app.models.claim_document import (
     ClaimDocument,
     DocumentExtractionResult,
     ResumeClaimResult,
 )
-from app.models.intake_result import intake_result_from_claim
+from app.models.intake_result import IntakeResult, intake_result_from_claim
 from app.models.review_result import ClaimEvidenceMetadata, UploadedEvidence
 from app.models.requested_action import (
     UploadDocumentRequestedAction,
@@ -79,13 +80,30 @@ class ClaimResumeWorkflow:
             )
 
         current_status = claim.get("status")
-        if current_status != ClaimStatus.AWAITING_DOCUMENTS.value:
+        same_operation_retry = (
+            current_status == ClaimStatus.REVIEW_PROCESSING.value
+            and existing_document is not None
+            and claim.get("active_resume_document_id") == new_document.document_id
+            and claim.get("active_resume_idempotency_key") == idempotency_key
+            and existing_document.resume_idempotency_key == idempotency_key
+            and claim.get("active_resume_correlation_id")
+            == existing_document.resume_correlation_id
+        )
+        if (
+            current_status != ClaimStatus.AWAITING_DOCUMENTS.value
+            and not same_operation_retry
+        ):
             raise ClaimResumeError(
                 f"Claim {claim_id} cannot resume missing evidence from status "
-                f"{current_status!r}; expected awaiting_documents."
+                f"{current_status!r}; expected awaiting_documents or the same "
+                "in-progress document resume operation."
             )
 
-        correlation_id = str(uuid4())
+        correlation_id = (
+            str(claim.get("active_resume_correlation_id"))
+            if same_operation_retry
+            else str(uuid4())
+        )
         document = new_document.model_copy(
             update={"resume_idempotency_key": idempotency_key}
         )
@@ -103,11 +121,17 @@ class ClaimResumeWorkflow:
         else:
             document = existing_document
 
-        matched_requirement = match_missing_requirement(
-            claim,
-            document.document_type,
-            requested_action_id=document.requested_action_id,
-            replaces_document_id=document.replaces_document_id,
+        document = _bind_server_authorized_replacement(claim, document)
+
+        matched_requirement = (
+            document.resume_matched_requirement
+            if same_operation_retry
+            else match_missing_requirement(
+                claim,
+                document.document_type,
+                requested_action_id=document.requested_action_id,
+                replaces_document_id=document.replaces_document_id,
+            )
         )
         if matched_requirement is None:
             reason = (
@@ -139,16 +163,48 @@ class ClaimResumeWorkflow:
                 reason=reason,
             )
 
-        extraction = _normalize_extraction(
-            extraction_result
-            or self._document_extractor.extract(document, matched_requirement),
-            document=document,
-            matched_requirement=matched_requirement,
-        )
+        if not same_operation_retry:
+            self._repository.begin_document_resume_review(
+                claim_id,
+                document.document_id,
+                idempotency_key=idempotency_key,
+                matched_requirement=matched_requirement,
+                correlation_id=correlation_id,
+                replacement_action_id=(
+                    document.requested_action_id
+                    if document.requested_action_id
+                    and document.replaces_document_id
+                    else None
+                ),
+                replaces_document_id=document.replaces_document_id,
+                replacement_document_type=(
+                    document.document_type
+                    if document.requested_action_id
+                    and document.replaces_document_id
+                    else None
+                ),
+            )
+
+        extraction = document.resume_extraction_result
+        if extraction is None:
+            extraction = _normalize_extraction(
+                extraction_result
+                or self._document_extractor.extract(document, matched_requirement),
+                document=document,
+                matched_requirement=matched_requirement,
+            )
+            self._repository.save_document_resume_extraction(
+                claim_id, document.document_id, extraction
+            )
         explicit_replacement = bool(
             document.requested_action_id and document.replaces_document_id
         )
-        if extraction.usable and explicit_replacement:
+        quality_already_processed = (
+            same_operation_retry and document.resume_quality_processed_at is not None
+        )
+        if quality_already_processed:
+            pass
+        elif extraction.usable and explicit_replacement:
             # Successful replacement acceptance is committed with action
             # consumption and target supersession in save_review_result.
             pass
@@ -169,47 +225,46 @@ class ClaimResumeWorkflow:
                 evidence_findings=extraction.evidence_findings,
             )
 
-        self._append_event(
-            claim_id,
-            document,
-            action="document_quality_checked",
-            from_status=current_status,
-            to_status=current_status,
-            reason=extraction.reason,
-            correlation_id=correlation_id,
-            extra_details={"usable": extraction.usable},
-        )
+        if not quality_already_processed:
+            self._append_event(
+                claim_id,
+                document,
+                action="document_quality_checked",
+                from_status=ClaimStatus.AWAITING_DOCUMENTS.value,
+                to_status=ClaimStatus.AWAITING_DOCUMENTS.value,
+                reason=extraction.reason,
+                correlation_id=correlation_id,
+                extra_details={"usable": extraction.usable},
+            )
 
-        resolution_action = (
-            "missing_requirement_satisfied"
-            if extraction.usable
-            else "missing_requirement_still_unresolved"
-        )
-        self._append_event(
-            claim_id,
-            document,
-            action=resolution_action,
-            from_status=current_status,
-            to_status=current_status,
-            reason=extraction.reason,
-            correlation_id=correlation_id,
-            extra_details={"requirement": matched_requirement},
-        )
+            resolution_action = (
+                "missing_requirement_satisfied"
+                if extraction.usable
+                else "missing_requirement_still_unresolved"
+            )
+            self._append_event(
+                claim_id,
+                document,
+                action=resolution_action,
+                from_status=ClaimStatus.AWAITING_DOCUMENTS.value,
+                to_status=ClaimStatus.AWAITING_DOCUMENTS.value,
+                reason=extraction.reason,
+                correlation_id=correlation_id,
+                extra_details={"requirement": matched_requirement},
+            )
+            self._append_event(
+                claim_id,
+                document,
+                action="claim_review_resumed",
+                from_status=ClaimStatus.AWAITING_DOCUMENTS.value,
+                to_status=ClaimStatus.REVIEW_PROCESSING.value,
+                reason="The downstream review stage resumed for the new evidence.",
+                correlation_id=correlation_id,
+            )
+            self._repository.mark_document_resume_quality_processed(
+                claim_id, document.document_id
+            )
 
-        self._repository.update_claim_status(
-            claim_id, ClaimStatus.REVIEW_PROCESSING
-        )
-        self._append_event(
-            claim_id,
-            document,
-            action="claim_review_resumed",
-            from_status=current_status,
-            to_status=ClaimStatus.REVIEW_PROCESSING.value,
-            reason="The downstream review stage resumed for the new evidence.",
-            correlation_id=correlation_id,
-        )
-
-        intake_result = intake_result_from_claim(claim)
         documents = self._repository.get_documents(claim_id)
         documents = _replace_document_status(
             documents,
@@ -220,6 +275,7 @@ class ClaimResumeWorkflow:
         review_documents = _documents_for_resumed_review(
             documents, document, extraction
         )
+        intake_result = _current_review_intake_result(claim, review_documents)
         metadata = _build_review_metadata(
             claim=claim,
             documents=review_documents,
@@ -255,6 +311,7 @@ class ClaimResumeWorkflow:
 
         move_action = {
             ClaimStatus.AWAITING_DOCUMENTS: "missing_requirement_still_unresolved",
+            ClaimStatus.INSPECTION_READY: "claim_moved_to_inspection_ready",
             ClaimStatus.INSPECTION_PENDING: "claim_moved_to_inspection_pending",
             ClaimStatus.HUMAN_REVIEW_REQUIRED: "claim_moved_to_human_review",
         }[final_status]
@@ -336,7 +393,7 @@ def match_missing_requirement(
     }
     unresolved = missing_types | unusable_types
 
-    if requested_action_id and replaces_document_id:
+    if requested_action_id:
         action = next(
             (
                 item
@@ -365,6 +422,52 @@ def match_missing_requirement(
         if "police_report" in unresolved:
             return "police_report"
     return None
+
+
+def _bind_server_authorized_replacement(
+    claim: dict[str, object], document: ClaimDocument
+) -> ClaimDocument:
+    """Bind a resume artifact only to a unique persisted replacement action.
+
+    The persisted claim action remains authoritative. This also safely recovers
+    uploads from an older claimant client that omitted requested_action_id.
+    """
+    upload_actions = [
+        action
+        for action in parse_requested_actions(claim.get("requested_actions", []))
+        if isinstance(action, UploadDocumentRequestedAction)
+    ]
+    if document.requested_action_id:
+        matches = [
+            action
+            for action in upload_actions
+            if action.action_id == document.requested_action_id
+        ]
+        if len(matches) != 1:
+            raise ClaimResumeError(
+                "The document replacement action is missing or already consumed."
+            )
+        action = matches[0]
+    else:
+        replacement_actions = [
+            action for action in upload_actions if action.replaces_document_id
+        ]
+        if not (
+            len(replacement_actions) == 1
+            and document.document_type in REPLACEABLE_DOCUMENT_TYPES
+            and replacement_actions[0].document_type
+            in REPLACEABLE_DOCUMENT_TYPES
+        ):
+            return document
+        action = replacement_actions[0]
+
+    return document.model_copy(
+        update={
+            "requested_action_id": action.action_id,
+            "replaces_document_id": action.replaces_document_id,
+            "document_type": action.document_type,
+        }
+    )
 
 
 def _replace_document_status(
@@ -534,6 +637,47 @@ def _documents_for_resumed_review(
         for document in documents
         if document.status != "superseded" and document.document_id != replaced_id
     ]
+
+
+def _current_review_intake_result(
+    claim: dict[str, object], documents: list[ClaimDocument]
+) -> IntakeResult:
+    """Build source-safe context without replaying superseded intake summaries."""
+    active = [document for document in documents if document.status != "superseded"]
+    image_capabilities = [
+        {
+            "source": document.filename,
+            "supported_capabilities": list(document.supported_capabilities),
+            "unusable_capabilities": [],
+            "quality_observations": (
+                [document.quality_reason] if document.quality_reason else []
+            ),
+        }
+        for document in active
+        if document.content_type is None
+        or document.content_type.startswith("image/")
+        if document.supported_capabilities
+    ]
+    evidence_findings = [
+        {"source": document.filename, "finding": finding}
+        for document in active
+        for finding in document.evidence_findings
+    ]
+    return IntakeResult.model_validate({
+        "claim_type": claim.get("claim_type"),
+        # These three fields were derived by the original multimodal intake and
+        # must not survive as current facts after their source is superseded.
+        "damage_type": "",
+        "parts_affected": [],
+        "incident_summary": claim.get("incident_description") or "",
+        # Stable report/claimant facts remain available to deterministic checks.
+        "policy_number": claim.get("policy_number"),
+        "incident_date": claim.get("incident_date"),
+        "vehicle_drivable": claim.get("vehicle_drivable"),
+        "uncertainties": [],
+        "image_evidence_capabilities": image_capabilities,
+        "evidence_findings": evidence_findings,
+    })
 
 
 def _build_review_evidence_parts(

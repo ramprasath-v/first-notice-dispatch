@@ -234,6 +234,136 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         self.assertEqual(event["details"], {"source": "multimodal_intake"})
         self.assertEqual(event["correlation_id"], "corr-456")
 
+    def test_document_resume_reservation_atomically_owns_review_processing(self) -> None:
+        claim_snapshot = MagicMock(exists=True)
+        claim_snapshot.to_dict.return_value = {"status": "awaiting_documents"}
+        document_snapshot = MagicMock(exists=True)
+        document_snapshot.to_dict.return_value = {"status": "received"}
+        self.claim_ref.get.return_value = claim_snapshot
+        documents = MagicMock()
+        document_ref = MagicMock()
+        documents.document.return_value = document_ref
+        document_ref.get.return_value = document_snapshot
+        self.claim_ref.collection.return_value = documents
+        transaction = MagicMock()
+        self.client.transaction.return_value = transaction
+
+        with patch(
+            "app.tools.firestore_repository.firestore.transactional",
+            side_effect=lambda function: function,
+        ):
+            created = self.repository.begin_document_resume_review(
+                "CLM-A1B2C3D4",
+                "DOC-NEW",
+                idempotency_key="CLM-A1B2C3D4:DOC-NEW:resume",
+                matched_requirement="damage_evidence",
+                correlation_id="corr-resume",
+            )
+
+        self.assertTrue(created)
+        claim_update = transaction.update.call_args_list[0].args[1]
+        document_update = transaction.update.call_args_list[1].args[1]
+        self.assertEqual(claim_update["status"], "review_processing")
+        self.assertEqual(claim_update["active_resume_document_id"], "DOC-NEW")
+        self.assertEqual(
+            claim_update["active_resume_idempotency_key"],
+            "CLM-A1B2C3D4:DOC-NEW:resume",
+        )
+        self.assertEqual(
+            document_update["resume_matched_requirement"], "damage_evidence"
+        )
+
+    def test_document_resume_binds_only_persisted_replacement_target(self) -> None:
+        claim_snapshot = MagicMock(exists=True)
+        claim_snapshot.to_dict.return_value = {
+            "status": "awaiting_documents",
+            "requested_actions": [{
+                "action_id": "ACT-AUTONOMOUS",
+                "action_type": "upload_document",
+                "review_id": "AUTONOMOUS-1",
+                "document_type": "damage_evidence",
+                "instruction": "Upload the correct damage photo.",
+                "replaces_document_id": "DOC-OLD",
+            }],
+        }
+        new_snapshot = MagicMock(exists=True)
+        new_snapshot.to_dict.return_value = {"status": "received"}
+        old_snapshot = MagicMock(exists=True)
+        old_snapshot.to_dict.return_value = {"status": "validated"}
+        self.claim_ref.get.return_value = claim_snapshot
+        documents = MagicMock()
+        new_ref = MagicMock()
+        old_ref = MagicMock()
+        documents.document.side_effect = lambda document_id: (
+            old_ref if document_id == "DOC-OLD" else new_ref
+        )
+        new_ref.get.return_value = new_snapshot
+        old_ref.get.return_value = old_snapshot
+        self.claim_ref.collection.return_value = documents
+        transaction = MagicMock()
+        self.client.transaction.return_value = transaction
+
+        with patch(
+            "app.tools.firestore_repository.firestore.transactional",
+            side_effect=lambda function: function,
+        ):
+            self.repository.begin_document_resume_review(
+                "CLM-A1B2C3D4",
+                "DOC-NEW",
+                idempotency_key="CLM-A1B2C3D4:DOC-NEW:resume",
+                matched_requirement="damage_evidence",
+                correlation_id="corr-resume",
+                replacement_action_id="ACT-AUTONOMOUS",
+                replaces_document_id="DOC-OLD",
+                replacement_document_type="damage_evidence",
+            )
+
+        document_update = transaction.update.call_args_list[1].args[1]
+        self.assertEqual(document_update["requested_action_id"], "ACT-AUTONOMOUS")
+        self.assertEqual(document_update["replaces_document_id"], "DOC-OLD")
+        self.assertEqual(document_update["document_type"], "damage_evidence")
+
+    def test_document_resume_rejects_browser_selected_replacement_target(self) -> None:
+        claim_snapshot = MagicMock(exists=True)
+        claim_snapshot.to_dict.return_value = {
+            "status": "awaiting_documents",
+            "requested_actions": [{
+                "action_id": "ACT-AUTONOMOUS",
+                "action_type": "upload_document",
+                "review_id": "AUTONOMOUS-1",
+                "document_type": "damage_evidence",
+                "instruction": "Upload the correct damage photo.",
+                "replaces_document_id": "DOC-SERVER-TARGET",
+            }],
+        }
+        document_snapshot = MagicMock(exists=True)
+        document_snapshot.to_dict.return_value = {"status": "received"}
+        self.claim_ref.get.return_value = claim_snapshot
+        documents = MagicMock()
+        document_ref = MagicMock()
+        documents.document.return_value = document_ref
+        document_ref.get.return_value = document_snapshot
+        self.claim_ref.collection.return_value = documents
+        self.client.transaction.return_value = MagicMock()
+
+        with patch(
+            "app.tools.firestore_repository.firestore.transactional",
+            side_effect=lambda function: function,
+        ):
+            with self.assertRaisesRegex(
+                FirestoreWriteError, "server-authorized replacement action"
+            ):
+                self.repository.begin_document_resume_review(
+                    "CLM-A1B2C3D4",
+                    "DOC-NEW",
+                    idempotency_key="CLM-A1B2C3D4:DOC-NEW:resume",
+                    matched_requirement="damage_evidence",
+                    correlation_id="corr-resume",
+                    replacement_action_id="ACT-AUTONOMOUS",
+                    replaces_document_id="DOC-BROWSER-CHOICE",
+                    replacement_document_type="damage_evidence",
+                )
+
     def test_firestore_commit_error_is_surfaced_clearly(self) -> None:
         self.batch.commit.side_effect = ServiceUnavailable("Firestore unavailable")
 
@@ -281,9 +411,9 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
             "CLM-A1B2C3D4", review, correlation_id="corr-review"
         )
 
-        self.assertEqual(status, ClaimStatus.INSPECTION_PENDING)
+        self.assertEqual(status, ClaimStatus.INSPECTION_READY)
         claim_update = self.batch.update.call_args.args[1]
-        self.assertEqual(claim_update["status"], "inspection_pending")
+        self.assertEqual(claim_update["status"], "inspection_ready")
         self.assertEqual(claim_update["review_status"], "completed")
         self.assertEqual(claim_update["missing_document_count"], 0)
         self.assertEqual(
@@ -296,7 +426,7 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         event = self.batch.create.call_args.args[1]
         self.assertEqual(event["action"], "claim_review_completed")
         self.assertEqual(event["from_status"], "review_processing")
-        self.assertEqual(event["to_status"], "inspection_pending")
+        self.assertEqual(event["to_status"], "inspection_ready")
         self.batch.commit.assert_called_once_with()
 
     def test_replacement_acceptance_and_supersession_share_review_batch(self) -> None:
@@ -350,6 +480,9 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         claim_update = self.batch.update.call_args_list[0].args[1]
         self.assertEqual(claim_update["requested_actions"], [])
         self.assertEqual(claim_update["replacement_upload_reservations"], {})
+        self.assertIn("active_resume_document_id", claim_update)
+        self.assertIn("active_resume_idempotency_key", claim_update)
+        self.assertIn("active_resume_correlation_id", claim_update)
         document_updates = [call.args[1] for call in self.batch.update.call_args_list[1:]]
         self.assertIn(
             {
@@ -360,6 +493,14 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         )
         self.assertTrue(
             any(update.get("status") == "validated" for update in document_updates)
+        )
+        self.assertTrue(
+            any(
+                update.get("requested_action_id") == "ACT-REPLACE"
+                and update.get("replaces_document_id") == "DOC-OLD"
+                and update.get("document_type") == "damage_evidence"
+                for update in document_updates
+            )
         )
         self.batch.commit.assert_called_once_with()
 

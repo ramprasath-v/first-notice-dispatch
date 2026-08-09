@@ -27,6 +27,16 @@ const review: HumanReview = {
     field_name: 'policy_number',
     can_request: true,
   },
+  ai_recommendation: 'Physical inspection recommended. Rear damage is supported.',
+  claim_snapshot: {
+    incident: 'Rear impact.', drivable: true,
+    police_report_status: 'Validated', damage_evidence_status: 'Validated',
+  },
+  evidence_comparison: [
+    { source: 'police-report.pdf', finding: 'Rear-end impact is documented.' },
+    { source: 'rear.jpg', finding: 'Rear bumper damage is visible.' },
+  ],
+  resolution_history: ['FirstNotice validated requested evidence.'],
   expires_at: '2026-08-08T02:00:00Z',
 };
 
@@ -65,11 +75,14 @@ describe('AdjusterReviewPage', () => {
     return fixture;
   }
 
-  it('loads a valid token and shows the recommendation while analysis is collapsed', async () => {
+  it('loads a concise inspection packet while AI analysis is collapsed', async () => {
     const fixture = await create();
     expect(api.getHumanReview).toHaveBeenCalledWith('secure-token');
     expect(fixture.nativeElement.textContent).toContain('CLM-A1B2C3D4');
-    expect(fixture.nativeElement.textContent).toContain('Ask the claimant to confirm the policy number');
+    expect(fixture.nativeElement.textContent).toContain('Physical inspection recommended');
+    expect(fixture.nativeElement.textContent).toContain('Rear impact');
+    expect(fixture.nativeElement.textContent).toContain('Rear bumper damage is visible');
+    expect(fixture.nativeElement.textContent).toContain('Resolution history');
     const analysis = fixture.nativeElement.querySelector('details.analysis-details') as HTMLDetailsElement;
     expect(analysis.open).toBe(false);
     expect(analysis.textContent).toContain('POL-1001 versus POL-9999');
@@ -87,7 +100,7 @@ describe('AdjusterReviewPage', () => {
     const fixture = await create();
     const labels = [...fixture.nativeElement.querySelectorAll('.actions button')]
       .map((button: HTMLButtonElement) => button.textContent?.trim());
-    expect(labels).toEqual(['Approve & Continue', 'Request More Information']);
+    expect(labels).toEqual(['Request More Info', 'Approve Inspection']);
     expect(fixture.nativeElement.querySelector('select')).toBeNull();
     expect(fixture.nativeElement.textContent).not.toContain('Request Text Correction');
     expect(fixture.nativeElement.textContent).not.toContain('Request Replacement Evidence');
@@ -97,16 +110,20 @@ describe('AdjusterReviewPage', () => {
     const fixture = await create();
     fixture.nativeElement.querySelector('.primary').click();
     fixture.detectChanges();
-    expect(api.approveHumanReview).toHaveBeenCalledWith('secure-token', '');
+    expect(api.approveHumanReview).toHaveBeenCalledWith('secure-token');
     expect(fixture.nativeElement.textContent).toContain('resumed processing');
     expect(fixture.nativeElement.querySelectorAll('button')).toHaveLength(0);
   });
 
-  it('requests the server-recommended action through the unified endpoint', async () => {
+  it('requests more info from a natural-language instruction', async () => {
     const fixture = await create();
-    fixture.nativeElement.querySelector('.secondary').click();
+    fixture.componentInstance.requestMoreInformation();
+    fixture.componentInstance.decisionNote = 'Please upload a clearer rear damage photo.';
+    fixture.componentInstance.requestMoreInformation();
     fixture.detectChanges();
-    expect(api.requestHumanReviewCorrection).toHaveBeenCalledWith('secure-token', '');
+    expect(api.requestHumanReviewCorrection).toHaveBeenCalledWith(
+      'secure-token', 'Please upload a clearer rear damage photo.',
+    );
     expect(fixture.nativeElement.textContent).toContain('Correction requested');
   });
 
@@ -130,12 +147,12 @@ describe('AdjusterReviewPage', () => {
       ],
     }));
     const fixture = await create();
-    expect(fixture.nativeElement.textContent).toContain('Request a replacement damage photo');
+    expect(fixture.nativeElement.textContent).toContain('Inspection Decision');
     expect(fixture.nativeElement.textContent).toContain('initial-damage.jpg');
     expect(fixture.nativeElement.querySelector('select')).toBeNull();
   });
 
-  it('does not guess when the server marks remediation ambiguous', async () => {
+  it('does not submit an empty more-info instruction', async () => {
     api.getHumanReview.mockReturnValue(of({
       ...review,
       recommended_remediation: {
@@ -146,8 +163,11 @@ describe('AdjusterReviewPage', () => {
     }));
     const fixture = await create();
     const request = fixture.nativeElement.querySelector('.actions .secondary') as HTMLButtonElement;
-    expect(request.disabled).toBe(true);
     request.click();
+    fixture.detectChanges();
+    const send = fixture.nativeElement.querySelector('.actions .secondary') as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    send.click();
     expect(api.requestHumanReviewCorrection).not.toHaveBeenCalled();
   });
 

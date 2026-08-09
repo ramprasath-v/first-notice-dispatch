@@ -12,6 +12,7 @@ const PRESENTATION: Record<string, [string, string]> = {
   claim_moved_to_adjuster_notified: ['Adjuster notified', 'The claim packet is ready for adjuster review.'],
   human_review_correction_requested: ['Correction requested', 'An adjuster requested a correction before processing continues.'],
   human_review_resumed: ['Processing resumed', 'The operational review checkpoint was completed.'],
+  claim_moved_to_inspection_ready: ['Intake complete', 'The evidence package is ready for an adjuster inspection decision.'],
 };
 const TECHNICAL = new Set(['pubsub_event_received', 'pubsub_event_processed', 'pubsub_event_duplicate', 'pubsub_event_failed']);
 
@@ -76,7 +77,10 @@ function presentationFor(event: ClaimEvent): { title: string; description: strin
       return { title: 'Additional information requested', description: 'More evidence is needed before processing can continue.' };
     }
     if (event.to_status === 'human_review_required') {
-      return { title: 'Additional review required', description: 'An adjuster review is needed before processing can continue.' };
+      return { title: 'Processing paused safely', description: 'FirstNotice could not safely determine another automated action.' };
+    }
+    if (event.to_status === 'inspection_ready') {
+      return { title: 'Intake complete', description: 'The current evidence package is ready for an inspection decision.' };
     }
     return { title: 'Intake requirements reviewed', description: 'The claim information has cleared intake review.' };
   }
@@ -94,7 +98,10 @@ function activitiesFor(event: ClaimEvent): Array<Omit<AgentActivityItem, 'key' |
       ];
       if (event.to_status === 'human_review_required') return [{
         agent: 'REVIEW AGENT',
-        description: hasConflicts(event) ? 'Detected conflicting policy information' : 'Identified information requiring adjuster review',
+        description: hasConflicts(event) ? 'Could not safely resolve the remaining discrepancy' : 'Paused at a safe operational boundary',
+      }];
+      if (event.to_status === 'inspection_ready') return [{
+        agent: 'WORKFLOW', description: 'Completed autonomous intake for inspection decision'
       }];
       return [{ agent: 'REVIEW AGENT', description: 'Verified the intake requirements' }];
     }

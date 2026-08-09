@@ -24,7 +24,7 @@ describe('ClaimTimeline', () => {
     const text = fixture.nativeElement.textContent;
     expect(text).toContain('Evidence analyzed');
     expect(text).toContain('Analyzed the submitted multimodal evidence');
-    expect(text).toContain('Technical trace');
+    expect(text).toContain('View technical activity');
     expect(fixture.nativeElement.querySelector('details').open).toBe(false);
   });
 
@@ -58,7 +58,7 @@ describe('ClaimTimeline', () => {
     ];
     fixture.detectChanges();
     const text = fixture.nativeElement.textContent;
-    expect(text).toContain('Detected conflicting policy information');
+    expect(text).toContain('Could not safely resolve the remaining discrepancy');
     expect(text).toContain('Paused the claim for human review');
     expect(text).toContain('Sent a secure review request through Gmail');
     expect(text).toContain('Human approval received');

@@ -18,7 +18,10 @@ from app.models.claim_api import (
     DocumentAcceptedResponse,
 )
 from app.models.claim_document import ClaimDocument
-from app.models.requested_action import parse_requested_actions
+from app.models.requested_action import (
+    UploadDocumentRequestedAction,
+    parse_requested_actions,
+)
 from app.services.claim_storage_service import (
     ClaimStorageService,
     ClaimStorageValidationError,
@@ -327,18 +330,25 @@ class ClaimSubmissionService:
             raise ClaimSubmissionError(
                 f"Claim {claim_id} has no persisted timestamp.", claim_id=claim_id
             )
+        requested_actions = parse_requested_actions(
+            claim.get("requested_actions", [])
+        )
+        requested_evidence = build_claimant_evidence_requests(
+            claim.get("missing_documents", []),
+            claim.get("unusable_evidence", []),
+        )
+        if any(
+            isinstance(action, UploadDocumentRequestedAction)
+            for action in requested_actions
+        ):
+            requested_evidence = []
         return ClaimSummaryResponse(
             claim_id=claim_id,
             status=str(claim.get("status")),
             intake_priority=claim.get("intake_priority"),
             missing_documents=list(claim.get("missing_documents", [])),
-            requested_evidence=build_claimant_evidence_requests(
-                claim.get("missing_documents", []),
-                claim.get("unusable_evidence", []),
-            ),
-            requested_actions=parse_requested_actions(
-                claim.get("requested_actions", [])
-            ),
+            requested_evidence=requested_evidence,
+            requested_actions=requested_actions,
             inspection=(
                 appointment.model_dump(mode="python") if appointment else None
             ),

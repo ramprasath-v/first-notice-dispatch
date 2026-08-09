@@ -21,6 +21,7 @@ class CoordinatorAction(StrEnum):
     RUN_REVIEW = "run_review"
     WAIT_FOR_EVIDENCE = "wait_for_external_evidence"
     DISPATCH_CLAIM = "dispatch_claim"
+    WAIT_FOR_INSPECTION_DECISION = "wait_for_inspection_decision"
     STOP_FOR_HUMAN = "stop_for_human_review"
     COMPLETE = "workflow_complete"
 
@@ -33,7 +34,9 @@ def route_claim_state(status: str) -> CoordinatorAction:
     routes = {
         "new": CoordinatorAction.RUN_INTAKE,
         "intake_complete": CoordinatorAction.RUN_REVIEW,
+        "review_processing": CoordinatorAction.RUN_REVIEW,
         "awaiting_documents": CoordinatorAction.WAIT_FOR_EVIDENCE,
+        "inspection_ready": CoordinatorAction.WAIT_FOR_INSPECTION_DECISION,
         "inspection_pending": CoordinatorAction.DISPATCH_CLAIM,
         "inspection_scheduled": CoordinatorAction.DISPATCH_CLAIM,
         "human_review_required": CoordinatorAction.STOP_FOR_HUMAN,
@@ -183,6 +186,7 @@ class FirstNoticeCoordinatorAgent(BaseAgent):
                     reviewed_state = self.workflow_tools.get_claim_state(str(claim_id))
                     if reviewed_state.status in {
                         "awaiting_documents",
+                        "inspection_ready",
                         "inspection_pending",
                         "human_review_required",
                     }:
@@ -228,6 +232,19 @@ class FirstNoticeCoordinatorAgent(BaseAgent):
                         final_status=current_status,
                         selected_actions=selected_actions,
                         stop_reason="human_review_required",
+                    ),
+                )
+                return
+
+            if action == CoordinatorAction.WAIT_FOR_INSPECTION_DECISION:
+                yield _final_event(
+                    self.name,
+                    CoordinatorResult(
+                        claim_id=str(claim_id),
+                        initial_status=initial_status,
+                        final_status=current_status,
+                        selected_actions=selected_actions,
+                        stop_reason="awaiting_inspection_decision",
                     ),
                 )
                 return

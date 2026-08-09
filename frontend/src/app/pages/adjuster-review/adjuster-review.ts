@@ -23,6 +23,7 @@ export class AdjusterReviewPage {
   readonly deciding = signal(false);
   readonly error = signal('');
   readonly completedMessage = signal('');
+  readonly requestInfoOpen = signal(false);
   decisionNote = '';
 
   constructor() {
@@ -50,11 +51,17 @@ export class AdjusterReviewPage {
   }
 
   requestMoreInformation(): void {
-    if (!this.review()?.recommended_remediation.can_request) return;
+    if (!this.requestInfoOpen()) {
+      this.requestInfoOpen.set(true);
+      return;
+    }
+    if (!this.decisionNote.trim()) return;
     this.decide('correction');
   }
 
   comparisonFacts(): Array<{ source: string; finding: string }> {
+    const persisted = this.review()?.evidence_comparison ?? [];
+    if (persisted.length) return persisted.slice(0, 6);
     return (this.review()?.briefing.known_facts ?? []).flatMap((fact) => {
       const separator = fact.indexOf(':');
       if (separator < 1) return [];
@@ -72,6 +79,19 @@ export class AdjusterReviewPage {
     }).slice(0, 3);
   }
 
+  snapshotEntries(): Array<{ label: string; value: string }> {
+    const labels: Record<string, string> = {
+      incident: 'Incident', vehicle: 'Claim type', policy_number: 'Policy',
+      drivable: 'Vehicle drivable', police_report_status: 'Police report',
+      damage_evidence_status: 'Damage evidence',
+    };
+    return Object.entries(this.review()?.claim_snapshot ?? {}).flatMap(([key, value]) =>
+      value === null || value === ''
+        ? []
+        : [{ label: labels[key] ?? this.humanize(key), value: typeof value === 'boolean' ? (value ? 'Yes' : 'No') : String(value) }],
+    );
+  }
+
   humanize(value: string): string {
     return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
   }
@@ -81,7 +101,7 @@ export class AdjusterReviewPage {
     this.deciding.set(true);
     this.error.set('');
     const request = action === 'approve'
-      ? this.api.approveHumanReview(this.token, this.decisionNote)
+      ? this.api.approveHumanReview(this.token)
       : this.api.requestHumanReviewCorrection(this.token, this.decisionNote);
     request.pipe(finalize(() => this.deciding.set(false))).subscribe({
       next: (result) => {

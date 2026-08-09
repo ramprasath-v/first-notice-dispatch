@@ -535,6 +535,51 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
             {"vehicle_identity", "license_plate_photo"},
         )
 
+    def test_get_claim_exposes_one_upload_action_for_flow_3_remediation(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+            "intake_priority": "expedited",
+            "missing_documents": [
+                {
+                    "type": "vehicle_identity",
+                    "reason": "Vehicle identity is required.",
+                    "source_requirement": "always_required",
+                },
+                {
+                    "type": "license_plate_photo",
+                    "reason": "A clear plate photo is required.",
+                    "source_requirement": "license_plate_photo",
+                },
+            ],
+            "unusable_evidence": [],
+            "requested_actions": [
+                {
+                    "action_type": "upload_document",
+                    "action_id": "ACT-FLOW-3",
+                    "review_id": "AUTONOMOUS-FLOW-3",
+                    "document_type": "damage_evidence",
+                    "instruction": (
+                        "Please upload a clear photo of the vehicle involved in "
+                        "this incident showing the reported damage and a readable "
+                        "license plate."
+                    ),
+                    "replaces_document_id": "DOC-FRONT",
+                }
+            ],
+            "updated_at": NOW,
+        }
+        self.repository.get_scheduled_appointment.return_value = None
+
+        response = self.service.get_claim(CLAIM_ID)
+
+        self.assertEqual(len(response.missing_documents), 2)
+        self.assertEqual(response.requested_evidence, [])
+        self.assertEqual(len(response.requested_actions), 1)
+        self.assertEqual(
+            response.requested_actions[0].action_id, "ACT-FLOW-3"
+        )
+
 
 class ClaimantApiEndpointTests(unittest.TestCase):
     def setUp(self) -> None:

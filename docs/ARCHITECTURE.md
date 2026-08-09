@@ -153,11 +153,12 @@ stateDiagram-v2
     [*] --> new
     new --> intake_complete: multimodal extraction persisted
     intake_complete --> review_processing
-    review_processing --> awaiting_documents: resolvable evidence gap
-    review_processing --> human_review_required: injury / safety / significant conflict / consequential ambiguity
-    review_processing --> inspection_pending: intake may safely continue
+    review_processing --> awaiting_documents: resolvable evidence gap or discrepancy
+    review_processing --> human_review_required: no safe autonomous action exists
+    review_processing --> inspection_ready: autonomous intake complete
     awaiting_documents --> review_processing: document or correction received
-    human_review_required --> review_processing: approved or corrected
+    inspection_ready --> awaiting_documents: adjuster requests more info
+    inspection_ready --> inspection_pending: adjuster authorizes inspection
     inspection_pending --> inspection_scheduled: appointment + Calendar persisted
     inspection_scheduled --> adjuster_notified: packet + notification persisted
 ```
@@ -176,7 +177,7 @@ Only transitions in `backend/app/domain/claim_status.py` are legal. AI output ca
 
 ### ADK coordinator
 
-`FirstNoticeCoordinatorAgent` reads durable state and selects a bounded action: intake, review, wait for evidence, stop for human review, dispatch, or complete. For Pub/Sub submission processing it stops at the next event boundary; the event handler publishes dispatch work only after reloading durable `inspection_pending` state.
+`FirstNoticeCoordinatorAgent` reads durable state and selects a bounded action: intake, review, wait for claimant evidence, wait for an inspection decision, dispatch, or complete. The event handler creates the secure decision checkpoint at durable `inspection_ready` and publishes dispatch work only after approval produces durable `inspection_pending`.
 
 ### Deterministic services
 
@@ -216,14 +217,14 @@ sequenceDiagram
     alt still incomplete
         D->>FS: awaiting_documents
     else ready
-        D->>FS: inspection_pending
-        D->>PS: claim.inspection.ready
+        D->>FS: inspection_ready
+        D->>GM: secure inspection-decision request
     end
 ```
 
 Multiple internal requirements can map to one claimant-facing artifact. A readable license-plate image can satisfy both `license_plate_photo` and `vehicle_identity`.
 
-## 8. Human-review pause and resume
+## 8. Inspection decision and claimant override
 
 ```mermaid
 sequenceDiagram
@@ -234,24 +235,19 @@ sequenceDiagram
     participant API as Claimant/review API
     participant PS as Pub/Sub
 
-    D->>FS: Persist human_review_required + briefing
+    D->>FS: Persist inspection_ready + concise decision packet
     D->>FS: Create review and hash-only token index
     D->>GM: Send secure review URL
-    GM-->>H: Human-review request
-    H->>API: Approve with raw token in X-Review-Token
+    GM-->>H: Inspection-decision request
+    H->>API: Approve Inspection with raw token in X-Review-Token
     API->>FS: Atomically consume decision
     API->>PS: claim.human_review.approved
     PS->>D: Authenticated push
-    D->>FS: Resume review on the same claim
-    alt evidence still unresolved
-        D->>FS: awaiting_documents
-    else safely eligible
-        D->>FS: inspection_pending
-        D->>PS: claim.inspection.ready
-    end
+    D->>FS: inspection_pending
+    D->>PS: claim.inspection.ready
 ```
 
-Approval controls operational continuation only. It is not a coverage, liability, payout, fraud, approval, or denial decision.
+Approval authorizes physical inspection only. It is not a coverage, liability, payout, fraud, approval, or denial decision. Request More Info maps untrusted prose into one allowlisted text or document action and returns the same claim to `awaiting_documents`.
 
 ## 9. Calendar and Gmail actions
 
