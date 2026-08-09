@@ -38,10 +38,21 @@ export class SubmitClaim {
   }
 
   choosePoliceReport(event: Event): void {
-    const file = (event.target as HTMLInputElement).files?.[0] ?? null;
-    this.policeReport.set(file);
-    this.setFileError('police', !file || file.type === 'application/pdf' ? '' : 'Choose a PDF police report.');
+  const file = (event.target as HTMLInputElement).files?.[0] ?? null;
+  this.policeReport.set(file);
+
+  if (!file) {
+    this.setFileError('police', '');
+    return;
   }
+
+  this.setFileError(
+    'police',
+    file.type === 'application/pdf'
+      ? ''
+      : 'Choose a PDF police report.'
+  );
+}
 
   chooseAudio(event: Event): void {
     const file = (event.target as HTMLInputElement).files?.[0] ?? null;
@@ -78,6 +89,7 @@ export class SubmitClaim {
 
   private chooseRequiredFileErrors(): void {
     if (!this.damagePhotos().length) this.setFileError('photos', 'Add at least one damage photo.');
+    if (!this.policeReport()) this.setFileError('police', 'Police report is required.');
   }
 
   private setFileError(key: string, message: string): void {

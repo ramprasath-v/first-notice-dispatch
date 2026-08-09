@@ -32,19 +32,21 @@ describe('SubmitClaim', () => {
     expect(fixture.nativeElement.textContent).toContain('Add at least one damage photo');
   });
 
-  it('accepts a damage photo without a police report', () => {
-    api.submitClaim.mockReturnValue(of(new HttpResponse({ body: {
-      claim_id: 'CLM-ABC12345', status: 'new', event_id: 'evt', message: 'received',
-    }})));
-    component.form.controls.incidentDescription.setValue('Rear-ended at a stoplight');
-    component.damagePhotos.set([new File(['x'], 'damage.jpg', { type: 'image/jpeg' })]);
+  it('rejects submission without a police report', () => {
+  component.form.controls.incidentDescription.setValue('Rear-ended');
 
-    component.submit();
+  component.damagePhotos.set([
+    new File(['x'], 'damage.jpg', { type: 'image/jpeg' })
+  ]);
 
-    expect(api.submitClaim).toHaveBeenCalledOnce();
-    expect(api.submitClaim.mock.calls[0][0].policeReport).toBeUndefined();
-    expect(router.navigate).toHaveBeenCalledWith(['/claims', 'CLM-ABC12345']);
-  });
+  component.submit();
+  fixture.detectChanges();
+
+  expect(api.submitClaim).not.toHaveBeenCalled();
+
+  expect(fixture.nativeElement.textContent)
+    .toContain('Police report is required.');
+});
 
   it('disables submission and shows indeterminate handoff while the request is in progress', () => {
     const response = new Subject<unknown>();
