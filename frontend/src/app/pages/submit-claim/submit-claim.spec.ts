@@ -25,25 +25,20 @@ describe('SubmitClaim', () => {
   });
 
   function setValidSubmission(): void {
-    component.form.controls.policyNumberHint.setValue('POL-12345');
     component.evidenceFiles.set([
       new File(['report'], 'police-report.png', { type: 'image/png' }),
       new File(['photo'], 'vehicle.jpg', { type: 'image/jpeg' }),
     ]);
   }
 
-  it('requires a policy number', () => {
-    component.evidenceFiles.set([
-      new File(['report'], 'report.pdf', { type: 'application/pdf' }),
-    ]);
-    component.submit();
+  it('does not show or require a policy number', () => {
     fixture.detectChanges();
-    expect(api.submitClaim).not.toHaveBeenCalled();
-    expect(fixture.nativeElement.textContent).toContain('Policy number is required');
+    expect(component.form.contains('policyNumberHint')).toBe(false);
+    expect(fixture.nativeElement.textContent).not.toContain('Policy number');
+    expect(fixture.nativeElement.querySelector('#policy')).toBeNull();
   });
 
   it('rejects submission without evidence', () => {
-    component.form.controls.policyNumberHint.setValue('POL-12345');
     component.submit();
     fixture.detectChanges();
     expect(api.submitClaim).not.toHaveBeenCalled();
@@ -70,6 +65,41 @@ describe('SubmitClaim', () => {
     expect(fixture.nativeElement.textContent).toContain('vehicle.jpg');
     expect(fixture.nativeElement.textContent).not.toContain('Damage photos');
     expect(fixture.nativeElement.textContent).not.toContain('Required · PDF');
+  });
+
+  it('appends selections and removes only the chosen file', () => {
+    const a = new File(['a'], 'a.jpg', { type: 'image/jpeg', lastModified: 1 });
+    const b = new File(['b'], 'b.pdf', { type: 'application/pdf', lastModified: 2 });
+    const c = new File(['c'], 'c.png', { type: 'image/png', lastModified: 3 });
+
+    component.chooseEvidence({ target: { files: [a, b], value: 'selected' } } as unknown as Event);
+    component.removeEvidence(b);
+    component.chooseEvidence({ target: { files: [c], value: 'selected' } } as unknown as Event);
+
+    expect(component.evidenceFiles().map((file) => file.name)).toEqual(['a.jpg', 'c.png']);
+  });
+
+  it('preserves existing files and ignores deterministic duplicates', () => {
+    const a = new File(['a'], 'a.jpg', { type: 'image/jpeg', lastModified: 1 });
+    const b = new File(['b'], 'b.pdf', { type: 'application/pdf', lastModified: 2 });
+
+    component.chooseEvidence({ target: { files: [a], value: 'selected' } } as unknown as Event);
+    component.chooseEvidence({ target: { files: [a, b], value: 'selected' } } as unknown as Event);
+
+    expect(component.evidenceFiles().map((file) => file.name)).toEqual(['a.jpg', 'b.pdf']);
+  });
+
+  it('submits exactly the currently selected files', () => {
+    api.submitClaim.mockReturnValue(new Subject<unknown>());
+    const kept = new File(['a'], 'kept.jpg', { type: 'image/jpeg', lastModified: 1 });
+    const removed = new File(['b'], 'removed.pdf', { type: 'application/pdf', lastModified: 2 });
+    component.evidenceFiles.set([kept, removed]);
+    component.removeEvidence(removed);
+
+    component.submit();
+
+    expect(api.submitClaim.mock.calls[0][0].evidenceFiles).toEqual([kept]);
+    expect(api.submitClaim.mock.calls[0][0].policyNumberHint).toBeUndefined();
   });
 
   it('disables submission and shows indeterminate handoff while the request is in progress', () => {

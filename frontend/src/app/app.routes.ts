@@ -4,6 +4,11 @@ export const routes: Routes = [
   {
     path: '',
     loadComponent: () =>
+      import('./pages/landing/landing').then((m) => m.LandingPage),
+  },
+  {
+    path: 'claims/new',
+    loadComponent: () =>
       import('./pages/submit-claim/submit-claim').then((m) => m.SubmitClaim),
   },
   {

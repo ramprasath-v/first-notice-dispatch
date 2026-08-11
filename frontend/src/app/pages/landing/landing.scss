@@ -1,0 +1,12 @@
+.landing-page { max-width: 680px; text-align: center; }
+.landing-copy { max-width: 580px; margin: 0 auto 1.8rem; }
+.landing-copy h1 { margin: .3rem 0 .7rem; font-size: clamp(2.2rem, 6vw, 3.7rem); letter-spacing: -.045em; }
+.landing-copy > p:last-child { color: #607873; font-size: 1.06rem; }
+.landing-actions { max-width: 520px; margin: 0 auto; padding: clamp(1.4rem, 5vw, 2rem); text-align: left; }
+.action-link { display: block; text-decoration: none; text-align: center; border-radius: 10px; padding: .85rem 1.15rem; font-weight: 700; }
+.divider { display: flex; align-items: center; gap: .75rem; margin: 1.2rem 0; color: #81908c; font-size: .78rem; text-transform: uppercase; }
+.divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: #dce6e3; }
+form { display: grid; gap: .55rem; }
+label { font-weight: 700; }
+.continue-row { display: grid; grid-template-columns: 1fr auto; gap: .55rem; }
+@media (max-width: 520px) { .continue-row { grid-template-columns: 1fr; } }

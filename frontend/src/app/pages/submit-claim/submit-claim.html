@@ -1,10 +1,8 @@
 <main class="page submit-page">
   <section class="intro">
-    <p class="kicker">Start a claim</p>
-    <h1>Tell us what happened.</h1>
-    <p>
-      Share the available evidence now. We’ll analyze it in the background and keep you updated.
-    </p>
+    <p class="kicker">Claim intake</p>
+    <h1>Start your claim</h1>
+    <p>Upload your claim evidence. FirstNotice will sort it automatically.</p>
   </section>
 
   <form
@@ -25,36 +23,6 @@
       </section>
     }
     <fieldset [disabled]="submitting()">
-      <!-- <div class="field">
-        <label for="incident">Incident description <span>Required</span></label>
-        <textarea
-          id="incident"
-          rows="5"
-          formControlName="incidentDescription"
-          placeholder="Where and when did the incident happen? What was damaged?"
-        ></textarea>
-        @if (
-          form.controls.incidentDescription.touched && form.controls.incidentDescription.invalid
-        ) {
-          <p class="error">Please describe the incident.</p>
-        }
-      </div> -->
-
-      <div class="field">
-        <label for="policy">Policy number <span>Required</span></label>
-        <input
-          id="policy"
-          formControlName="policyNumberHint"
-          placeholder="For example, POL-12345"
-        />
-        @if (
-          form.controls.policyNumberHint.touched &&
-          form.controls.policyNumberHint.hasError('required')
-        ) {
-          <p class="error">Policy number is required.</p>
-        }
-      </div>
-
       <div class="evidence-section">
         <div class="evidence-heading">
           <h2>Upload claim evidence</h2>
@@ -79,7 +47,13 @@
         @if (evidenceFiles().length) {
           <ul class="selected-files" aria-label="Selected evidence files">
             @for (file of evidenceFiles(); track file.name + file.size) {
-              <li><span aria-hidden="true">✓</span>{{ file.name }}</li>
+              <li>
+                <span aria-hidden="true">✓</span>
+                <span class="selected-file-name">{{ file.name }}</span>
+                <button type="button" class="remove-file" (click)="removeEvidence(file)">
+                  Remove
+                </button>
+              </li>
             }
           </ul>
         }

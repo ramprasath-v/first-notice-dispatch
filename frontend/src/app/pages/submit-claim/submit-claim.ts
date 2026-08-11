@@ -1,6 +1,6 @@
 import { HttpEventType } from '@angular/common/http';
 import { Component, inject, signal } from '@angular/core';
-import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { FormBuilder, ReactiveFormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { ClaimApiService } from '../../core/services/claim-api.service';
 
@@ -19,8 +19,7 @@ export class SubmitClaim {
   private readonly idempotencyKey = crypto.randomUUID();
 
   readonly form = this.fb.nonNullable.group({
-    incidentDescription: ['', [Validators.maxLength(4000)]],
-    policyNumberHint: ['', [Validators.required, Validators.maxLength(128)]],
+    incidentDescription: [''],
   });
   readonly evidenceFiles = signal<File[]>([]);
   readonly errors = signal<Record<string, string>>({});
@@ -28,15 +27,32 @@ export class SubmitClaim {
   readonly requestError = signal('');
 
   chooseEvidence(event: Event): void {
-    const files = Array.from((event.target as HTMLInputElement).files ?? []);
-    this.evidenceFiles.set(files);
-    this.setFileError(
-      'evidence',
-      files.length && files.every((file) => EVIDENCE_TYPES.has(file.type))
-        ? ''
-        : files.length
-          ? 'Use PDF, JPG, JPEG, or PNG files only.'
-          : 'Add at least one evidence file.',
+    const input = event.target as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    const unsupported = files.some((file) => !EVIDENCE_TYPES.has(file.type));
+    if (unsupported) {
+      this.setFileError('evidence', 'Use PDF, JPG, JPEG, or PNG files only.');
+    } else if (files.length) {
+      this.evidenceFiles.update((selected) => {
+        const seen = new Set(selected.map((file) => this.fileKey(file)));
+        return [
+          ...selected,
+          ...files.filter((file) => {
+            const key = this.fileKey(file);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          }),
+        ];
+      });
+      this.setFileError('evidence', '');
+    }
+    input.value = '';
+  }
+
+  removeEvidence(fileToRemove: File): void {
+    this.evidenceFiles.update((files) =>
+      files.filter((file) => this.fileKey(file) !== this.fileKey(fileToRemove)),
     );
   }
 
@@ -52,7 +68,6 @@ export class SubmitClaim {
       .submitClaim(
         {
           incidentDescription: value.incidentDescription,
-          policyNumberHint: value.policyNumberHint,
           evidenceFiles: this.evidenceFiles(),
         },
         this.idempotencyKey,
@@ -80,5 +95,9 @@ export class SubmitClaim {
 
   private setFileError(key: string, message: string): void {
     this.errors.update((errors) => ({ ...errors, [key]: message }));
+  }
+
+  private fileKey(file: File): string {
+    return `${file.name}:${file.size}:${file.lastModified}:${file.type}`;
   }
 }

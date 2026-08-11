@@ -16,7 +16,10 @@
 .file-name { margin-top: .35rem; color: #155e52; font-size: .82rem; font-weight: 700; word-break: break-word; }
 .selected-files { display: grid; gap: .35rem; margin: .7rem 0 0; padding: 0; list-style: none; }
 .selected-files li { display: flex; align-items: center; gap: .45rem; min-width: 0; padding: .45rem .65rem; border-radius: 8px; background: #f1f7f5; color: #405b55; font-size: .84rem; overflow-wrap: anywhere; }
-.selected-files span { color: #16826f; font-weight: 800; }
+.selected-files > li > span:first-child { color: #16826f; font-weight: 800; }
+.selected-file-name { flex: 1; min-width: 0; }
+.remove-file { padding: .25rem .4rem; color: #7d3d35; background: transparent; font-size: .78rem; }
+.remove-file:hover { text-decoration: underline; }
 .form-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1.8rem; }
 .form-footer p { color: #6d7e7a; font-size: .8rem; max-width: 390px; }
 .submission-progress { display: grid; grid-template-columns: auto 1fr; gap: .2rem .8rem; margin: 0 0 1.4rem; padding: 1rem 1.1rem; border: 1px solid #b8ddd5; border-radius: 12px; background: #edf8f5; }
