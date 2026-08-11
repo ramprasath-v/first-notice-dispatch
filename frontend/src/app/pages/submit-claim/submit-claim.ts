@@ -20,8 +20,8 @@ export class SubmitClaim {
   private readonly idempotencyKey = crypto.randomUUID();
 
   readonly form = this.fb.nonNullable.group({
-    incidentDescription: ['', [Validators.required, Validators.maxLength(4000)]],
-    policyNumberHint: ['', Validators.maxLength(128)],
+    incidentDescription: ['', [Validators.maxLength(4000)]],
+    policyNumberHint: ['', [Validators.required, Validators.maxLength(128)]],
   });
   readonly damagePhotos = signal<File[]>([]);
   readonly policeReport = signal<File | null>(null);
@@ -33,31 +33,36 @@ export class SubmitClaim {
   choosePhotos(event: Event): void {
     const files = Array.from((event.target as HTMLInputElement).files ?? []);
     this.damagePhotos.set(files);
-    this.setFileError('photos', files.length && files.every((f) => PHOTO_TYPES.has(f.type))
-      ? '' : 'Choose at least one JPEG or PNG damage photo.');
+    this.setFileError(
+      'photos',
+      files.length && files.every((f) => PHOTO_TYPES.has(f.type))
+        ? ''
+        : 'Choose at least one JPEG or PNG damage photo.',
+    );
   }
 
   choosePoliceReport(event: Event): void {
-  const file = (event.target as HTMLInputElement).files?.[0] ?? null;
-  this.policeReport.set(file);
+    const file = (event.target as HTMLInputElement).files?.[0] ?? null;
+    this.policeReport.set(file);
 
-  if (!file) {
-    this.setFileError('police', '');
-    return;
+    if (!file) {
+      this.setFileError('police', '');
+      return;
+    }
+
+    this.setFileError(
+      'police',
+      file.type === 'application/pdf' ? '' : 'Choose a PDF police report.',
+    );
   }
-
-  this.setFileError(
-    'police',
-    file.type === 'application/pdf'
-      ? ''
-      : 'Choose a PDF police report.'
-  );
-}
 
   chooseAudio(event: Event): void {
     const file = (event.target as HTMLInputElement).files?.[0] ?? null;
     this.audio.set(file);
-    this.setFileError('audio', !file || AUDIO_TYPES.has(file.type) ? '' : 'Choose an MP3, WAV, or MP4 audio file.');
+    this.setFileError(
+      'audio',
+      !file || AUDIO_TYPES.has(file.type) ? '' : 'Choose an MP3, WAV, or MP4 audio file.',
+    );
   }
 
   submit(): void {
@@ -68,23 +73,30 @@ export class SubmitClaim {
     this.submitting.set(true);
     this.requestError.set('');
     const value = this.form.getRawValue();
-    this.api.submitClaim({
-      incidentDescription: value.incidentDescription,
-      policyNumberHint: value.policyNumberHint || undefined,
-      damagePhotos: this.damagePhotos(),
-      policeReport: this.policeReport() ?? undefined,
-      audio: this.audio() ?? undefined,
-    }, this.idempotencyKey).subscribe({
-      next: (event) => {
-        if (event.type === HttpEventType.Response && event.body) {
-          void this.router.navigate(['/claims', event.body.claim_id]);
-        }
-      },
-      error: () => {
-        this.submitting.set(false);
-        this.requestError.set('We could not submit your claim. Your files were not lost—please try again.');
-      },
-    });
+    this.api
+      .submitClaim(
+        {
+          incidentDescription: value.incidentDescription,
+          policyNumberHint: value.policyNumberHint,
+          damagePhotos: this.damagePhotos(),
+          policeReport: this.policeReport() ?? undefined,
+          audio: this.audio() ?? undefined,
+        },
+        this.idempotencyKey,
+      )
+      .subscribe({
+        next: (event) => {
+          if (event.type === HttpEventType.Response && event.body) {
+            void this.router.navigate(['/claims', event.body.claim_id]);
+          }
+        },
+        error: () => {
+          this.submitting.set(false);
+          this.requestError.set(
+            'We could not submit your claim. Your files were not lost—please try again.',
+          );
+        },
+      });
   }
 
   private chooseRequiredFileErrors(): void {

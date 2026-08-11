@@ -31,7 +31,7 @@ def create_claims_router(
         idempotency_key: str = Header(
             ..., alias="X-Idempotency-Key", min_length=8, max_length=128
         ),
-        incident_description: str = Form(..., min_length=1, max_length=4000),
+        incident_description: str = Form("", max_length=4000),
         policy_number_hint: str | None = Form(default=None, max_length=128),
         files: list[UploadFile] = File(...),
     ) -> ClaimAcceptedResponse:

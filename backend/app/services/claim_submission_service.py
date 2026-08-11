@@ -84,11 +84,15 @@ class ClaimSubmissionService:
         idempotency_key: str,
     ) -> ClaimAcceptedResponse:
         description = incident_description.strip()
-        if not description:
-            raise ClaimStorageValidationError(
-                "incident_description must not be empty."
-            )
         prepared = self._prepare_evidence(evidence)
+        has_police_report = any(
+            item.upload.content_type == "application/pdf"
+            for item in prepared
+        )
+        if not description and not has_police_report:
+            raise ClaimStorageValidationError(
+                "Provide either an incident description or a police report."
+            )
         if not any(item.upload.content_type.startswith("image/") for item in prepared):
             raise ClaimStorageValidationError(
                 "At least one JPEG or PNG damage photo is required."
