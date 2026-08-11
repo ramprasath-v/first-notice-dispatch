@@ -24,44 +24,58 @@ describe('SubmitClaim', () => {
     component = fixture.componentInstance;
   });
 
-  function setRequiredFiles(): void {
-    component.damagePhotos.set([
-      new File(['x'], 'damage.jpg', { type: 'image/jpeg' }),
+  function setValidSubmission(): void {
+    component.form.controls.policyNumberHint.setValue('POL-12345');
+    component.evidenceFiles.set([
+      new File(['report'], 'police-report.png', { type: 'image/png' }),
+      new File(['photo'], 'vehicle.jpg', { type: 'image/jpeg' }),
     ]);
-    component.policeReport.set(
-      new File(['report'], 'police-report.pdf', { type: 'application/pdf' }),
-    );
   }
 
-  it('rejects submission without a damage photo', () => {
-    component.form.controls.incidentDescription.setValue('Rear-ended');
+  it('requires a policy number', () => {
+    component.evidenceFiles.set([
+      new File(['report'], 'report.pdf', { type: 'application/pdf' }),
+    ]);
     component.submit();
     fixture.detectChanges();
     expect(api.submitClaim).not.toHaveBeenCalled();
-    expect(fixture.nativeElement.textContent).toContain('Add at least one damage photo');
+    expect(fixture.nativeElement.textContent).toContain('Policy number is required');
   });
 
-  it('rejects submission without a police report', () => {
-  component.form.controls.incidentDescription.setValue('Rear-ended');
+  it('rejects submission without evidence', () => {
+    component.form.controls.policyNumberHint.setValue('POL-12345');
+    component.submit();
+    fixture.detectChanges();
+    expect(api.submitClaim).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.textContent).toContain('Add at least one evidence file');
+  });
 
-  component.damagePhotos.set([
-    new File(['x'], 'damage.jpg', { type: 'image/jpeg' })
-  ]);
+  it('rejects unsupported evidence types', () => {
+    component.chooseEvidence({
+      target: { files: [new File(['x'], 'notes.txt', { type: 'text/plain' })] },
+    } as unknown as Event);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Use PDF, JPG, JPEG, or PNG files only');
+  });
 
-  component.submit();
-  fixture.detectChanges();
+  it('uses one multi-file control and lists selected filenames', () => {
+    setValidSubmission();
+    fixture.detectChanges();
 
-  expect(api.submitClaim).not.toHaveBeenCalled();
-
-  expect(fixture.nativeElement.textContent)
-    .toContain('Police report is required.');
-});
+    const inputs = fixture.nativeElement.querySelectorAll('input[type=file]');
+    expect(inputs).toHaveLength(1);
+    expect((inputs[0] as HTMLInputElement).multiple).toBe(true);
+    expect((inputs[0] as HTMLInputElement).accept).toContain('.pdf');
+    expect(fixture.nativeElement.textContent).toContain('police-report.png');
+    expect(fixture.nativeElement.textContent).toContain('vehicle.jpg');
+    expect(fixture.nativeElement.textContent).not.toContain('Damage photos');
+    expect(fixture.nativeElement.textContent).not.toContain('Required · PDF');
+  });
 
   it('disables submission and shows indeterminate handoff while the request is in progress', () => {
     const response = new Subject<unknown>();
     api.submitClaim.mockReturnValue(response);
-    component.form.controls.incidentDescription.setValue('Rear-ended at a stoplight');
-    setRequiredFiles();
+    setValidSubmission();
 
     component.submit();
     fixture.detectChanges();
@@ -77,8 +91,7 @@ describe('SubmitClaim', () => {
 
   it('ignores duplicate submit attempts while the original request is active', () => {
     api.submitClaim.mockReturnValue(new Subject<unknown>());
-    component.form.controls.incidentDescription.setValue('Rear-ended');
-    setRequiredFiles();
+    setValidSubmission();
 
     component.submit();
     component.submit();
@@ -88,8 +101,7 @@ describe('SubmitClaim', () => {
 
   it('restores the form and existing error handling when submission fails', () => {
     api.submitClaim.mockReturnValue(throwError(() => new Error('network')));
-    component.form.controls.incidentDescription.setValue('Rear-ended');
-    setRequiredFiles();
+    setValidSubmission();
 
     component.submit();
     fixture.detectChanges();
@@ -101,19 +113,12 @@ describe('SubmitClaim', () => {
     expect(fixture.nativeElement.textContent).toContain('We could not submit your claim');
   });
 
-  it('keeps the untested voice-note control out of the claimant form', () => {
-    fixture.detectChanges();
-    expect(fixture.nativeElement.textContent).not.toContain('Voice note');
-    expect(fixture.nativeElement.querySelector('input[type=file][accept*="audio"]')).toBeNull();
-  });
-
   it('reuses the same idempotency key when a submission is retried', () => {
     api.submitClaim.mockReturnValueOnce(throwError(() => new Error('network')))
       .mockReturnValueOnce(of(new HttpResponse({ body: {
         claim_id: 'CLM-ABC12345', status: 'new', event_id: 'evt', message: 'received',
       }})));
-    component.form.controls.incidentDescription.setValue('Rear-ended');
-    setRequiredFiles();
+    setValidSubmission();
 
     component.submit();
     component.submit();

@@ -88,6 +88,7 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
                 "incident_date": "2026-08-01",
                 "vehicle_drivable": None,
                 "image_evidence_capabilities": [],
+                "evidence_artifact_classifications": [],
                 "uncertainties": ["Vehicle drivability is not stated."],
             },
         )
@@ -215,6 +216,34 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         self.assertEqual(update["claim_type"], "auto_collision")
         self.assertEqual(event["from_status"], "new")
         self.assertEqual(event["to_status"], "intake_complete")
+        self.batch.commit.assert_called_once_with()
+
+    def test_shell_intake_atomically_updates_semantic_document_types(self) -> None:
+        snapshot = MagicMock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {"status": "new"}
+        self.claim_ref.get.return_value = snapshot
+        documents_collection = MagicMock()
+        document_ref = MagicMock()
+        documents_collection.document.return_value = document_ref
+
+        def collection(name):
+            if name == "documents":
+                return documents_collection
+            return self.events_collection
+
+        self.claim_ref.collection.side_effect = collection
+
+        self.repository.complete_claim_shell_intake(
+            "CLM-A1B2C3D4",
+            self.result,
+            document_type_updates={"DOC-IMAGE-REPORT": "police_report"},
+        )
+
+        documents_collection.document.assert_called_once_with("DOC-IMAGE-REPORT")
+        self.batch.update.assert_any_call(
+            document_ref, {"document_type": "police_report"}
+        )
         self.batch.commit.assert_called_once_with()
 
     def test_append_claim_event_creates_expected_event(self) -> None:

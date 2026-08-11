@@ -25,9 +25,7 @@ export class ClaimApiService {
     if (submission.policyNumberHint) {
       body.append('policy_number_hint', submission.policyNumberHint);
     }
-    for (const photo of submission.damagePhotos) body.append('files', photo);
-    if (submission.policeReport) body.append('files', submission.policeReport);
-    if (submission.audio) body.append('files', submission.audio);
+    for (const file of submission.evidenceFiles) body.append('files', file);
     return this.http.post<ClaimAcceptedResponse>(`${this.baseUrl}/claims`, body, {
       headers: { 'X-Idempotency-Key': idempotencyKey },
       observe: 'events',

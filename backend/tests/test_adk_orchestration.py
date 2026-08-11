@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -13,9 +14,17 @@ from app.agents.firstnotice_adk import (
     route_claim_state,
 )
 from app.models.adk_orchestration import ClaimStateResult, EvidenceInput
-from app.models.intake_result import IntakeResult
+from app.models.claim_document import ClaimDocument
+from app.models.intake_result import (
+    EvidenceArtifactClassification,
+    ImageEvidenceCapabilities,
+    IntakeResult,
+)
 from app.models.review_result import ReviewResult
-from app.tools.adk_workflow_tools import ClaimWorkflowToolAdapter
+from app.tools.adk_workflow_tools import (
+    ClaimWorkflowToolAdapter,
+    build_initial_review_metadata,
+)
 
 
 def intake_result() -> IntakeResult:
@@ -257,6 +266,128 @@ class AdkToolAdapterTests(unittest.TestCase):
         self.repository.save_completed_intake.assert_called_once()
         self.repository.add_document.assert_called_once()
         self.assertEqual(state.status, "intake_complete")
+
+    def test_content_classification_is_authoritative_before_review(self) -> None:
+        documents = [
+            ClaimDocument(
+                document_id="DOC-PNG-REPORT",
+                claim_id="CLM-ADK00001",
+                document_type="damage_evidence",
+                filename="police-report.png",
+                content_type="image/png",
+                received_at=datetime.now(timezone.utc),
+            ),
+            ClaimDocument(
+                document_id="DOC-PDF-REPORT",
+                claim_id="CLM-ADK00001",
+                document_type="police_report",
+                filename="official-report.pdf",
+                content_type="application/pdf",
+                received_at=datetime.now(timezone.utc),
+            ),
+            ClaimDocument(
+                document_id="DOC-JPG-REPORT",
+                claim_id="CLM-ADK00001",
+                document_type="damage_evidence",
+                filename="incident-report.jpg",
+                content_type="image/jpeg",
+                received_at=datetime.now(timezone.utc),
+            ),
+            ClaimDocument(
+                document_id="DOC-DAMAGE",
+                claim_id="CLM-ADK00001",
+                document_type="damage_evidence",
+                filename="vehicle-damage.jpg",
+                content_type="image/jpeg",
+                received_at=datetime.now(timezone.utc),
+            ),
+            ClaimDocument(
+                document_id="DOC-POLICY",
+                claim_id="CLM-ADK00001",
+                document_type="police_report",
+                filename="policy-card.pdf",
+                content_type="application/pdf",
+                received_at=datetime.now(timezone.utc),
+            ),
+        ]
+        result = intake_result().model_copy(update={
+            "evidence_artifact_classifications": [
+                EvidenceArtifactClassification(
+                    source="police-report.png", document_type="police_report"
+                ),
+                EvidenceArtifactClassification(
+                    source="official-report.pdf", document_type="police_report"
+                ),
+                EvidenceArtifactClassification(
+                    source="incident-report.jpg", document_type="police_report"
+                ),
+                EvidenceArtifactClassification(
+                    source="vehicle-damage.jpg", document_type="damage_evidence"
+                ),
+                EvidenceArtifactClassification(
+                    source="policy-card.pdf", document_type="policy_document"
+                ),
+            ],
+            "image_evidence_capabilities": [ImageEvidenceCapabilities(
+                source="vehicle-damage.jpg",
+                supported_capabilities=[
+                    "damage_evidence", "vehicle_identity", "license_plate_photo"
+                ],
+            )],
+        })
+        self.repository.get_documents.return_value = documents
+        self.repository.get_claim.return_value = {
+            "claim_id": "CLM-ADK00001",
+            "status": "intake_complete",
+        }
+
+        state = self.adapter.complete_claim_intake("CLM-ADK00001", result)
+
+        self.repository.complete_claim_shell_intake.assert_called_once_with(
+            "CLM-ADK00001",
+            result,
+            document_type_updates={
+                "DOC-PNG-REPORT": "police_report",
+                "DOC-PDF-REPORT": "police_report",
+                "DOC-JPG-REPORT": "police_report",
+                "DOC-DAMAGE": "damage_evidence",
+                "DOC-POLICY": "policy_document",
+            },
+        )
+        self.assertEqual(state.status, "intake_complete")
+        authoritative_types = {
+            "DOC-PNG-REPORT": "police_report",
+            "DOC-PDF-REPORT": "police_report",
+            "DOC-JPG-REPORT": "police_report",
+            "DOC-DAMAGE": "damage_evidence",
+            "DOC-POLICY": "policy_document",
+        }
+        review_metadata = build_initial_review_metadata(
+            result,
+            [
+                item.model_copy(
+                    update={"document_type": authoritative_types[item.document_id]}
+                )
+                for item in documents
+            ],
+        )
+        damage_types = {
+            item.evidence_type
+            for item in review_metadata.uploaded_evidence
+            if item.filename == "vehicle-damage.jpg"
+        }
+        self.assertEqual(
+            damage_types,
+            {"damage_evidence", "vehicle_identity", "license_plate_photo"},
+        )
+        self.assertIn(
+            "policy_document",
+            {
+                item.evidence_type
+                for item in review_metadata.uploaded_evidence
+                if item.filename == "policy-card.pdf"
+            },
+        )
 
     def test_review_adapter_calls_existing_review_service(self) -> None:
         initial_claim = {

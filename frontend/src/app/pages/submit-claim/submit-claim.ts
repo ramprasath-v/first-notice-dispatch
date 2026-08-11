@@ -4,8 +4,7 @@ import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
 import { ClaimApiService } from '../../core/services/claim-api.service';
 
-const PHOTO_TYPES = new Set(['image/jpeg', 'image/png']);
-const AUDIO_TYPES = new Set(['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp4']);
+const EVIDENCE_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png']);
 
 @Component({
   selector: 'app-submit-claim',
@@ -23,45 +22,21 @@ export class SubmitClaim {
     incidentDescription: ['', [Validators.maxLength(4000)]],
     policyNumberHint: ['', [Validators.required, Validators.maxLength(128)]],
   });
-  readonly damagePhotos = signal<File[]>([]);
-  readonly policeReport = signal<File | null>(null);
-  readonly audio = signal<File | null>(null);
+  readonly evidenceFiles = signal<File[]>([]);
   readonly errors = signal<Record<string, string>>({});
   readonly submitting = signal(false);
   readonly requestError = signal('');
 
-  choosePhotos(event: Event): void {
+  chooseEvidence(event: Event): void {
     const files = Array.from((event.target as HTMLInputElement).files ?? []);
-    this.damagePhotos.set(files);
+    this.evidenceFiles.set(files);
     this.setFileError(
-      'photos',
-      files.length && files.every((f) => PHOTO_TYPES.has(f.type))
+      'evidence',
+      files.length && files.every((file) => EVIDENCE_TYPES.has(file.type))
         ? ''
-        : 'Choose at least one JPEG or PNG damage photo.',
-    );
-  }
-
-  choosePoliceReport(event: Event): void {
-    const file = (event.target as HTMLInputElement).files?.[0] ?? null;
-    this.policeReport.set(file);
-
-    if (!file) {
-      this.setFileError('police', '');
-      return;
-    }
-
-    this.setFileError(
-      'police',
-      file.type === 'application/pdf' ? '' : 'Choose a PDF police report.',
-    );
-  }
-
-  chooseAudio(event: Event): void {
-    const file = (event.target as HTMLInputElement).files?.[0] ?? null;
-    this.audio.set(file);
-    this.setFileError(
-      'audio',
-      !file || AUDIO_TYPES.has(file.type) ? '' : 'Choose an MP3, WAV, or MP4 audio file.',
+        : files.length
+          ? 'Use PDF, JPG, JPEG, or PNG files only.'
+          : 'Add at least one evidence file.',
     );
   }
 
@@ -78,9 +53,7 @@ export class SubmitClaim {
         {
           incidentDescription: value.incidentDescription,
           policyNumberHint: value.policyNumberHint,
-          damagePhotos: this.damagePhotos(),
-          policeReport: this.policeReport() ?? undefined,
-          audio: this.audio() ?? undefined,
+          evidenceFiles: this.evidenceFiles(),
         },
         this.idempotencyKey,
       )
@@ -100,8 +73,9 @@ export class SubmitClaim {
   }
 
   private chooseRequiredFileErrors(): void {
-    if (!this.damagePhotos().length) this.setFileError('photos', 'Add at least one damage photo.');
-    if (!this.policeReport()) this.setFileError('police', 'Police report is required.');
+    if (!this.evidenceFiles().length) {
+      this.setFileError('evidence', 'Add at least one evidence file.');
+    }
   }
 
   private setFileError(key: string, message: string): void {

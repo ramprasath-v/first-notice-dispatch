@@ -18,21 +18,25 @@ describe('ClaimApiService', () => {
   it('submits multipart evidence with the client idempotency key', () => {
     service.submitClaim({
       incidentDescription: 'Rear-ended',
-      damagePhotos: [new File(['photo'], 'damage.jpg', { type: 'image/jpeg' })],
-      policeReport: new File(['pdf'], 'report.pdf', { type: 'application/pdf' }),
+      evidenceFiles: [
+        new File(['photo'], 'damage.jpg', { type: 'image/jpeg' }),
+        new File(['pdf'], 'report.pdf', { type: 'application/pdf' }),
+        new File(['policy'], 'policy.png', { type: 'image/png' }),
+      ],
     }, 'same-request-key').subscribe();
 
     const request = http.expectOne('http://localhost:8080/claims');
     expect(request.request.method).toBe('POST');
     expect(request.request.headers.get('X-Idempotency-Key')).toBe('same-request-key');
     expect(request.request.body).toBeInstanceOf(FormData);
+    expect((request.request.body as FormData).getAll('files')).toHaveLength(3);
     request.flush({ claim_id: 'CLM-1', status: 'new', event_id: 'evt', message: 'ok' });
   });
 
-  it('does not add a police-report part when none was supplied', () => {
+  it('submits one unified evidence list without semantic buckets', () => {
     service.submitClaim({
       incidentDescription: 'Rear-ended',
-      damagePhotos: [new File(['photo'], 'damage.jpg', { type: 'image/jpeg' })],
+      evidenceFiles: [new File(['report'], 'report.jpg', { type: 'image/jpeg' })],
     }, 'same-request-key').subscribe();
 
     const request = http.expectOne('http://localhost:8080/claims');

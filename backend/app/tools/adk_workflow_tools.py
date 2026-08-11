@@ -95,7 +95,14 @@ class ClaimWorkflowToolAdapter:
     def complete_claim_intake(
         self, claim_id: str, intake_result: IntakeResult
     ) -> ClaimStateResult:
-        self.repository.complete_claim_shell_intake(claim_id, intake_result)
+        document_type_updates = _semantic_document_type_updates(
+            intake_result, self.repository.get_documents(claim_id)
+        )
+        self.repository.complete_claim_shell_intake(
+            claim_id,
+            intake_result,
+            document_type_updates=document_type_updates,
+        )
         return self.get_claim_state(claim_id)
 
     def run_claim_review(self, claim_id: str) -> ClaimStateResult:
@@ -308,3 +315,27 @@ def _capabilities_for_document(
         if source_name == filename:
             return fact
     return None
+
+
+def _semantic_document_type_updates(
+    intake_result: IntakeResult,
+    documents: list[ClaimDocument],
+) -> dict[str, str]:
+    """Map unique, validated content classifications to persisted artifacts."""
+    classifications: dict[str, list[str]] = {}
+    for item in intake_result.evidence_artifact_classifications:
+        source = item.source.rstrip("/").rsplit("/", 1)[-1].casefold()
+        classifications.setdefault(source, []).append(item.document_type)
+
+    documents_by_source: dict[str, list[ClaimDocument]] = {}
+    for document in documents:
+        documents_by_source.setdefault(document.filename.casefold(), []).append(
+            document
+        )
+
+    updates: dict[str, str] = {}
+    for source, document_matches in documents_by_source.items():
+        type_matches = classifications.get(source, [])
+        if len(document_matches) == 1 and len(type_matches) == 1:
+            updates[document_matches[0].document_id] = type_matches[0]
+    return updates

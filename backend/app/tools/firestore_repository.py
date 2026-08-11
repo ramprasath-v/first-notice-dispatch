@@ -120,6 +120,10 @@ def intake_result_to_claim_fields(intake_result: IntakeResult) -> dict[str, Any]
             item.model_dump(mode="python")
             for item in intake_result.image_evidence_capabilities
         ],
+        "evidence_artifact_classifications": [
+            item.model_dump(mode="python")
+            for item in intake_result.evidence_artifact_classifications
+        ],
         "uncertainties": list(intake_result.uncertainties),
     }
 
@@ -1423,6 +1427,7 @@ class FirestoreClaimRepository:
         intake_result: IntakeResult,
         *,
         correlation_id: str | None = None,
+        document_type_updates: dict[str, str] | None = None,
     ) -> None:
         """Atomically save intake into an existing new claim shell."""
         claim = self.get_claim(claim_id)
@@ -1454,6 +1459,15 @@ class FirestoreClaimRepository:
         )
         try:
             batch.update(claim_ref, update)
+            for document_id, document_type in sorted(
+                (document_type_updates or {}).items()
+            ):
+                document_ref = claim_ref.collection("documents").document(
+                    document_id
+                )
+                batch.update(
+                    document_ref, {"document_type": document_type}
+                )
             batch.create(event_ref, event)
             batch.commit()
         except Exception as exc:

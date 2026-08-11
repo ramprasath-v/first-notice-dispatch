@@ -77,7 +77,5 @@ export type RequestedAction = EnterTextRequestedAction | UploadDocumentRequested
 export interface ClaimSubmission {
   incidentDescription: string;
   policyNumberHint?: string;
-  damagePhotos: File[];
-  policeReport?: File;
-  audio?: File;
+  evidenceFiles: File[];
 }

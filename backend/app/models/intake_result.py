@@ -9,6 +9,21 @@ EvidenceCapabilityType = Literal[
     "license_plate_photo",
 ]
 
+EvidenceArtifactType = Literal[
+    "damage_evidence",
+    "police_report",
+    "policy_document",
+    "voice_note",
+    "other_evidence",
+]
+
+
+class EvidenceArtifactClassification(BaseModel):
+    source: str = Field(description="The submitted filename being classified.")
+    document_type: EvidenceArtifactType = Field(
+        description="What the artifact is, based on its visible or audible content."
+    )
+
 
 class ImageEvidenceCapabilities(BaseModel):
     source: str = Field(description="The submitted image filename being assessed.")
@@ -84,6 +99,14 @@ class IntakeResult(BaseModel):
         description="Important findings with the filename supporting each finding.",
     )
 
+    evidence_artifact_classifications: list[EvidenceArtifactClassification] = Field(
+        default_factory=list,
+        description=(
+            "Content-derived source type for each submitted artifact, independent "
+            "of MIME type and image evidence capabilities."
+        ),
+    )
+
     image_evidence_capabilities: list[ImageEvidenceCapabilities] = Field(
         default_factory=list,
         description=(
@@ -115,5 +138,9 @@ def intake_result_from_claim(claim: dict[str, object]) -> IntakeResult:
     if claim.get("image_evidence_capabilities") is not None:
         data["image_evidence_capabilities"] = claim[
             "image_evidence_capabilities"
+        ]
+    if claim.get("evidence_artifact_classifications") is not None:
+        data["evidence_artifact_classifications"] = claim[
+            "evidence_artifact_classifications"
         ]
     return IntakeResult.model_validate(data)
