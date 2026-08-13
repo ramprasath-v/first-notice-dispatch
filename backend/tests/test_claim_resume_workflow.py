@@ -1053,6 +1053,64 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.assertFalse(result.evidence_usable)
         self.assertEqual(len(self.claim["requested_actions"]), 2)
         self.review_service.review.assert_not_called()
+        self.assertNotIn("active_resume_document_id", self.claim)
+        self.assertIsNotNone(self.documents[submitted.document_id].resume_processed_at)
+        actions = [
+            call.kwargs["action"]
+            for call in self.repository.append_claim_event.call_args_list
+        ]
+        self.assertIn("missing_requirement_still_unresolved", actions)
+        self.assertNotIn("claim_review_resumed", actions)
+
+    def test_unusable_single_requested_upload_does_not_resume_review(self) -> None:
+        self.claim["requested_actions"] = [{
+            "action_id": "ACT-PLATE",
+            "action_type": "upload_document",
+            "review_id": "AUTONOMOUS-PLATE",
+            "document_type": "license_plate_photo",
+            "instruction": "Please upload a clear license plate photo.",
+            "replaces_document_id": None,
+        }]
+        submitted = document(document_id="DOC-BLURRY").model_copy(
+            update={"requested_action_id": "ACT-PLATE"}
+        )
+        self.documents[submitted.document_id] = submitted
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=False,
+            reason="The submitted image does not contain a visible license plate.",
+        )
+
+        result = self.workflow.resume("CLM-A1B2C3D4", submitted)
+
+        self.assertEqual(result.final_status, "awaiting_documents")
+        self.assertFalse(result.evidence_usable)
+        self.assertEqual(
+            [item["action_id"] for item in self.claim["requested_actions"]],
+            ["ACT-PLATE"],
+        )
+        self.assertEqual(
+            [item["type"] for item in self.claim["missing_documents"]],
+            ["license_plate_photo"],
+        )
+        persisted = self.documents[submitted.document_id]
+        self.assertEqual(persisted.status, "unusable")
+        self.assertEqual(persisted.resume_result_status, "awaiting_documents")
+        self.assertIsNotNone(persisted.resume_processed_at)
+        self.assertNotIn("active_resume_document_id", self.claim)
+        self.assertNotIn("active_resume_idempotency_key", self.claim)
+        self.assertNotIn("active_resume_correlation_id", self.claim)
+        actions = [
+            call.kwargs["action"]
+            for call in self.repository.append_claim_event.call_args_list
+        ]
+        self.assertIn("missing_requirement_still_unresolved", actions)
+        self.assertNotIn("claim_review_resumed", actions)
+        self.review_service.review.assert_not_called()
+
+        replay = self.workflow.resume("CLM-A1B2C3D4", submitted)
+
+        self.assertTrue(replay.idempotent_replay)
+        self.review_service.review.assert_not_called()
 
     def test_current_context_uses_active_replacement_facts_not_superseded_facts(
         self,
@@ -1363,17 +1421,17 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             usable=False,
             reason="The replacement image is too blurry.",
         )
-        self.review_service.review.return_value = review_result(complete=False)
 
         result = self.workflow.resume("CLM-A1B2C3D4", replacement)
 
-        save_kwargs = self.repository.save_review_result.call_args.kwargs
         self.assertEqual(result.final_status, "awaiting_documents")
-        self.assertIsNone(save_kwargs["replacement_document"])
         self.assertEqual(
-            save_kwargs["retry_replacement_action_id"], "ACT-REPLACE"
+            self.claim["requested_actions"][0]["action_id"], "ACT-REPLACE"
         )
         self.assertEqual(self.documents["DOC-OLD"].status, "received")
+        self.assertEqual(self.documents["DOC-NEW"].status, "unusable")
+        self.repository.save_review_result.assert_not_called()
+        self.review_service.review.assert_not_called()
 
     def test_unrelated_ordinary_upload_does_not_join_replacement_action(self) -> None:
         self.claim["missing_documents"] = [{

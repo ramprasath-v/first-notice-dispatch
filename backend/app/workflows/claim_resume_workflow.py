@@ -326,7 +326,9 @@ class ClaimResumeWorkflow:
             ),
             None,
         )
-        if current_action is not None and len(pending_upload_actions) > 1:
+        if current_action is not None and (
+            not extraction.usable or len(pending_upload_actions) > 1
+        ):
             remaining_actions = [
                 action
                 for action in pending_upload_actions
