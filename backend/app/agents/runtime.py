@@ -42,12 +42,18 @@ def build_adk_runtime(
     repository = repository or FirestoreClaimRepository.from_default_credentials(
         settings.google_cloud_project, settings.firestore_database
     )
-    review_service = ClaimReviewService(client, settings.gemini_model)
+    review_service = ClaimReviewService(
+        client,
+        settings.gemini_model,
+        location=settings.google_cloud_location,
+    )
     resume_workflow = ClaimResumeWorkflow(
         repository=repository,
         review_service=review_service,
         document_extractor=GeminiDocumentExtractor(
-            client, settings.gemini_model
+            client,
+            settings.gemini_model,
+            location=settings.google_cloud_location,
         ),
     )
     calendar_settings = GoogleCalendarSettings.from_env()
@@ -70,7 +76,11 @@ def build_adk_runtime(
     dispatch_workflow = ClaimDispatchWorkflow(
         repository=repository,
         scheduling_service=InspectionSchedulingService(),
-        adjuster_service=AdjusterDispatchService(client, settings.gemini_model),
+        adjuster_service=AdjusterDispatchService(
+            client,
+            settings.gemini_model,
+            location=settings.google_cloud_location,
+        ),
         notification_tool=notification_tool,
         calendar_service=calendar_service,
     )
@@ -81,7 +91,11 @@ def build_adk_runtime(
         dispatch_workflow=dispatch_workflow,
     )
     coordinator = build_firstnotice_coordinator(
-        extraction_service=IntakeExtractionService(client, settings.gemini_model),
+        extraction_service=IntakeExtractionService(
+            client,
+            settings.gemini_model,
+            location=settings.google_cloud_location,
+        ),
         workflow_tools=tools,
     )
     return FirstNoticeAdkRuntime(

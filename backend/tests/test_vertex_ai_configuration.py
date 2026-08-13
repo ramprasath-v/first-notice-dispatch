@@ -2,7 +2,11 @@ import unittest
 from unittest.mock import patch
 
 from app.config import ConfigurationError, Settings
-from app.tools.gemini_client import create_gemini_client
+from app.tools.gemini_client import (
+    GEMINI_MAX_ATTEMPTS,
+    GEMINI_TIMEOUT_MS,
+    create_gemini_client,
+)
 
 
 class VertexAiConfigurationTests(unittest.TestCase):
@@ -46,11 +50,14 @@ class VertexAiConfigurationTests(unittest.TestCase):
         client = create_gemini_client(settings)
 
         self.assertIs(client, client_constructor.return_value)
-        client_constructor.assert_called_once_with(
-            vertexai=True,
-            project="firstnotice-ai",
-            location="us-central1",
-        )
+        call = client_constructor.call_args
+        self.assertEqual(call.kwargs["vertexai"], True)
+        self.assertEqual(call.kwargs["project"], "firstnotice-ai")
+        self.assertEqual(call.kwargs["location"], "us-central1")
+        options = call.kwargs["http_options"]
+        self.assertEqual(options.timeout, GEMINI_TIMEOUT_MS)
+        self.assertIsNone(options.retry_options)
+        self.assertEqual(GEMINI_MAX_ATTEMPTS, 1)
 
 
 if __name__ == "__main__":

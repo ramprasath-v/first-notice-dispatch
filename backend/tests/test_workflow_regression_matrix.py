@@ -152,7 +152,9 @@ class ScriptedReviewService:
     def queue(self, *responses: ReviewResult | Exception) -> None:
         self.responses.extend(responses)
 
-    def review(self, intake, metadata, *, evidence_parts):
+    def review(
+        self, intake, metadata, *, evidence_parts, resumed_evidence_snapshots=None
+    ):
         self.intake_contexts.append(intake)
         self.active_sources.append(
             {item.filename for item in metadata.uploaded_evidence}
@@ -266,6 +268,45 @@ class MatrixStateRepository:
     def mark_document_resume_quality_processed(self, claim_id, document_id):
         self.documents[document_id] = self.documents[document_id].model_copy(
             update={"resume_quality_processed_at": NOW}
+        )
+
+    def complete_requested_evidence_item(
+        self, *, claim_id, document, extraction, remaining_actions,
+        idempotency_key,
+    ):
+        actions = remaining_actions if extraction.usable else [
+            action
+            for action in parse_requested_actions(self.claim["requested_actions"])
+            if isinstance(action, UploadDocumentRequestedAction)
+        ]
+        self.claim.update({
+            "status": "awaiting_documents",
+            "requested_actions": [
+                action.model_dump(mode="python") for action in actions
+            ],
+            "missing_documents": [
+                {"type": action.document_type, "reason": action.instruction}
+                for action in actions
+            ],
+        })
+        for key in [
+            "active_resume_document_id",
+            "active_resume_idempotency_key",
+            "active_resume_correlation_id",
+        ]:
+            self.claim.pop(key, None)
+        self.documents[document.document_id] = document.model_copy(update={
+            "status": "validated" if extraction.usable else "unusable",
+            "resume_idempotency_key": idempotency_key,
+            "resume_processed_at": NOW,
+            "resume_result_status": "awaiting_documents",
+        })
+
+    def mark_document_resume_retry_required(
+        self, claim_id, document_id, *, error_type
+    ):
+        self.documents[document_id] = self.documents[document_id].model_copy(
+            update={"resume_result_status": "retry_required"}
         )
 
     def mark_document_validated(self, claim_id, document_id, **values):
@@ -611,7 +652,70 @@ class FrozenWorkflowRegressionMatrixTests(unittest.TestCase):
         self.assertEqual(harness.repository.documents["DOC-CORRECT"].replaces_document_id, "DOC-FRONT")
         self.assertEqual(harness.repository.documents["DOC-FRONT"].superseded_by_document_id, "DOC-CORRECT")
 
+    def test_flow_3_generic_image_upload_is_promoted_after_safe_review(self):
+        generic_action = UploadDocumentRequestedAction(
+            action_id="ACT-GENERIC-PLATE",
+            review_id="AUTONOMOUS-GENERIC-PLATE",
+            document_type="license_plate_photo",
+            instruction="Upload a clear vehicle image with a readable plate.",
+        )
+        harness = WorkflowMatrixHarness([
+            doc(
+                "DOC-REPORT", "police-report.pdf", "police_report",
+                findings=("Rear-end collision with rear damage.",),
+            ),
+            doc(
+                "DOC-BAD", "bad-front.jpg", "damage_evidence",
+                capabilities=("damage_evidence",),
+                findings=("A different silver SUV has front damage.",),
+            ),
+        ])
+        self.assertEqual(
+            harness.submit(identity_missing_review(action=generic_action)),
+            "awaiting_documents",
+        )
+        correct = doc(
+            "DOC-CORRECT", "correct-rear-plate.jpg", "license_plate_photo"
+        ).model_copy(update={"requested_action_id": generic_action.action_id})
+
+        result = harness.deliver(
+            correct,
+            DocumentExtractionResult(
+                usable=True,
+                reason="Rear damage and vehicle identity are readable.",
+                supported_capabilities=[
+                    "damage_evidence", "license_plate_photo", "vehicle_identity"
+                ],
+                evidence_findings=[
+                    "The identified grey sedan has rear damage and a readable plate."
+                ],
+            ),
+            auto_reconciliation_review(),
+            complete_review(),
+        )
+
+        self.assertEqual(result.final_status, "inspection_ready")
+        self.assertEqual(
+            harness.repository.documents["DOC-BAD"].status, "superseded"
+        )
+        committed = harness.repository.documents["DOC-CORRECT"]
+        self.assertEqual(committed.replaces_document_id, "DOC-BAD")
+        self.assertEqual(committed.requested_action_id, "ACT-AUTO-RECONCILE")
+        self.assertEqual(harness.repository.supersession_writes, 1)
+        self.assertEqual(harness.repository.action_consumptions, 1)
+
+        replay = harness.resume.resume(CLAIM_ID, correct)
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(harness.repository.supersession_writes, 1)
+        self.assertEqual(harness.repository.action_consumptions, 1)
+
     def test_flow_4_bad_followup_gets_claimant_remediation_then_resolves(self):
+        generic_action = UploadDocumentRequestedAction(
+            action_id="ACT-GENERIC-PLATE",
+            review_id="AUTONOMOUS-GENERIC-PLATE",
+            document_type="license_plate_photo",
+            instruction="Upload a clear vehicle image with a readable plate.",
+        )
         harness = WorkflowMatrixHarness([
             doc(
                 "DOC-REPORT", "police-report.pdf", "police_report",
@@ -626,12 +730,14 @@ class FrozenWorkflowRegressionMatrixTests(unittest.TestCase):
                 findings=("Rear bumper and left tail light damage.",),
             ),
         ])
-        harness.submit(identity_missing_review())
-        bad = doc("DOC-BAD", "IMG_5420.png", "license_plate_photo")
+        harness.submit(identity_missing_review(action=generic_action))
+        bad = doc(
+            "DOC-BAD", "IMG_5420.png", "license_plate_photo"
+        ).model_copy(update={"requested_action_id": generic_action.action_id})
         first = harness.deliver(
             bad,
             DocumentExtractionResult(
-                usable=True,
+                usable=False,
                 reason="Damage is visible, but the requested identity is not readable.",
                 supported_capabilities=["damage_evidence"],
                 evidence_findings=[
@@ -639,11 +745,13 @@ class FrozenWorkflowRegressionMatrixTests(unittest.TestCase):
                     "A material safety concern is visible on that vehicle.",
                 ],
             ),
-            identity_missing_review(),
         )
         self.assertEqual(first.final_status, "awaiting_documents")
 
-        correct = doc("DOC-CORRECT", "IMG_5419.png", "license_plate_photo")
+        self.assertEqual(harness.review.responses, [])
+        correct = doc(
+            "DOC-CORRECT", "IMG_5419.png", "license_plate_photo"
+        ).model_copy(update={"requested_action_id": generic_action.action_id})
         provider = MagicMock()
         conflicted_review = ReviewResult(
             intake_complete=False,

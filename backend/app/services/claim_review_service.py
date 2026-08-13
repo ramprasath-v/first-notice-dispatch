@@ -1,7 +1,7 @@
 import json
 import hashlib
 from dataclasses import asdict
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from google.genai import types
 from pydantic import ValidationError
@@ -35,6 +35,7 @@ from app.models.requested_action import (
     RequestedAction,
     UploadDocumentRequestedAction,
 )
+from app.tools.gemini_client import observed_generate_content
 
 
 class ClaimReviewError(RuntimeError):
@@ -61,9 +62,12 @@ def review_generation_config() -> types.GenerateContentConfig:
 
 
 class ClaimReviewService:
-    def __init__(self, client: Any, model_name: str) -> None:
+    def __init__(
+        self, client: Any, model_name: str, *, location: str = "unknown"
+    ) -> None:
         self._client = client
         self._model_name = model_name
+        self._location = location
 
     def review(
         self,
@@ -71,13 +75,26 @@ class ClaimReviewService:
         metadata: ClaimEvidenceMetadata,
         *,
         evidence_parts: Sequence[types.Part] = (),
+        resumed_evidence_snapshots: Sequence[Mapping[str, object]] | None = None,
     ) -> ReviewResult:
         requirements = evaluate_intake_requirements(intake_result, metadata)
-        prompt = self._build_prompt(intake_result, metadata, requirements)
+        prompt = (
+            self._build_prompt(intake_result, metadata, requirements)
+            if resumed_evidence_snapshots is None
+            else self._build_compact_resumed_prompt(
+                intake_result,
+                metadata,
+                requirements,
+                resumed_evidence_snapshots,
+            )
+        )
 
         try:
-            response = self._client.models.generate_content(
+            response = observed_generate_content(
+                self._client,
+                operation="claim_review",
                 model=self._model_name,
+                location=self._location,
                 contents=[
                     types.Content(
                         role="user",
@@ -170,8 +187,29 @@ Uploaded evidence metadata:
 {metadata.model_dump_json(indent=2)}
 
 Deterministic checklist evaluations:
-{json.dumps(checklist, indent=2)}
-""".strip()
+        {json.dumps(checklist, indent=2)}
+        """.strip()
+
+    @classmethod
+    def _build_compact_resumed_prompt(
+        cls,
+        intake_result: IntakeResult,
+        metadata: ClaimEvidenceMetadata,
+        requirements: list[IntakeRequirement],
+        snapshots: Sequence[Mapping[str, object]],
+    ) -> str:
+        """Build resumed context without duplicating source findings by capability."""
+        compact_intake = intake_result.model_copy(
+            update={"evidence_findings": [], "image_evidence_capabilities": []}
+        )
+        compact_metadata = metadata.model_copy(update={"uploaded_evidence": []})
+        prompt = cls._build_prompt(compact_intake, compact_metadata, requirements)
+        return (
+            f"{prompt}\n\n"
+            "Current active evidence snapshots (authoritative source-scoped "
+            "context for this resumed review):\n"
+            f"{json.dumps(list(snapshots), separators=(',', ':'))}"
+        )
 
     @staticmethod
     def _apply_deterministic_rules(

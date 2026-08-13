@@ -147,6 +147,64 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertEqual(call.kwargs["config"].temperature, 0.1)
         self.assertIs(call.kwargs["config"].response_schema, GeminiReviewResult)
 
+    def test_compact_resumed_prompt_deduplicates_provider_evidence_context(self) -> None:
+        intake = intake_result().model_copy(update={
+            "evidence_findings": [
+                CurrentEvidenceFinding(
+                    source="plate.jpg", finding="Rear damage is visible."
+                )
+            ]
+        })
+        metadata = complete_metadata().model_copy(update={
+            "uploaded_evidence": [
+                UploadedEvidence(
+                    evidence_type=capability,
+                    filename="plate.jpg",
+                    evidence_findings=["Rear damage is visible."],
+                )
+                for capability in (
+                    "license_plate_photo", "vehicle_identity", "damage_evidence"
+                )
+            ]
+        })
+        snapshots = [{
+            "document_id": "DOC-PLATE",
+            "source": "plate.jpg",
+            "document_type": "license_plate_photo",
+            "status": "validated",
+            "usable": True,
+            "supported_capabilities": [
+                "license_plate_photo", "vehicle_identity", "damage_evidence"
+            ],
+            "evidence_facts": {"license_plate": "7ABX123"},
+            "evidence_findings": ["Rear damage is visible."],
+        }]
+        self.client.models.generate_content.return_value.text = (
+            ai_review().model_dump_json()
+        )
+
+        self.service.review(
+            intake,
+            metadata,
+            resumed_evidence_snapshots=snapshots,
+        )
+
+        prompt = self.client.models.generate_content.call_args.kwargs[
+            "contents"
+        ][0].parts[0].text
+        self.assertIn("Current active evidence snapshots", prompt)
+        self.assertEqual(prompt.count("Rear damage is visible."), 1)
+        self.assertEqual(prompt.count("7ABX123"), 1)
+
+    def test_initial_review_prompt_construction_is_unchanged(self) -> None:
+        self.run_review()
+
+        prompt = self.client.models.generate_content.call_args.kwargs[
+            "contents"
+        ][0].parts[0].text
+        self.assertNotIn("Current active evidence snapshots", prompt)
+        self.assertIn("Uploaded evidence metadata:", prompt)
+
     def test_production_review_schema_compiles_with_vertex_sdk(self) -> None:
         config = review_generation_config()
         api_client = MagicMock(vertexai=True)
@@ -1781,6 +1839,87 @@ class ClaimReviewServiceTests(unittest.TestCase):
         )
         self.assertEqual(review.requested_actions, [])
         self.assertTrue(review.requires_human_review)
+
+    def test_partial_atomic_vehicle_facts_create_targeted_composite_replacement(
+        self,
+    ) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type=document_type,
+                filename=filename,
+                document_id=document_id,
+                source_identity=f"document:{document_id}",
+                document_type=document_type,
+                status=status,
+                usable=usable,
+                evidence_findings=findings,
+            )
+            for document_type, filename, document_id, status, usable, findings in (
+                (
+                    "policy_document", "insurance2.pdf", "DOC-POLICY",
+                    "received", None,
+                    [
+                        "vehicle_identity: 2014 Toyota Corolla (Dark Grey)",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "vehicle_year: 2014", "license_plate: 7ABX123",
+                    ],
+                ),
+                (
+                    "police_report", "policeReport2.pdf", "DOC-REPORT",
+                    "received", None,
+                    [
+                        "vehicle_identity: 2014 Toyota Corolla (Dark Grey)",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "vehicle_year: 2014", "license_plate: 7ABX123",
+                    ],
+                ),
+                (
+                    "license_plate_photo", "image3.jpg", "DOC-WRONG",
+                    "unusable", False,
+                    ["vehicle_identity: Honda SUV", "vehicle_make: Honda"],
+                ),
+                (
+                    "license_plate_photo", "imageL2.png", "DOC-CORRECT",
+                    "validated", True,
+                    [
+                        "vehicle_identity: Toyota Corolla",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "license_plate: 7ABX123",
+                    ],
+                ),
+            )
+        ]
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Honda SUV", "2014 Toyota Corolla (Dark Grey)"],
+            sources=["image3.jpg", "insurance2.pdf"],
+            reason="The submitted sources identify different vehicles.",
+        )
+
+        review = self.run_review(
+            metadata=complete_metadata(
+                uploaded_evidence=uploaded,
+                vehicle_identity_clear=True,
+            ),
+            model_review=ai_review(
+                intake_complete=False,
+                conflicts=[conflict],
+                review_outcome="requires_human_judgment",
+                ambiguity_reason="multiple_plausible_interpretations",
+                recommended_next_step="human_review",
+                ambiguity_summary="The submitted images appear inconsistent.",
+            ),
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertEqual(action.replaces_document_id, "DOC-WRONG")
+        self.assertEqual(
+            review.source_aware_conflicts[0].selected_outlier_document_id,
+            "DOC-WRONG",
+        )
 
     def test_source_aligned_three_way_conflict_does_not_guess(self) -> None:
         metadata = complete_metadata(

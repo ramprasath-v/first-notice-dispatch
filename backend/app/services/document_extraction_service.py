@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from app.models.claim_document import ClaimDocument, DocumentExtractionResult
 from app.services.intake_extraction_service import evidence_part
+from app.tools.gemini_client import observed_generate_content
 
 
 SUPPORTED_RESUME_DOCUMENT_TYPES = {
@@ -35,9 +36,12 @@ class DocumentExtractor(Protocol):
 class GeminiDocumentExtractor:
     """Narrow evidence-quality hook; this does not rerun claim intake."""
 
-    def __init__(self, client: Any, model_name: str) -> None:
+    def __init__(
+        self, client: Any, model_name: str, *, location: str = "unknown"
+    ) -> None:
         self._client = client
         self._model_name = model_name
+        self._location = location
 
     def extract(
         self, document: ClaimDocument, candidate_requirement: str
@@ -89,8 +93,13 @@ Rules:
 """.strip()
 
         try:
-            response = self._client.models.generate_content(
+            response = observed_generate_content(
+                self._client,
+                operation="document_extraction",
                 model=self._model_name,
+                location=self._location,
+                claim_id=document.claim_id,
+                document_id=document.document_id,
                 contents=[
                     types.Content(
                         role="user",

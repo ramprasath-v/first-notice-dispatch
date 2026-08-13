@@ -27,6 +27,8 @@ from app.workflows.claim_resume_workflow import (
     ClaimResumeError,
     ClaimResumeWorkflow,
     _build_review_metadata,
+    _build_resumed_evidence_snapshots,
+    _build_review_evidence_parts,
     _current_review_intake_result,
     match_missing_requirement,
 )
@@ -632,6 +634,7 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             document_type="damage_evidence",
             filename="initial-damage.jpg",
             storage_path="/demo/initial-damage.jpg",
+            evidence_findings=["Rear damage is visible."],
             received_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
         )
         self.documents["DOC-REPORT"] = ClaimDocument(
@@ -640,6 +643,7 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             document_type="police_report",
             filename="police-report.pdf",
             storage_path="/demo/police-report.pdf",
+            evidence_findings=["The report describes a rear impact."],
             received_at=datetime(2026, 8, 5, 0, 1, tzinfo=timezone.utc),
         )
         self.extractor.extract.return_value = DocumentExtractionResult(
@@ -652,7 +656,9 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             ],
         )
 
-        def inspect_review(intake, metadata, *, evidence_parts):
+        def inspect_review(
+            intake, metadata, *, evidence_parts, resumed_evidence_snapshots
+        ):
             followup_types = {
                 item.evidence_type
                 for item in metadata.uploaded_evidence
@@ -671,9 +677,11 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
                 labels,
                 [
                     "Evidence source: license-plate.jpg\nAudit document type: license_plate_photo",
-                    "Evidence source: initial-damage.jpg\nAudit document type: damage_evidence",
-                    "Evidence source: police-report.pdf\nAudit document type: police_report",
                 ],
+            )
+            self.assertEqual(
+                {item["source"] for item in resumed_evidence_snapshots},
+                {"license-plate.jpg", "initial-damage.jpg", "police-report.pdf"},
             )
             return review_result(complete=True)
 
@@ -692,6 +700,86 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             {"license_plate_photo", "vehicle_identity", "damage_evidence"},
         )
         self.repository.mark_document_superseded.assert_not_called()
+
+    def test_compact_resume_raw_policy_and_legacy_fallback(self) -> None:
+        previous = ClaimDocument(
+            document_id="DOC-PREVIOUS", claim_id="CLM-A1B2C3D4",
+            document_type="police_report", filename="report.pdf",
+            storage_path="gs://bucket/report.pdf", status="received",
+            evidence_findings=["A grounded report finding."],
+            received_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        )
+        unusable = ClaimDocument(
+            document_id="DOC-UNUSABLE", claim_id="CLM-A1B2C3D4",
+            document_type="license_plate_photo", filename="blurry.jpg",
+            storage_path="gs://bucket/blurry.jpg", status="unusable",
+            quality_reason="The plate is unreadable.",
+            received_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        )
+        current = ClaimDocument(
+            document_id="DOC-CURRENT", claim_id="CLM-A1B2C3D4",
+            document_type="license_plate_photo", filename="plate.jpg",
+            storage_path="gs://bucket/plate.jpg", status="validated",
+            evidence_findings=["The plate is readable."],
+            received_at=datetime.now(timezone.utc),
+        )
+        legacy = ClaimDocument(
+            document_id="DOC-LEGACY", claim_id="CLM-A1B2C3D4",
+            document_type="policy_document", filename="legacy.pdf",
+            storage_path="gs://bucket/legacy.pdf", status="received",
+            received_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        )
+        superseded = previous.model_copy(update={
+            "document_id": "DOC-SUPERSEDED", "filename": "old.pdf",
+            "status": "superseded",
+        })
+
+        parts = _build_review_evidence_parts(
+            [previous, unusable, current, legacy, superseded],
+            current_document_id=current.document_id,
+        )
+
+        labels = [part.text for part in parts if part.text]
+        self.assertEqual(labels, [
+            "Evidence source: plate.jpg\nAudit document type: license_plate_photo",
+            "Evidence source: legacy.pdf\nAudit document type: policy_document",
+        ])
+        self.assertEqual(sum(part.file_data is not None for part in parts), 2)
+        self.assertNotIn("report.pdf", " ".join(labels))
+        self.assertNotIn("blurry.jpg", " ".join(labels))
+        self.assertNotIn("old.pdf", " ".join(labels))
+
+    def test_compact_snapshot_deduplicates_findings_and_preserves_facts(self) -> None:
+        current = ClaimDocument(
+            document_id="DOC-CURRENT", claim_id="CLM-A1B2C3D4",
+            document_type="license_plate_photo", filename="plate.jpg",
+            status="validated",
+            supported_capabilities=[
+                "license_plate_photo", "vehicle_identity", "damage_evidence"
+            ],
+            evidence_facts={"license_plate": "7ABX123"},
+            evidence_findings=[
+                "license_plate: 7ABX123",
+                "Rear damage is visible.",
+                "Rear damage is visible.",
+            ],
+            received_at=datetime.now(timezone.utc),
+        )
+
+        snapshots = _build_resumed_evidence_snapshots([current])
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["source"], "plate.jpg")
+        self.assertEqual(
+            snapshots[0]["evidence_facts"], {"license_plate": "7ABX123"}
+        )
+        self.assertEqual(
+            snapshots[0]["evidence_findings"], ["Rear damage is visible."]
+        )
+        self.assertEqual(
+            snapshots[0]["supported_capabilities"],
+            ["license_plate_photo", "vehicle_identity", "damage_evidence"],
+        )
 
     def test_flow_b_resume_identifies_front_plate_photo_as_damage_outlier(self) -> None:
         self.claim["missing_documents"] = [
@@ -1053,6 +1141,64 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.assertFalse(result.evidence_usable)
         self.assertEqual(len(self.claim["requested_actions"]), 2)
         self.review_service.review.assert_not_called()
+        self.assertNotIn("active_resume_document_id", self.claim)
+        self.assertIsNotNone(self.documents[submitted.document_id].resume_processed_at)
+        actions = [
+            call.kwargs["action"]
+            for call in self.repository.append_claim_event.call_args_list
+        ]
+        self.assertIn("missing_requirement_still_unresolved", actions)
+        self.assertNotIn("claim_review_resumed", actions)
+
+    def test_unusable_single_requested_upload_does_not_resume_review(self) -> None:
+        self.claim["requested_actions"] = [{
+            "action_id": "ACT-PLATE",
+            "action_type": "upload_document",
+            "review_id": "AUTONOMOUS-PLATE",
+            "document_type": "license_plate_photo",
+            "instruction": "Please upload a clear license plate photo.",
+            "replaces_document_id": None,
+        }]
+        submitted = document(document_id="DOC-BLURRY").model_copy(
+            update={"requested_action_id": "ACT-PLATE"}
+        )
+        self.documents[submitted.document_id] = submitted
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=False,
+            reason="The submitted image does not contain a visible license plate.",
+        )
+
+        result = self.workflow.resume("CLM-A1B2C3D4", submitted)
+
+        self.assertEqual(result.final_status, "awaiting_documents")
+        self.assertFalse(result.evidence_usable)
+        self.assertEqual(
+            [item["action_id"] for item in self.claim["requested_actions"]],
+            ["ACT-PLATE"],
+        )
+        self.assertEqual(
+            [item["type"] for item in self.claim["missing_documents"]],
+            ["license_plate_photo"],
+        )
+        persisted = self.documents[submitted.document_id]
+        self.assertEqual(persisted.status, "unusable")
+        self.assertEqual(persisted.resume_result_status, "awaiting_documents")
+        self.assertIsNotNone(persisted.resume_processed_at)
+        self.assertNotIn("active_resume_document_id", self.claim)
+        self.assertNotIn("active_resume_idempotency_key", self.claim)
+        self.assertNotIn("active_resume_correlation_id", self.claim)
+        actions = [
+            call.kwargs["action"]
+            for call in self.repository.append_claim_event.call_args_list
+        ]
+        self.assertIn("missing_requirement_still_unresolved", actions)
+        self.assertNotIn("claim_review_resumed", actions)
+        self.review_service.review.assert_not_called()
+
+        replay = self.workflow.resume("CLM-A1B2C3D4", submitted)
+
+        self.assertTrue(replay.idempotent_replay)
+        self.review_service.review.assert_not_called()
 
     def test_current_context_uses_active_replacement_facts_not_superseded_facts(
         self,
@@ -1129,7 +1275,9 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             evidence_findings=["Rear damage is visible.", "The plate is readable."],
         )
 
-        def review_current_evidence(intake, metadata, *, evidence_parts):
+        def review_current_evidence(
+            intake, metadata, *, evidence_parts, resumed_evidence_snapshots
+        ):
             by_filename = {
                 item.filename: item for item in metadata.uploaded_evidence
             }
@@ -1219,7 +1367,9 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             ),
         )
 
-        def review_active_only(intake, metadata, *, evidence_parts):
+        def review_active_only(
+            intake, metadata, *, evidence_parts, resumed_evidence_snapshots
+        ):
             sources = {item.filename for item in metadata.uploaded_evidence}
             self.assertNotIn("vehicle_damage_front.jpg", sources)
             self.assertIn("vehicle_damage_license.jpg", sources)
@@ -1363,17 +1513,16 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             usable=False,
             reason="The replacement image is too blurry.",
         )
-        self.review_service.review.return_value = review_result(complete=False)
-
         result = self.workflow.resume("CLM-A1B2C3D4", replacement)
 
-        save_kwargs = self.repository.save_review_result.call_args.kwargs
         self.assertEqual(result.final_status, "awaiting_documents")
-        self.assertIsNone(save_kwargs["replacement_document"])
         self.assertEqual(
-            save_kwargs["retry_replacement_action_id"], "ACT-REPLACE"
+            self.claim["requested_actions"][0]["action_id"], "ACT-REPLACE"
         )
         self.assertEqual(self.documents["DOC-OLD"].status, "received")
+        self.assertEqual(self.documents["DOC-NEW"].status, "unusable")
+        self.repository.save_review_result.assert_not_called()
+        self.review_service.review.assert_not_called()
 
     def test_unrelated_ordinary_upload_does_not_join_replacement_action(self) -> None:
         self.claim["missing_documents"] = [{

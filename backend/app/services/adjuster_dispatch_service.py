@@ -11,6 +11,7 @@ from app.models.claim_document import ClaimDocument
 from app.models.inspection_appointment import InspectionAppointment
 from app.models.intake_result import IntakeResult
 from app.models.review_result import ReviewResult
+from app.tools.gemini_client import observed_generate_content
 
 
 class AdjusterDispatchError(RuntimeError):
@@ -18,9 +19,12 @@ class AdjusterDispatchError(RuntimeError):
 
 
 class AdjusterDispatchService:
-    def __init__(self, client: Any, model_name: str) -> None:
+    def __init__(
+        self, client: Any, model_name: str, *, location: str = "unknown"
+    ) -> None:
         self._client = client
         self._model_name = model_name
+        self._location = location
 
     def build_packet(
         self,
@@ -80,8 +84,12 @@ Adjuster packet:
 {packet.model_dump_json(indent=2)}
 """.strip()
         try:
-            response = self._client.models.generate_content(
+            response = observed_generate_content(
+                self._client,
+                operation="adjuster_notification_draft",
                 model=self._model_name,
+                location=self._location,
+                claim_id=packet.claim_id,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.1,

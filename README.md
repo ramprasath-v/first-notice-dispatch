@@ -261,6 +261,18 @@ gcloud run deploy firstnotice-web --image="$IMAGE_URL" --region=us-central1 \
 
 Do not make dispatch public. Secret bindings and full resource provisioning are deployment-operator concerns and are intentionally not embedded with secret values in this README.
 
+Configure the existing Pub/Sub push subscription after backend deployment:
+
+```bash
+cd backend
+./configure_pubsub_delivery.sh
+```
+
+This sets a 120-second acknowledgment/push deadline and 10–60-second
+exponential retry backoff. The longer deadline accommodates bounded Gemini
+calls without the previous 10-second redelivery loop; existing event
+idempotency remains authoritative.
+
 ### Dedicated demo Calendar setup
 
 Google Calendar and Gmail use the same dedicated demo account for easy judge verification, but they remain separate integrations:

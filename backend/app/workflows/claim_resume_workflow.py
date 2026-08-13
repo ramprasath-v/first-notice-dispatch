@@ -326,7 +326,9 @@ class ClaimResumeWorkflow:
             ),
             None,
         )
-        if current_action is not None and len(pending_upload_actions) > 1:
+        if current_action is not None and (
+            not extraction.usable or len(pending_upload_actions) > 1
+        ):
             remaining_actions = [
                 action
                 for action in pending_upload_actions
@@ -395,7 +397,13 @@ class ClaimResumeWorkflow:
         review_result = self._review_service.review(
             intake_result,
             metadata,
-            evidence_parts=_build_review_evidence_parts(review_documents),
+            evidence_parts=_build_review_evidence_parts(
+                review_documents,
+                current_document_id=document.document_id,
+            ),
+            resumed_evidence_snapshots=_build_resumed_evidence_snapshots(
+                review_documents
+            ),
         )
         replacement_document = (
             next(
@@ -434,7 +442,13 @@ class ClaimResumeWorkflow:
                         documents=review_documents,
                         conflicts=[],
                     ),
-                    evidence_parts=_build_review_evidence_parts(review_documents),
+                    evidence_parts=_build_review_evidence_parts(
+                        review_documents,
+                        current_document_id=document.document_id,
+                    ),
+                    resumed_evidence_snapshots=_build_resumed_evidence_snapshots(
+                        review_documents
+                    ),
                 )
                 replacement_document = reconciled
         final_status = self._repository.save_review_result(
@@ -620,7 +634,7 @@ def _reconcile_current_document_as_replacement(
     metadata: ClaimEvidenceMetadata,
 ) -> ClaimDocument | None:
     """Bind current evidence only when deterministic review proves its target."""
-    if current_document.requested_action_id or current_document.replaces_document_id:
+    if current_document.replaces_document_id:
         return None
     capabilities = set(current_document.supported_capabilities)
     if "damage_evidence" not in capabilities or not (
@@ -648,6 +662,11 @@ def _reconcile_current_document_as_replacement(
         and action.replaces_document_id == outlier.document_id
     ]
     if len(actions) != 1 or len(review_result.requested_actions) != 1:
+        return None
+    if actions[0].document_type not in {
+        "damage_evidence",
+        "license_plate_photo",
+    }:
         return None
 
     assessments = [
@@ -991,6 +1010,8 @@ def _normalize_fact_value(value: str) -> str:
 
 def _build_review_evidence_parts(
     documents: list[ClaimDocument],
+    *,
+    current_document_id: str,
 ) -> list[types.Part]:
     parts: list[types.Part] = []
     ordered = sorted(
@@ -1003,6 +1024,17 @@ def _build_review_evidence_parts(
         key=lambda document: document.document_id,
     )
     for document in ordered:
+        has_grounded_snapshot = bool(
+            document.evidence_facts or document.evidence_findings
+        )
+        include_raw = (
+            document.document_id == current_document_id
+            and document.status == "validated"
+        ) or (
+            document.status != "unusable" and not has_grounded_snapshot
+        )
+        if not include_raw:
+            continue
         if not document.storage_path:
             continue
         try:
@@ -1024,3 +1056,55 @@ def _build_review_evidence_parts(
             ]
         )
     return parts
+
+
+def _build_resumed_evidence_snapshots(
+    documents: list[ClaimDocument],
+) -> list[dict[str, object]]:
+    """Build one compact, persisted, source-grounded snapshot per active artifact."""
+    snapshots: list[dict[str, object]] = []
+    for document in sorted(documents, key=lambda item: item.document_id):
+        if document.status == "superseded":
+            continue
+        facts = {
+            field: value
+            for field, value in sorted(document.evidence_facts.items())
+            if value is not None and str(value).strip()
+        }
+        canonical_findings = {
+            f"{field}: {value}" for field, value in facts.items()
+        }
+        findings = list(dict.fromkeys(
+            finding
+            for finding in document.evidence_findings
+            if finding not in canonical_findings
+        ))
+        snapshot: dict[str, object] = {
+            "document_id": document.document_id,
+            "source": document.filename,
+            "document_type": document.document_type,
+            "status": document.status,
+            "usable": (
+                True
+                if document.status == "validated"
+                else False if document.status == "unusable" else None
+            ),
+            "supported_capabilities": list(dict.fromkeys(
+                document.supported_capabilities
+            )),
+            "unusable_capabilities": (
+                [document.document_type]
+                if document.status == "unusable"
+                else []
+            ),
+            "evidence_facts": facts,
+            "evidence_findings": findings,
+        }
+        optional = {
+            "quality_reason": document.quality_reason,
+            "replaces_document_id": document.replaces_document_id,
+            "superseded_by_document_id": document.superseded_by_document_id,
+        }
+        snapshot.update({key: value for key, value in optional.items() if value})
+        snapshots.append(snapshot)
+    return snapshots

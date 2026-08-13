@@ -5,6 +5,7 @@ from typing import Any, Sequence
 from google.genai import types
 
 from app.models.intake_result import IntakeResult
+from app.tools.gemini_client import observed_generate_content
 
 
 INTAKE_PROMPT = """
@@ -48,9 +49,12 @@ Rules:
 class IntakeExtractionService:
     """Existing multimodal intake behavior behind a reusable service boundary."""
 
-    def __init__(self, client: Any, model_name: str) -> None:
+    def __init__(
+        self, client: Any, model_name: str, *, location: str = "unknown"
+    ) -> None:
         self._client = client
         self._model_name = model_name
+        self._location = location
 
     def extract(
         self,
@@ -75,8 +79,11 @@ class IntakeExtractionService:
                     text=f"Claimant-provided policy number hint: {policy_number_hint}"
                 )
             )
-        response = self._client.models.generate_content(
+        response = observed_generate_content(
+            self._client,
+            operation="intake_extraction",
             model=self._model_name,
+            location=self._location,
             contents=[
                 types.Content(
                     role="user",
