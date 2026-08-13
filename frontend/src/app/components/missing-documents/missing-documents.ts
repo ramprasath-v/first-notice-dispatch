@@ -18,7 +18,7 @@ export class MissingDocuments {
   @Input() uploading = false;
   @Input() processing = false;
   @Input() displayReason: ClaimantActionDisplay | null = null;
-  @Output() uploadDocument = new EventEmitter<DocumentUploadRequest>();
+  @Output() uploadDocuments = new EventEmitter<DocumentUploadRequest[]>();
   readonly selected = signal<Record<string, { file: File; idempotencyKey: string }>>({});
 
   key(request: ClaimantEvidenceRequest): string {
@@ -33,14 +33,31 @@ export class MissingDocuments {
     }));
   }
 
-  upload(request: ClaimantEvidenceRequest): void {
-    const documentType = request.document_type;
-    const selected = this.selected()[this.key(request)];
-    if (selected) this.uploadDocument.emit({
-      documentType,
-      file: selected.file,
-      requestedActionId: request.requested_action_id,
-      idempotencyKey: request.requested_action_id ? selected.idempotencyKey : undefined,
+  remove(request: ClaimantEvidenceRequest): void {
+    const key = this.key(request);
+    this.selected.update((files) => {
+      const next = { ...files };
+      delete next[key];
+      return next;
     });
+  }
+
+  uploadAll(): void {
+    const uploads = this.requests.flatMap((request) => {
+      const selected = this.selected()[this.key(request)];
+      return selected ? [{
+        documentType: request.document_type,
+        file: selected.file,
+        requestedActionId: request.requested_action_id,
+        idempotencyKey: request.requested_action_id ? selected.idempotencyKey : undefined,
+      }] : [];
+    });
+    if (uploads.length) this.uploadDocuments.emit(uploads);
+  }
+
+  allSelected(): boolean {
+    return this.requests.length > 0 && this.requests.every(
+      (request) => !!this.selected()[this.key(request)],
+    );
   }
 }

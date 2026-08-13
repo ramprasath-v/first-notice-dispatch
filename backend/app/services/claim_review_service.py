@@ -13,7 +13,6 @@ from app.domain.intake_requirements import (
 from app.domain.evidence_reasoning import (
     canonical_active_evidence,
     fingerprint_uncertainties,
-    select_corroborated_image_outlier,
     shape_source_aware_conflicts,
     shape_source_aware_uncertainties,
 )
@@ -144,14 +143,25 @@ Safety and scope rules:
 10. Persist contradictions as EvidenceConflict entries with the exact submitted
    filenames in sources. Do not treat an additional image as replacing an older
    image unless the metadata says it was superseded.
-11. For every unresolved uncertainty that compares two or more evidence
+11. For every EvidenceConflict, return a matching source_aware_conflicts entry.
+   Include one assertion per participating source with the conflict field, exact
+   submitted filename, and concise comparable value stated by that source. Do not
+   select an outlier or infer replacement eligibility; Python validates those.
+12. For every unresolved uncertainty that compares two or more evidence
    artifacts, enumerate every participating submitted filename in sources. Do
    not summarize a comparison of multiple photos with only one source.
-12. During resumed review, evidence-derived IntakeResult summaries may be blank
+13. During resumed review, evidence-derived IntakeResult summaries may be blank
    because their original source was superseded. A blank damage summary or
    parts list is not conflicting evidence. Recompute current findings only from
    claimant-entered facts and the active submitted evidence.
-13. Return only the required ReviewResult structure.
+14. Populate the review instrumentation fields without changing the checklist:
+    - review_outcome describes whether review resolved the evidence, identified
+      claimant-remediable evidence, remained ambiguous, or requires human judgment.
+    - ambiguity_reason and ambiguity_summary must be null when no grounded ambiguity
+      applies. Keep ambiguity_summary short and source-grounded.
+    - recommended_next_step records the review recommendation only; deterministic
+      Python routing remains authoritative.
+15. Return only the required ReviewResult structure.
 
 Current review context:
 {intake_result.model_dump_json(indent=2)}
@@ -321,7 +331,10 @@ Deterministic checklist evaluations:
             )
 
         source_aware = shape_source_aware_conflicts(
-            conflicts, current_findings, metadata.uploaded_evidence
+            conflicts,
+            current_findings,
+            metadata.uploaded_evidence,
+            ai_review.source_aware_conflicts,
         )
         conflict_pairs = sorted(
             zip(conflicts, source_aware), key=lambda pair: pair[1].fingerprint
@@ -358,51 +371,6 @@ Deterministic checklist evaluations:
             if assessment.fingerprint not in approved_fingerprints
         ]
         current_uncertainties.sort(key=lambda item: item.fingerprint or "")
-        corroborated_outlier = select_corroborated_image_outlier(
-            conflicts,
-            current_uncertainties,
-            current_findings,
-            metadata.uploaded_evidence,
-        )
-        if corroborated_outlier is not None:
-            target_id = corroborated_outlier.document_id
-            target_filename = _normalized_source_name(
-                corroborated_outlier.filename
-            )
-            source_aware = [
-                assessment.model_copy(
-                    update={"selected_outlier_document_id": target_id}
-                )
-                if (
-                    any(
-                        assertion.document_id == target_id
-                        for assertion in assessment.assertions
-                    )
-                    or target_filename
-                    in {
-                        _normalized_source_name(source)
-                        for source in conflict.sources
-                    }
-                )
-                else assessment
-                for conflict, assessment in zip(conflicts, source_aware)
-            ]
-            uncertainty_sources = {
-                uncertainty.fingerprint: {
-                    _normalized_source_name(source)
-                    for source in uncertainty.sources
-                }
-                for uncertainty in current_uncertainties
-            }
-            source_aware_uncertainties = [
-                assessment.model_copy(
-                    update={"selected_outlier_document_id": target_id}
-                )
-                if target_filename
-                in uncertainty_sources.get(assessment.fingerprint, set())
-                else assessment
-                for assessment in source_aware_uncertainties
-            ]
         indicators = ai_review.operational_indicators
         incident_text = intake_result.incident_summary.lower()
         explicitly_no_injury = any(
@@ -430,7 +398,9 @@ Deterministic checklist evaluations:
             item.evidence_type in {"vehicle_identity", "license_plate_photo"}
             for item in unusable
         )
-        requested_actions = _autonomous_claimant_actions(
+        requested_actions = _reconcile_evidence_action(
+            missing_documents=missing,
+            unusable_evidence=unusable,
             conflicts=conflicts,
             source_aware_conflicts=source_aware,
             source_aware_uncertainties=source_aware_uncertainties,
@@ -440,7 +410,10 @@ Deterministic checklist evaluations:
         grounded_safety_concern = (
             safety_concern
             and not has_identity_provenance_gap
-            and corroborated_outlier is None
+            and not any(
+                item.selected_outlier_document_id
+                for item in source_aware
+            )
         )
         blocking_uncertainty = (
             high_uncertainty
@@ -504,18 +477,24 @@ Deterministic checklist evaluations:
             requires_human_review=requires_human_review,
             human_review_reason=human_review_reason,
             operational_indicators=indicators,
+            review_outcome=ai_review.review_outcome,
+            ambiguity_reason=ai_review.ambiguity_reason,
+            recommended_next_step=ai_review.recommended_next_step,
+            ambiguity_summary=ai_review.ambiguity_summary,
         )
 
 
-def _autonomous_claimant_actions(
+def _reconcile_evidence_action(
     *,
+    missing_documents: list[MissingEvidence],
+    unusable_evidence: list[UnusableEvidence],
     conflicts: list[EvidenceConflict],
     source_aware_conflicts: list[SourceAwareConflict],
     source_aware_uncertainties: list[SourceAwareUncertainty],
     uploaded_evidence: list[UploadedEvidence],
     has_identity_provenance_gap: bool,
 ) -> list[RequestedAction]:
-    """Return at most one deterministic, allowlisted claimant action."""
+    """Reconcile current evidence into at most one safe claimant action."""
     for field_name, instruction in (
         ("policy_number", "Please confirm your policy number."),
         ("incident_date", "Please confirm the incident date."),
@@ -530,40 +509,48 @@ def _autonomous_claimant_actions(
                 instruction=instruction,
             )]
 
-    selected = {
+    artifacts = canonical_active_evidence(uploaded_evidence)
+    unusable_types = {item.evidence_type for item in unusable_evidence}
+    unusable_targets = {
+        artifact.document_id
+        for artifact in artifacts
+        if artifact.document_id
+        and artifact.replaceable
+        and artifact.status == "unusable"
+        and (
+            artifact.document_type in unusable_types
+            or bool(set(artifact.supported_capabilities) & unusable_types)
+        )
+    }
+    generic_action = (
+        _requestable_evidence_action(missing_documents, unusable_evidence)
+        if unusable_evidence and len(unusable_targets) != 1
+        else (
+            _requestable_evidence_action(missing_documents, [])
+            if not unusable_targets
+            else []
+        )
+    )
+
+    source_selected = {
         item.selected_outlier_document_id
         for item in [*source_aware_conflicts, *source_aware_uncertainties]
         if item.selected_outlier_document_id
     }
-    if not selected and has_identity_provenance_gap:
-        selected = _single_unusable_conflicting_artifact(
-            conflicts, uploaded_evidence
-        )
-    if not selected:
-        report_backed_targets = {
-            assertion.document_id
-            for assessment in [*source_aware_conflicts, *source_aware_uncertainties]
-            if getattr(assessment, "field", getattr(assessment, "category", None))
-            == "damage_location"
-            and any(not item.replaceable for item in assessment.assertions)
-            for assertion in assessment.assertions
-            if assertion.replaceable and assertion.document_id
-            and assertion.value
-            not in {
-                item.value
-                for item in assessment.assertions
-                if not item.replaceable
-            }
-        }
-        if len(report_backed_targets) == 1:
-            selected = report_backed_targets
-    if not selected and has_identity_provenance_gap:
-        selected = _single_referenced_damage_artifact(
-            conflicts, uploaded_evidence
-        )
+    selected = unusable_targets if len(unusable_targets) == 1 else source_selected
     if len(selected) != 1:
-        return []
+        return generic_action
     target = next(iter(selected))
+    target_artifact = next(
+        (
+            artifact
+            for artifact in artifacts
+            if artifact.document_id == target
+        ),
+        None,
+    )
+    if target_artifact is None or not target_artifact.replaceable:
+        return _requestable_evidence_action(missing_documents, unusable_evidence)
     related = next(
         (
             item
@@ -578,18 +565,96 @@ def _autonomous_claimant_actions(
         if related is not None
         else _action_fingerprint("damage_evidence", [target])
     )
+    document_type = target_artifact.document_type or target_artifact.supported_capabilities[0]
+    if generic_action and not _replacement_document_types_compatible(
+        generic_action[0].document_type, document_type
+    ):
+        return generic_action
     instruction = (
         "Please upload a clear photo of the vehicle involved in this incident "
         "showing the reported damage and a readable license plate."
         if has_identity_provenance_gap
-        else "Please upload the correct damage photo for this claim."
+        else f"Please upload the correct {document_type.replace('_', ' ')} for this claim."
     )
     return [UploadDocumentRequestedAction(
         action_id=f"ACT-{fingerprint}",
         review_id=f"AUTONOMOUS-{fingerprint}",
-        document_type="damage_evidence",
+        document_type=document_type,
         instruction=instruction,
         replaces_document_id=target,
+    )]
+
+
+def _replacement_document_types_compatible(
+    requested_type: str, target_type: str
+) -> bool:
+    """Allow one physical vehicle image to satisfy compatible image requests."""
+    if requested_type == target_type:
+        return True
+    image_types = {"damage_evidence", "license_plate_photo"}
+    return requested_type in image_types and target_type in image_types
+
+
+def _requestable_evidence_action(
+    missing_documents: list[MissingEvidence],
+    unusable_evidence: list[UnusableEvidence],
+) -> list[RequestedAction]:
+    """Return one deterministic allowlisted request for a resolvable evidence gap."""
+    requests = {
+        "policy_number": (
+            "policy_document",
+            "Please upload the policy document for this claim.",
+        ),
+        "policy_document": (
+            "policy_document",
+            "Please upload the policy document for this claim.",
+        ),
+        "police_report": (
+            "police_report",
+            "Please upload the police report for this incident.",
+        ),
+        "vehicle_identity": (
+            "license_plate_photo",
+            "Please upload a clear vehicle photo with a readable license plate.",
+        ),
+        "license_plate_photo": (
+            "license_plate_photo",
+            "Please upload a clear vehicle photo with a readable license plate.",
+        ),
+        "damage_evidence": (
+            "damage_evidence",
+            "Please upload a clear photo showing the vehicle damage.",
+        ),
+        "additional_damage_photo": (
+            "damage_evidence",
+            "Please upload a clear photo showing the vehicle damage.",
+        ),
+        "towing_receipt": (
+            "towing_receipt",
+            "Please upload the towing receipt for this incident.",
+        ),
+    }
+    evidence_types = [
+        *(item.type for item in missing_documents),
+        *(item.evidence_type for item in unusable_evidence),
+    ]
+    candidate = next(
+        (
+            (evidence_type, requests[evidence_type])
+            for evidence_type in evidence_types
+            if evidence_type in requests
+        ),
+        None,
+    )
+    if candidate is None:
+        return []
+    evidence_type, (document_type, instruction) = candidate
+    fingerprint = _action_fingerprint(document_type, [evidence_type])
+    return [UploadDocumentRequestedAction(
+        action_id=f"ACT-{fingerprint}",
+        review_id=f"AUTONOMOUS-{fingerprint}",
+        document_type=document_type,
+        instruction=instruction,
     )]
 
 

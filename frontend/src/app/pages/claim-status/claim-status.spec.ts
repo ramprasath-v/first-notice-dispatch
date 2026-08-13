@@ -38,6 +38,7 @@ describe('ClaimStatusPage', () => {
     getClaim: vi.fn(),
     getClaimEvents: vi.fn(),
     uploadDocument: vi.fn(),
+    uploadDocuments: vi.fn(),
     submitCorrection: vi.fn(),
   };
 
@@ -47,6 +48,7 @@ describe('ClaimStatusPage', () => {
     api.getClaim.mockReturnValue(of(awaitingClaim));
     api.getClaimEvents.mockReturnValue(of([]));
     api.uploadDocument.mockReturnValue(of({ status: 'received' }));
+    api.uploadDocuments.mockReturnValue(of([{ status: 'received' }, { status: 'received' }]));
     api.submitCorrection.mockReturnValue(
       of({ claim_id: 'CLM-ABC12345', event_id: 'evt', status: 'received' }),
     );
@@ -260,6 +262,37 @@ describe('ClaimStatusPage', () => {
       'stable-upload-key',
     );
     expect(api.getClaim.mock.calls.length).toBe(callsBeforeUpload + 1);
+    expect(fixture.componentInstance.rechecking()).toBe(true);
+  });
+
+  it('submits multiple requested evidence files in one claimant action', async () => {
+    const fixture = await create();
+
+    fixture.componentInstance.uploadDocuments([
+      {
+        documentType: 'policy_document',
+        file: new File(['policy'], 'policy.pdf'),
+        requestedActionId: 'ACT-POLICY',
+        idempotencyKey: 'policy-upload-key',
+      },
+      {
+        documentType: 'police_report',
+        file: new File(['report'], 'report.pdf'),
+        requestedActionId: 'ACT-REPORT',
+        idempotencyKey: 'report-upload-key',
+      },
+    ]);
+
+    expect(api.uploadDocuments).toHaveBeenCalledWith('CLM-ABC12345', [
+      {
+        documentType: 'policy_document', file: expect.any(File),
+        requestedActionId: 'ACT-POLICY', idempotencyKey: 'policy-upload-key',
+      },
+      {
+        documentType: 'police_report', file: expect.any(File),
+        requestedActionId: 'ACT-REPORT', idempotencyKey: 'report-upload-key',
+      },
+    ]);
     expect(fixture.componentInstance.rechecking()).toBe(true);
   });
 
@@ -593,6 +626,17 @@ describe('ClaimStatusPage', () => {
     const callsBeforePoll = api.getClaim.mock.calls.length;
     vi.advanceTimersByTime(3000);
     expect(api.getClaim).toHaveBeenCalledTimes(callsBeforePoll + 1);
+  });
+
+  it('shows that durable manual handling requires no claimant action', async () => {
+    api.getClaim.mockReturnValue(of(claim('human_review_required', {
+      manual_handling: true,
+    })));
+    const fixture = await create();
+
+    expect(fixture.nativeElement.textContent).toContain(
+      'Your claim requires additional review by an adjuster. No action is required from you at this time.',
+    );
   });
 
   it('updates an externally approved human review to inspection_pending', async () => {

@@ -45,6 +45,7 @@ describe('AdjusterReviewPage', () => {
     getHumanReview: vi.fn(),
     approveHumanReview: vi.fn(),
     requestHumanReviewCorrection: vi.fn(),
+    continueManualHandling: vi.fn(),
   };
 
   beforeEach(() => {
@@ -59,6 +60,11 @@ describe('AdjusterReviewPage', () => {
       review_id: 'HRV-1', claim_id: review.claim_id, status: 'correction_requested',
       event_id: 'correction-event', duplicate: false,
       message: 'Correction requested. The claimant workflow will update automatically.',
+    }));
+    api.continueManualHandling.mockReturnValue(of({
+      review_id: 'HRV-1', claim_id: review.claim_id, status: 'manual_handling',
+      event_id: 'manual-event', duplicate: false,
+      message: 'Manual handling recorded. No claimant action was requested.',
     }));
   });
 
@@ -115,7 +121,7 @@ describe('AdjusterReviewPage', () => {
     expect(fixture.nativeElement.querySelectorAll('button')).toHaveLength(0);
   });
 
-  it('requests more info from a natural-language instruction', async () => {
+  it('requests more information with one free-text instruction', async () => {
     const fixture = await create();
     fixture.componentInstance.requestMoreInformation();
     fixture.componentInstance.decisionNote = 'Please upload a clearer rear damage photo.';
@@ -125,6 +131,21 @@ describe('AdjusterReviewPage', () => {
       'secure-token', 'Please upload a clearer rear damage photo.',
     );
     expect(fixture.nativeElement.textContent).toContain('Correction requested');
+  });
+
+  it('keeps a human-review checkpoint manual without claimant remediation', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      checkpoint_status: 'human_review_required',
+    }));
+    const fixture = await create();
+
+    fixture.componentInstance.continueManualReview();
+    fixture.detectChanges();
+
+    expect(api.continueManualHandling).toHaveBeenCalledWith('secure-token');
+    expect(api.approveHumanReview).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.textContent).toContain('Manual handling recorded');
   });
 
   it('loads a repeated review cycle with its own current recommendation', async () => {
@@ -142,7 +163,6 @@ describe('AdjusterReviewPage', () => {
       source_references: [
         {
           filename: 'initial-damage.jpg',
-          document_type: 'damage_evidence',
         },
       ],
     }));
@@ -150,6 +170,23 @@ describe('AdjusterReviewPage', () => {
     expect(fixture.nativeElement.textContent).toContain('Inspection Decision');
     expect(fixture.nativeElement.textContent).toContain('initial-damage.jpg');
     expect(fixture.nativeElement.querySelector('select')).toBeNull();
+  });
+
+  it('does not expose document IDs, evidence types, or replacement controls', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      source_references: [
+        { filename: 'current-policy.pdf' },
+      ],
+    }));
+    const fixture = await create();
+    fixture.componentInstance.requestMoreInformation();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelectorAll('textarea')).toHaveLength(1);
+    expect(fixture.nativeElement.querySelector('select')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('DOC-POLICY');
+    expect(fixture.nativeElement.textContent).not.toContain('Evidence type');
+    expect(fixture.nativeElement.textContent).not.toContain('Replace existing');
   });
 
   it('does not submit an empty more-info instruction', async () => {
@@ -169,6 +206,25 @@ describe('AdjusterReviewPage', () => {
     expect(send.disabled).toBe(true);
     send.click();
     expect(api.requestHumanReviewCorrection).not.toHaveBeenCalled();
+  });
+
+  it('shows a safe validation message while leaving a vague request pending', async () => {
+    api.requestHumanReviewCorrection.mockReturnValue(throwError(() =>
+      new HttpErrorResponse({
+        status: 409,
+        error: { detail: 'Request a specific supported document or correction.' },
+      }),
+    ));
+    const fixture = await create();
+    fixture.componentInstance.requestMoreInformation();
+    fixture.componentInstance.decisionNote = 'I need something else.';
+    fixture.componentInstance.requestMoreInformation();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain(
+      'Request a specific supported document or correction.',
+    );
+    expect(fixture.componentInstance.review()?.status).toBe('pending');
   });
 
   it('renders an expired link safely', async () => {

@@ -10,6 +10,7 @@ from app.events.claim_events import (
     ClaimEvent,
     ClaimHumanReviewApprovedEvent,
     ClaimHumanReviewCorrectionRequestedEvent,
+    ClaimHumanReviewManualHandlingEvent,
     ClaimInspectionReadyEvent,
     ClaimSubmittedEvent,
     inspection_ready_event_id,
@@ -17,6 +18,9 @@ from app.events.claim_events import (
 from app.events.pubsub_publisher import ClaimEventPublisher
 from app.integrations.google_calendar_service import GoogleCalendarError
 from app.integrations.gmail_service import GmailError
+from app.services.document_extraction_service import (
+    UnsupportedResumeDocumentTypeError,
+)
 from app.tools.firestore_repository import (
     FirestoreClaimRepository,
     FirestoreReadError,
@@ -212,6 +216,13 @@ class ClaimEventHandler:
                 event.claim_id, event.payload.review_id, event.correlation_id
             )
 
+        if isinstance(event, ClaimHumanReviewManualHandlingEvent):
+            if self._human_review_resume_workflow is None:
+                raise NonRetryableEventError("Human-review resume is not configured.")
+            return self._human_review_resume_workflow.continue_manual_handling(
+                event.claim_id, event.payload.review_id, event.correlation_id
+            )
+
         if isinstance(event, ClaimCorrectionReceivedEvent):
             if self._human_review_resume_workflow is None:
                 raise NonRetryableEventError("Human-review resume is not configured.")
@@ -227,7 +238,7 @@ class ClaimEventHandler:
     def _ensure_human_review_boundary(
         self, event: ClaimEvent, status: str | None
     ) -> dict[str, str] | None:
-        if status != "inspection_ready" or self._human_review_service is None:
+        if status not in {"inspection_ready", "human_review_required"} or self._human_review_service is None:
             return None
         review = self._human_review_service.ensure_review_requested(
             event.claim_id, correlation_id=event.correlation_id
@@ -274,6 +285,7 @@ def _is_retryable(exc: Exception) -> bool:
         UnsupportedCoordinatorState,
         ClaimResumeError,
         ClaimDispatchWorkflowError,
+        UnsupportedResumeDocumentTypeError,
         ValueError,
     )
     if isinstance(exc, non_retryable):

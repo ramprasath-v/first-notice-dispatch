@@ -48,7 +48,7 @@
     @if (current.status === 'awaiting_documents' && !rechecking()) {
       @if (evidenceRequests(current.requested_evidence, current.requested_actions); as requests) {
         @if (requests.length) {
-          <app-missing-documents [requests]="requests" [displayReason]="current.action_display || null" [uploading]="uploading()" [processing]="rechecking()" (uploadDocument)="uploadDocument($event)" />
+          <app-missing-documents [requests]="requests" [displayReason]="current.action_display || null" [uploading]="uploading()" [processing]="rechecking()" (uploadDocuments)="uploadDocuments($event)" />
         }
       }
       @if (textAction(current.requested_actions); as action) {

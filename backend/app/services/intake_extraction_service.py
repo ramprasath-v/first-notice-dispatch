@@ -39,6 +39,9 @@ Rules:
     an insurance policy/declarations/card document, damage_evidence for vehicle or
     damage photographs, voice_note for claimant audio, and other_evidence only when
     none of those content-grounded types apply.
+14. For every submitted artifact, add one evidence_artifact_facts entry. Populate
+    only normalized facts directly visible or explicitly stated in that artifact.
+    Keep unsupported or unknown fields null, even if another artifact supplies them.
 """
 
 

@@ -72,6 +72,31 @@ describe('ClaimApiService', () => {
     upload.flush({});
   });
 
+  it('submits multiple evidence files with explicit requested-action associations', () => {
+    service.uploadDocuments('CLM-1', [
+      {
+        documentType: 'policy_document',
+        file: new File(['policy'], 'policy.pdf'),
+        requestedActionId: 'ACT-POLICY',
+        idempotencyKey: 'policy-upload-key',
+      },
+      {
+        documentType: 'police_report',
+        file: new File(['report'], 'report.pdf'),
+        requestedActionId: 'ACT-REPORT',
+        idempotencyKey: 'report-upload-key',
+      },
+    ]).subscribe();
+
+    const upload = http.expectOne('http://localhost:8080/claims/CLM-1/documents/batch');
+    const body = upload.request.body as FormData;
+    expect(body.getAll('files')).toHaveLength(2);
+    expect(body.getAll('document_types')).toEqual(['policy_document', 'police_report']);
+    expect(body.getAll('requested_action_ids')).toEqual(['ACT-POLICY', 'ACT-REPORT']);
+    expect(body.getAll('idempotency_keys')).toEqual(['policy-upload-key', 'report-upload-key']);
+    upload.flush([]);
+  });
+
   it('uses token-scoped review endpoints', () => {
     service.getHumanReview('token/value').subscribe();
     const load = http.expectOne('http://localhost:8080/reviews/current');
@@ -90,5 +115,11 @@ describe('ClaimApiService', () => {
     expect(correction.request.body.correction_type).toBeUndefined();
     expect(correction.request.body.target_document_id).toBeUndefined();
     correction.flush({});
+
+    service.continueManualHandling('token/value').subscribe();
+    const manual = http.expectOne('http://localhost:8080/reviews/current/manual-handling');
+    expect(manual.request.method).toBe('POST');
+    expect(manual.request.headers.get('X-Review-Token')).toBe('token/value');
+    manual.flush({});
   });
 });

@@ -51,6 +51,7 @@ export interface ClaimSummary {
   requested_evidence: ClaimantEvidenceRequest[];
   requested_actions?: RequestedAction[];
   action_display?: ClaimantActionDisplay | null;
+  manual_handling?: boolean;
   inspection?: InspectionAppointment | null;
   updated_at: string;
 }

@@ -29,13 +29,18 @@ from app.services.claim_storage_service import (
     ValidatedUpload,
     infer_document_type,
 )
-from app.services.document_extraction_service import SUPPORTED_RESUME_DOCUMENT_TYPES
 from app.tools.firestore_repository import (
     FirestoreClaimRepository,
     generate_claim_id,
     generate_document_id,
     utc_now,
 )
+
+
+SUPPORTED_UNBOUND_RESUME_DOCUMENT_TYPES = {
+    "license_plate_photo",
+    "police_report_page",
+}
 
 
 class ClaimSubmissionError(RuntimeError):
@@ -344,6 +349,7 @@ class ClaimSubmissionService:
             requested_evidence=requested_evidence,
             requested_actions=requested_actions,
             action_display=build_claimant_action_display(claim, requested_actions),
+            manual_handling=bool(claim.get("manual_handling")),
             inspection=(
                 appointment.model_dump(mode="python") if appointment else None
             ),
@@ -458,7 +464,7 @@ def _validate_resume_document_type(document_type: str) -> None:
     if not re.fullmatch(r"[a-z0-9_]{1,64}", document_type):
         raise ClaimStorageValidationError("Invalid document_type.")
     if (
-        document_type not in SUPPORTED_RESUME_DOCUMENT_TYPES
+        document_type not in SUPPORTED_UNBOUND_RESUME_DOCUMENT_TYPES
         and not document_type.startswith("police_report_page_")
     ):
         raise ClaimStorageValidationError(

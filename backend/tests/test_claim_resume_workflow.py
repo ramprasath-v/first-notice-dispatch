@@ -6,6 +6,11 @@ from google.genai import types
 
 from app.domain.claim_status import ClaimStatus, review_target_status
 from app.models.claim_document import ClaimDocument, DocumentExtractionResult
+from app.models.intake_result import EvidenceArtifactFacts
+from app.models.requested_action import (
+    UploadDocumentRequestedAction,
+    parse_requested_actions,
+)
 from app.models.review_result import (
     CurrentEvidenceFinding,
     EvidenceConflict,
@@ -14,11 +19,15 @@ from app.models.review_result import (
 )
 from app.services.claim_review_service import ClaimReviewService
 from app.services.claim_review_service import ClaimReviewError
+from app.services.document_extraction_service import (
+    UnsupportedResumeDocumentTypeError,
+)
 from app.tools.firestore_repository import FirestoreWriteError
 from app.workflows.claim_resume_workflow import (
     ClaimResumeError,
     ClaimResumeWorkflow,
     _build_review_metadata,
+    _current_review_intake_result,
     match_missing_requirement,
 )
 
@@ -112,6 +121,15 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.repository.mark_document_resume_quality_processed.side_effect = (
             self._mark_document_resume_quality_processed
         )
+        self.repository.mark_document_resume_retry_required.side_effect = (
+            self._mark_document_resume_retry_required
+        )
+        self.repository.mark_document_resume_rejected.side_effect = (
+            self._mark_document_resume_rejected
+        )
+        self.repository.complete_requested_evidence_item.side_effect = (
+            self._complete_requested_evidence_item
+        )
         self.repository.update_claim_status.side_effect = self._update_status
         self.repository.save_review_result.side_effect = self._save_review
         self.workflow = ClaimResumeWorkflow(
@@ -183,7 +201,15 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         extraction: DocumentExtractionResult,
     ) -> None:
         self.documents[document_id] = self.documents[document_id].model_copy(
-            update={"resume_extraction_result": extraction}
+            update={
+                "resume_extraction_result": extraction,
+                "evidence_facts": (
+                    extraction.evidence_facts.fact_values()
+                    if extraction.evidence_facts
+                    else {}
+                ),
+                "evidence_findings": extraction.evidence_findings,
+            }
         )
 
     def _mark_document_resume_quality_processed(
@@ -191,6 +217,37 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
     ) -> None:
         self.documents[document_id] = self.documents[document_id].model_copy(
             update={"resume_quality_processed_at": datetime.now(timezone.utc)}
+        )
+
+    def _mark_document_resume_retry_required(
+        self, claim_id: str, document_id: str, *, error_type: str
+    ) -> None:
+        self.documents[document_id] = self.documents[document_id].model_copy(
+            update={
+                "resume_result_status": "retry_required",
+                "resume_error": (
+                    f"{error_type}: document resume failed; retry is required."
+                ),
+                "resume_retry_required_at": datetime.now(timezone.utc),
+            }
+        )
+
+    def _mark_document_resume_rejected(
+        self, claim_id: str, document_id: str, *, error_type: str
+    ) -> None:
+        self.claim["status"] = "awaiting_documents"
+        self.claim.pop("active_resume_document_id", None)
+        self.claim.pop("active_resume_idempotency_key", None)
+        self.claim.pop("active_resume_correlation_id", None)
+        self.documents[document_id] = self.documents[document_id].model_copy(
+            update={
+                "status": "unusable",
+                "resume_processed_at": datetime.now(timezone.utc),
+                "resume_result_status": "rejected",
+                "resume_error": (
+                    f"{error_type}: unsupported document type; retry disabled."
+                ),
+            }
         )
 
     def _save_review(self, claim_id: str, review: ReviewResult, **kwargs) -> ClaimStatus:
@@ -219,6 +276,38 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             self.claim.pop("active_resume_idempotency_key", None)
             self.claim.pop("active_resume_correlation_id", None)
         return status
+
+    def _complete_requested_evidence_item(
+        self,
+        *,
+        claim_id: str,
+        document: ClaimDocument,
+        extraction: DocumentExtractionResult,
+        remaining_actions,
+        idempotency_key: str,
+    ) -> None:
+        actions = remaining_actions if extraction.usable else [
+            action
+            for action in parse_requested_actions(self.claim.get("requested_actions", []))
+            if isinstance(action, UploadDocumentRequestedAction)
+        ]
+        self.claim.update({
+            "status": "awaiting_documents",
+            "requested_actions": [item.model_dump(mode="python") for item in actions],
+            "missing_documents": [
+                {"type": item.document_type, "reason": item.instruction}
+                for item in actions
+            ],
+        })
+        self.claim.pop("active_resume_document_id", None)
+        self.claim.pop("active_resume_idempotency_key", None)
+        self.claim.pop("active_resume_correlation_id", None)
+        self.documents[document.document_id] = document.model_copy(update={
+            "status": "validated" if extraction.usable else "unusable",
+            "resume_idempotency_key": idempotency_key,
+            "resume_processed_at": datetime.now(timezone.utc),
+            "resume_result_status": "awaiting_documents",
+        })
 
     def test_retryable_review_failure_resumes_same_replacement_once(self) -> None:
         self.claim["missing_documents"] = [
@@ -329,10 +418,17 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             usable=True,
             reason="The license plate is readable.",
             satisfies_requirement="license_plate_photo",
+            evidence_facts=EvidenceArtifactFacts(
+                source="untrusted-provider-source",
+                license_plate="ABC123",
+                damage_location="rear",
+                vehicle_make="",
+            ),
         )
         self.review_service.review.return_value = review_result(complete=True)
+        submitted = document()
 
-        result = self.workflow.resume("CLM-A1B2C3D4", document())
+        result = self.workflow.resume("CLM-A1B2C3D4", submitted)
 
         self.assertEqual(result.final_status, "inspection_ready")
         self.assertTrue(result.evidence_usable)
@@ -347,6 +443,62 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.assertIn("claim_review_resumed", actions)
         self.assertIn("missing_requirement_satisfied", actions)
         self.assertIn("claim_moved_to_inspection_ready", actions)
+        persisted = self.documents[submitted.document_id]
+        self.assertEqual(
+            persisted.evidence_facts,
+            {"license_plate": "ABC123", "damage_location": "rear"},
+        )
+        self.assertIn("damage_location: rear", persisted.evidence_findings)
+        self.assertIn("license_plate: ABC123", persisted.evidence_findings)
+        self.assertNotIn("vehicle_make", persisted.evidence_facts)
+
+    def test_extraction_failure_persists_recoverable_retry_state(self) -> None:
+        submitted = document(document_id="DOC-RETRY")
+        self.extractor.extract.side_effect = RuntimeError("provider unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+            self.workflow.resume("CLM-A1B2C3D4", submitted)
+
+        persisted = self.documents[submitted.document_id]
+        self.assertIsNotNone(persisted.resume_started_at)
+        self.assertIsNone(persisted.resume_processed_at)
+        self.assertEqual(persisted.resume_result_status, "retry_required")
+        self.assertIn("RuntimeError", persisted.resume_error or "")
+        self.repository.mark_document_resume_retry_required.assert_called_once_with(
+            "CLM-A1B2C3D4", submitted.document_id, error_type="RuntimeError"
+        )
+
+    def test_unsupported_document_type_is_rejected_without_retry(self) -> None:
+        self.claim["missing_documents"] = [
+            {
+                "type": "unsupported_artifact",
+                "reason": "Unsupported test artifact.",
+                "source_requirement": "unsupported_artifact",
+            }
+        ]
+        submitted = document(
+            document_id="DOC-UNSUPPORTED",
+            document_type="unsupported_artifact",
+        )
+        self.extractor.extract.side_effect = UnsupportedResumeDocumentTypeError(
+            "Unsupported resume document type: unsupported_artifact"
+        )
+
+        with self.assertRaises(UnsupportedResumeDocumentTypeError):
+            self.workflow.resume("CLM-A1B2C3D4", submitted)
+
+        persisted = self.documents[submitted.document_id]
+        self.assertEqual(self.claim["status"], "awaiting_documents")
+        self.assertEqual(persisted.status, "unusable")
+        self.assertIsNotNone(persisted.resume_processed_at)
+        self.assertEqual(persisted.resume_result_status, "rejected")
+        self.assertIsNone(persisted.resume_retry_required_at)
+        self.repository.mark_document_resume_rejected.assert_called_once_with(
+            "CLM-A1B2C3D4",
+            submitted.document_id,
+            error_type="UnsupportedResumeDocumentTypeError",
+        )
+        self.repository.mark_document_resume_retry_required.assert_not_called()
 
     def test_adjuster_more_info_upload_action_matches_without_replacement(self) -> None:
         self.claim["missing_documents"] = []
@@ -714,6 +866,241 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.repository.mark_document_validated.assert_not_called()
         self.repository.mark_document_superseded.assert_not_called()
 
+    def test_policy_replacement_uses_same_atomic_supersession_path(self) -> None:
+        self.claim["requested_actions"] = [
+            {
+                "action_id": "ACT-POLICY-REPLACE",
+                "action_type": "upload_document",
+                "review_id": "AUTONOMOUS-POLICY",
+                "document_type": "policy_document",
+                "instruction": "Upload the correct policy document.",
+                "replaces_document_id": "DOC-OLD-POLICY",
+            }
+        ]
+        self.documents["DOC-OLD-POLICY"] = ClaimDocument(
+            document_id="DOC-OLD-POLICY",
+            claim_id="CLM-A1B2C3D4",
+            document_type="policy_document",
+            filename="old-policy.pdf",
+            status="validated",
+            received_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        )
+        replacement = ClaimDocument(
+            document_id="DOC-NEW-POLICY",
+            claim_id="CLM-A1B2C3D4",
+            document_type="policy_document",
+            filename="correct-policy.pdf",
+            status="received",
+            requested_action_id="ACT-POLICY-REPLACE",
+            replaces_document_id="DOC-OLD-POLICY",
+            received_at=datetime.now(timezone.utc),
+        )
+        self.documents[replacement.document_id] = replacement
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="The replacement policy document is readable.",
+            evidence_facts=EvidenceArtifactFacts(
+                source="correct-policy.pdf", policy_number="POL-123"
+            ),
+        )
+        self.review_service.review.return_value = review_result(complete=True)
+
+        result = self.workflow.resume("CLM-A1B2C3D4", replacement)
+
+        self.assertEqual(result.final_status, "inspection_ready")
+        self.assertEqual(self.documents["DOC-OLD-POLICY"].status, "superseded")
+        self.assertEqual(
+            self.documents["DOC-OLD-POLICY"].superseded_by_document_id,
+            "DOC-NEW-POLICY",
+        )
+        persisted = self.documents["DOC-NEW-POLICY"]
+        self.assertEqual(persisted.replaces_document_id, "DOC-OLD-POLICY")
+        self.assertEqual(persisted.requested_action_id, "ACT-POLICY-REPLACE")
+        self.assertEqual(persisted.status, "validated")
+
+    def test_partial_multi_item_fulfillment_keeps_remaining_action(self) -> None:
+        self.claim["missing_documents"] = [
+            {"type": "policy_document", "reason": "Upload policy."},
+            {"type": "police_report", "reason": "Upload report."},
+        ]
+        self.claim["requested_actions"] = [
+            {
+                "action_id": "ACT-POLICY",
+                "action_type": "upload_document",
+                "review_id": "HRV-MULTI",
+                "document_type": "policy_document",
+                "instruction": "Upload policy.",
+            },
+            {
+                "action_id": "ACT-REPORT",
+                "action_type": "upload_document",
+                "review_id": "HRV-MULTI",
+                "document_type": "police_report",
+                "instruction": "Upload report.",
+            },
+        ]
+        submitted = ClaimDocument(
+            document_id="DOC-POLICY",
+            claim_id="CLM-A1B2C3D4",
+            document_type="policy_document",
+            filename="policy.pdf",
+            requested_action_id="ACT-POLICY",
+            received_at=datetime.now(timezone.utc),
+        )
+        self.documents[submitted.document_id] = submitted
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="Policy is readable.",
+            evidence_facts=EvidenceArtifactFacts(
+                source="policy.pdf", policy_number="POL-123"
+            ),
+        )
+
+        result = self.workflow.resume("CLM-A1B2C3D4", submitted)
+
+        self.assertEqual(result.final_status, "awaiting_documents")
+        self.assertTrue(result.evidence_usable)
+        remaining = self.repository.complete_requested_evidence_item.call_args.kwargs[
+            "remaining_actions"
+        ]
+        self.assertEqual([item.action_id for item in remaining], ["ACT-REPORT"])
+        self.review_service.review.assert_not_called()
+        actions = [
+            call.kwargs["action"]
+            for call in self.repository.append_claim_event.call_args_list
+        ]
+        self.assertNotIn("claim_review_resumed", actions)
+
+    def test_all_multi_item_requirements_resume_review_once(self) -> None:
+        self.claim["missing_documents"] = [
+            {"type": "policy_document", "reason": "Upload policy."},
+            {"type": "police_report", "reason": "Upload report."},
+        ]
+        self.claim["requested_actions"] = [
+            {
+                "action_id": "ACT-POLICY", "action_type": "upload_document",
+                "review_id": "HRV-MULTI", "document_type": "policy_document",
+                "instruction": "Upload policy.",
+            },
+            {
+                "action_id": "ACT-REPORT", "action_type": "upload_document",
+                "review_id": "HRV-MULTI", "document_type": "police_report",
+                "instruction": "Upload report.",
+            },
+        ]
+        policy = ClaimDocument(
+            document_id="DOC-POLICY", claim_id="CLM-A1B2C3D4",
+            document_type="policy_document", filename="policy.pdf",
+            requested_action_id="ACT-POLICY", received_at=datetime.now(timezone.utc),
+        )
+        report = ClaimDocument(
+            document_id="DOC-REPORT", claim_id="CLM-A1B2C3D4",
+            document_type="police_report", filename="report.pdf",
+            requested_action_id="ACT-REPORT", received_at=datetime.now(timezone.utc),
+        )
+        self.documents.update({policy.document_id: policy, report.document_id: report})
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True, reason="Readable evidence."
+        )
+        self.review_service.review.return_value = review_result(complete=True)
+
+        first = self.workflow.resume("CLM-A1B2C3D4", policy)
+        second = self.workflow.resume("CLM-A1B2C3D4", report)
+
+        self.assertEqual(first.final_status, "awaiting_documents")
+        self.assertEqual(second.final_status, "inspection_ready")
+        self.review_service.review.assert_called_once()
+        resumed = [
+            call for call in self.repository.append_claim_event.call_args_list
+            if call.kwargs["action"] == "claim_review_resumed"
+        ]
+        self.assertEqual(len(resumed), 1)
+
+        replay = self.workflow.resume("CLM-A1B2C3D4", report)
+        self.assertTrue(replay.idempotent_replay)
+        self.review_service.review.assert_called_once()
+
+    def test_unusable_multi_item_upload_leaves_all_requests_open(self) -> None:
+        self.claim["missing_documents"] = [
+            {"type": "policy_document", "reason": "Upload policy."},
+            {"type": "police_report", "reason": "Upload report."},
+        ]
+        self.claim["requested_actions"] = [
+            {
+                "action_id": "ACT-POLICY", "action_type": "upload_document",
+                "review_id": "HRV-MULTI", "document_type": "policy_document",
+                "instruction": "Upload policy.",
+            },
+            {
+                "action_id": "ACT-REPORT", "action_type": "upload_document",
+                "review_id": "HRV-MULTI", "document_type": "police_report",
+                "instruction": "Upload report.",
+            },
+        ]
+        submitted = ClaimDocument(
+            document_id="DOC-BLURRY", claim_id="CLM-A1B2C3D4",
+            document_type="policy_document", filename="blurry.pdf",
+            requested_action_id="ACT-POLICY", received_at=datetime.now(timezone.utc),
+        )
+        self.documents[submitted.document_id] = submitted
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=False, reason="The document is unreadable."
+        )
+
+        result = self.workflow.resume("CLM-A1B2C3D4", submitted)
+
+        self.assertEqual(result.final_status, "awaiting_documents")
+        self.assertFalse(result.evidence_usable)
+        self.assertEqual(len(self.claim["requested_actions"]), 2)
+        self.review_service.review.assert_not_called()
+
+    def test_current_context_uses_active_replacement_facts_not_superseded_facts(
+        self,
+    ) -> None:
+        old = ClaimDocument(
+            document_id="DOC-OLD", claim_id="CLM-A1B2C3D4",
+            document_type="policy_document", filename="old.pdf",
+            status="superseded", evidence_facts={"policy_number": "POL-OLD"},
+            received_at=datetime.now(timezone.utc),
+        )
+        replacement = ClaimDocument(
+            document_id="DOC-NEW", claim_id="CLM-A1B2C3D4",
+            document_type="policy_document", filename="new.pdf",
+            status="validated", replaces_document_id="DOC-OLD",
+            evidence_facts={"policy_number": "POL-NEW"},
+            evidence_findings=["policy_number: POL-NEW"],
+            received_at=datetime.now(timezone.utc),
+        )
+
+        intake = _current_review_intake_result(self.claim, [old, replacement])
+
+        self.assertEqual(intake.policy_number, "POL-NEW")
+        self.assertNotIn("POL-OLD", intake.model_dump_json())
+
+    def test_claimant_fact_is_preserved_as_explicit_current_evidence_conflict(self) -> None:
+        self.claim["policy_number_hint"] = "POL-CLAIMANT"
+        replacement = ClaimDocument(
+            document_id="DOC-NEW", claim_id="CLM-A1B2C3D4",
+            document_type="policy_document", filename="new.pdf",
+            status="validated", evidence_facts={"policy_number": "POL-EVIDENCE"},
+            received_at=datetime.now(timezone.utc),
+        )
+
+        intake = _current_review_intake_result(self.claim, [replacement])
+        metadata = _build_review_metadata(
+            claim=self.claim, documents=[replacement], conflicts=[]
+        )
+
+        self.assertEqual(intake.policy_number, "POL-EVIDENCE")
+        conflict = next(
+            item for item in metadata.known_conflicts
+            if item.field == "policy_number"
+        )
+        self.assertEqual(conflict.values, ["POL-CLAIMANT", "POL-EVIDENCE"])
+        self.assertEqual(
+            conflict.sources, ["claimant submission", "current active evidence"]
+        )
+
     def test_flow_4_correct_rear_plate_replacement_reaches_inspection(self) -> None:
         self.claim["missing_documents"] = []
         self.claim["requested_actions"] = [{
@@ -824,6 +1211,12 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             evidence_findings=[
                 "Dark grey sedan with rear damage and readable plate 7ABX123."
             ],
+            evidence_facts=EvidenceArtifactFacts(
+                source="provider-source-is-overridden",
+                vehicle_identity="dark grey sedan",
+                license_plate="7ABX123",
+                damage_location="rear",
+            ),
         )
 
         def review_active_only(intake, metadata, *, evidence_parts):
@@ -857,6 +1250,18 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             self.documents["DOC-CORRECT"].replaces_document_id, "DOC-FRONT"
+        )
+        self.assertEqual(
+            self.documents["DOC-CORRECT"].evidence_facts,
+            {
+                "vehicle_identity": "dark grey sedan",
+                "license_plate": "7ABX123",
+                "damage_location": "rear",
+            },
+        )
+        self.assertIn(
+            "damage_location: rear",
+            self.documents["DOC-CORRECT"].evidence_findings,
         )
         begin = self.repository.begin_document_resume_review.call_args.kwargs
         self.assertEqual(begin["replacement_action_id"], "ACT-AUTONOMOUS-FLOW-3")

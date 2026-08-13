@@ -51,6 +51,17 @@ def create_reviews_router(
         return _call(lambda: get_service().request_correction(token, request))
 
     @router.post(
+        "/reviews/current/manual-handling",
+        response_model=HumanReviewDecisionResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def continue_manual_handling(
+        request: HumanReviewDecisionRequest,
+        token: str = Header(..., alias="X-Review-Token", min_length=16, max_length=256),
+    ) -> HumanReviewDecisionResponse:
+        return _call(lambda: get_service().continue_manual_handling(token, request))
+
+    @router.post(
         "/claims/{claim_id}/corrections",
         response_model=ClaimCorrectionAcceptedResponse,
         status_code=status.HTTP_202_ACCEPTED,

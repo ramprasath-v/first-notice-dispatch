@@ -12,6 +12,7 @@ import {
   finalize,
   map,
   merge,
+  Observable,
   Subject,
   timer,
 } from 'rxjs';
@@ -240,19 +241,38 @@ export class ClaimStatusPage {
   }
 
   uploadDocument(request: DocumentUploadRequest): void {
-    if (this.uploading() || this.rechecking()) return;
+    this.uploadDocuments([request]);
+  }
+
+  uploadDocuments(requests: DocumentUploadRequest[]): void {
+    if (!requests.length || this.uploading() || this.rechecking()) return;
     this.uploading.set(true);
     this.documentNotice.set('');
     this.error.set('');
-    const upload = request.requestedActionId
-      ? this.api.uploadDocument(
+    const allRequestedActions = requests.every(
+      (request) => !!request.requestedActionId && !!request.idempotencyKey,
+    );
+    let upload: Observable<unknown>;
+    if (requests.length > 1 && allRequestedActions) {
+      upload = this.api.uploadDocuments(
           this.claimId,
-          request.documentType,
-          request.file,
-          request.requestedActionId,
-          request.idempotencyKey,
-        )
-      : this.api.uploadDocument(this.claimId, request.documentType, request.file);
+          requests.map((request) => ({
+            documentType: request.documentType,
+            file: request.file,
+            requestedActionId: request.requestedActionId!,
+            idempotencyKey: request.idempotencyKey!,
+          })),
+        );
+    } else if (requests[0].requestedActionId) {
+      upload = this.api.uploadDocument(
+        this.claimId, requests[0].documentType, requests[0].file,
+        requests[0].requestedActionId, requests[0].idempotencyKey,
+      );
+    } else {
+      upload = this.api.uploadDocument(
+        this.claimId, requests[0].documentType, requests[0].file,
+      );
+    }
     upload.subscribe({
       next: () => {
         this.uploading.set(false);
@@ -278,20 +298,19 @@ export class ClaimStatusPage {
     requestedEvidence: ClaimantEvidenceRequest[],
     actions: RequestedAction[] = [],
   ): ClaimantEvidenceRequest[] {
-    const currentAction = actions[0];
-    if (currentAction?.action_type === 'upload_document') {
-      return [
-        {
-          document_type: currentAction.document_type,
-          label: 'Replacement evidence',
-          instruction: currentAction.instruction,
-          satisfies_requirements: [],
-          replacement_required: true,
-          requested_action_id: currentAction.action_id,
-        },
-      ];
-    }
-    if (currentAction) return [];
+    const uploadActions = actions.filter(
+      (action): action is Extract<RequestedAction, { action_type: 'upload_document' }> =>
+        action.action_type === 'upload_document',
+    );
+    if (uploadActions.length) return uploadActions.map((action) => ({
+      document_type: action.document_type,
+      label: action.replaces_document_id ? 'Replacement evidence' : 'Requested evidence',
+      instruction: action.instruction,
+      satisfies_requirements: [],
+      replacement_required: !!action.replaces_document_id,
+      requested_action_id: action.action_id,
+    }));
+    if (actions.length) return [];
     return requestedEvidence.slice(0, 1);
   }
 
@@ -352,7 +371,9 @@ export class ClaimStatusPage {
         mode: 'adjuster',
         badge: 'Waiting for adjuster',
         title: 'Additional review is underway',
-        detail: 'An adjuster is reviewing the evidence package. No action is needed from you.',
+        detail: this.claim()?.manual_handling
+          ? 'Your claim requires additional review by an adjuster. No action is required from you at this time.'
+          : 'An adjuster is reviewing the evidence package. No action is needed from you.',
         showProgress: false,
       };
     }

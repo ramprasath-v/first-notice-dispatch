@@ -15,6 +15,7 @@ from app.models.claim_document import (
 from app.models.intake_result import IntakeResult, intake_result_from_claim
 from app.models.review_result import (
     ClaimEvidenceMetadata,
+    EvidenceConflict,
     ReviewResult,
     UploadedEvidence,
 )
@@ -23,7 +24,10 @@ from app.models.requested_action import (
     parse_requested_actions,
 )
 from app.services.claim_review_service import ClaimReviewService
-from app.services.document_extraction_service import DocumentExtractor
+from app.services.document_extraction_service import (
+    DocumentExtractor,
+    UnsupportedResumeDocumentTypeError,
+)
 from app.services.intake_extraction_service import evidence_part
 from app.tools.firestore_repository import FirestoreClaimRepository
 
@@ -44,6 +48,42 @@ class ClaimResumeWorkflow:
         self._document_extractor = document_extractor
 
     def resume(
+        self,
+        claim_id: str,
+        new_document: ClaimDocument,
+        *,
+        extraction_result: DocumentExtractionResult | None = None,
+    ) -> ResumeClaimResult:
+        try:
+            return self._resume_once(
+                claim_id,
+                new_document,
+                extraction_result=extraction_result,
+            )
+        except Exception as exc:
+            persisted = self._repository.get_document(
+                claim_id, new_document.document_id
+            )
+            if (
+                persisted is not None
+                and persisted.resume_started_at is not None
+                and persisted.resume_processed_at is None
+            ):
+                if isinstance(exc, UnsupportedResumeDocumentTypeError):
+                    self._repository.mark_document_resume_rejected(
+                        claim_id,
+                        new_document.document_id,
+                        error_type=type(exc).__name__,
+                    )
+                else:
+                    self._repository.mark_document_resume_retry_required(
+                        claim_id,
+                        new_document.document_id,
+                        error_type=type(exc).__name__,
+                    )
+            raise
+
+    def _resume_once(
         self,
         claim_id: str,
         new_document: ClaimDocument,
@@ -222,6 +262,11 @@ class ClaimResumeWorkflow:
                 quality_reason=extraction.reason,
                 supported_capabilities=extraction.supported_capabilities,
                 evidence_findings=extraction.evidence_findings,
+                evidence_facts=(
+                    extraction.evidence_facts.fact_values()
+                    if extraction.evidence_facts
+                    else {}
+                ),
             )
         else:
             self._repository.mark_document_unusable(
@@ -230,6 +275,11 @@ class ClaimResumeWorkflow:
                 extraction.reason,
                 supported_capabilities=extraction.supported_capabilities,
                 evidence_findings=extraction.evidence_findings,
+                evidence_facts=(
+                    extraction.evidence_facts.fact_values()
+                    if extraction.evidence_facts
+                    else {}
+                ),
             )
 
         if not quality_already_processed:
@@ -259,17 +309,71 @@ class ClaimResumeWorkflow:
                 correlation_id=correlation_id,
                 extra_details={"requirement": matched_requirement},
             )
+            self._repository.mark_document_resume_quality_processed(
+                claim_id, document.document_id
+            )
+
+        pending_upload_actions = [
+            action
+            for action in parse_requested_actions(claim.get("requested_actions", []))
+            if isinstance(action, UploadDocumentRequestedAction)
+        ]
+        current_action = next(
+            (
+                action
+                for action in pending_upload_actions
+                if action.action_id == document.requested_action_id
+            ),
+            None,
+        )
+        if current_action is not None and len(pending_upload_actions) > 1:
+            remaining_actions = [
+                action
+                for action in pending_upload_actions
+                if action.action_id != current_action.action_id
+            ]
+            self._repository.complete_requested_evidence_item(
+                claim_id=claim_id,
+                document=document.model_copy(
+                    update={
+                        "status": "validated" if extraction.usable else "unusable",
+                        "quality_reason": extraction.reason,
+                        "supported_capabilities": extraction.supported_capabilities,
+                        "evidence_findings": extraction.evidence_findings,
+                        "evidence_facts": (
+                            extraction.evidence_facts.fact_values()
+                            if extraction.evidence_facts
+                            else {}
+                        ),
+                    }
+                ),
+                extraction=extraction,
+                remaining_actions=remaining_actions,
+                idempotency_key=idempotency_key,
+            )
+            return ResumeClaimResult(
+                claim_id=claim_id,
+                document_id=document.document_id,
+                previous_status=current_status,
+                final_status=ClaimStatus.AWAITING_DOCUMENTS.value,
+                matched_requirement=matched_requirement,
+                evidence_usable=extraction.usable,
+                reason=(
+                    "Requested evidence was accepted; additional items remain."
+                    if extraction.usable
+                    else "The submitted evidence was unusable; the request remains open."
+                ),
+            )
+
+        if not quality_already_processed:
             self._append_event(
                 claim_id,
                 document,
                 action="claim_review_resumed",
                 from_status=ClaimStatus.AWAITING_DOCUMENTS.value,
                 to_status=ClaimStatus.REVIEW_PROCESSING.value,
-                reason="The downstream review stage resumed for the new evidence.",
+                reason="All requested evidence is available; Review resumed.",
                 correlation_id=correlation_id,
-            )
-            self._repository.mark_document_resume_quality_processed(
-                claim_id, document.document_id
             )
 
         documents = self._repository.get_documents(claim_id)
@@ -550,10 +654,12 @@ def _reconcile_current_document_as_replacement(
         *review_result.source_aware_conflicts,
         *review_result.source_aware_uncertainties,
     ]
-    if not assessments or any(
-        assessment.selected_outlier_document_id != outlier.document_id
+    selected_targets = {
+        assessment.selected_outlier_document_id
         for assessment in assessments
-    ):
+        if assessment.selected_outlier_document_id
+    }
+    if selected_targets != {outlier.document_id}:
         return None
     if any(
         uncertainty.source_attribution_incomplete
@@ -585,6 +691,11 @@ def _replace_document_status(
                 "quality_reason": extraction.reason,
                 "supported_capabilities": extraction.supported_capabilities,
                 "evidence_findings": extraction.evidence_findings,
+                "evidence_facts": (
+                    extraction.evidence_facts.fact_values()
+                    if extraction.evidence_facts
+                    else {}
+                ),
             }
         )
         if document.document_id == document_id
@@ -681,6 +792,24 @@ def _build_review_metadata(
         if isinstance(item, dict)
     )
 
+    known_conflicts = list(conflicts)
+    for field_name, claimant_value in _claimant_entered_facts(claim).items():
+        evidence_value = _canonical_active_fact(active_documents, field_name)
+        if (
+            evidence_value
+            and _normalize_fact_value(evidence_value)
+            != _normalize_fact_value(claimant_value)
+        ):
+            known_conflicts.append(EvidenceConflict(
+                field=field_name,
+                values=[claimant_value, evidence_value],
+                sources=["claimant submission", "current active evidence"],
+                reason=(
+                    "The claimant-provided value differs from the value supported "
+                    "by current active evidence."
+                ),
+            ))
+
     return ClaimEvidenceMetadata(
         uploaded_evidence=uploaded,
         police_attended=any(
@@ -700,7 +829,7 @@ def _build_review_metadata(
             if license_plate_unresolved or identity_artifact_present
             else None
         ),
-        known_conflicts=conflicts,
+        known_conflicts=known_conflicts,
         approved_issue_fingerprints=[
             str(value) for value in claim.get("approved_issue_fingerprints", [])
         ],
@@ -723,9 +852,22 @@ def _normalize_extraction(
         "license_plate_photo",
     }:
         capabilities.append(matched_requirement)
-    return extraction.model_copy(
-        update={"supported_capabilities": list(dict.fromkeys(capabilities))}
+    evidence_facts = (
+        extraction.evidence_facts.model_copy(update={"source": document.filename})
+        if extraction.evidence_facts
+        else None
     )
+    canonical_findings = (
+        evidence_facts.canonical_findings() if evidence_facts else []
+    )
+    return extraction.model_copy(update={
+        "supported_capabilities": list(dict.fromkeys(capabilities)),
+        "evidence_facts": evidence_facts,
+        "evidence_findings": list(dict.fromkeys([
+            *extraction.evidence_findings,
+            *canonical_findings,
+        ])),
+    })
 
 
 def _documents_for_resumed_review(
@@ -765,6 +907,7 @@ def _current_review_intake_result(
         for document in active
         for finding in document.evidence_findings
     ]
+    claimant_facts = _claimant_entered_facts(claim)
     return IntakeResult.model_validate({
         "claim_type": claim.get("claim_type"),
         # These three fields were derived by the original multimodal intake and
@@ -772,14 +915,71 @@ def _current_review_intake_result(
         "damage_type": "",
         "parts_affected": [],
         "incident_summary": claim.get("incident_description") or "",
-        # Stable report/claimant facts remain available to deterministic checks.
-        "policy_number": claim.get("policy_number"),
-        "incident_date": claim.get("incident_date"),
+        # Evidence-derived facts are rebuilt from current active artifacts. A
+        # claimant-entered value remains explicit and is compared in metadata.
+        "policy_number": (
+            _current_fact_value(claim, documents, "policy_number", claimant_facts)
+        ),
+        "incident_date": (
+            _current_fact_value(claim, documents, "incident_date", claimant_facts)
+        ),
         "vehicle_drivable": claim.get("vehicle_drivable"),
         "uncertainties": [],
         "image_evidence_capabilities": image_capabilities,
         "evidence_findings": evidence_findings,
     })
+
+
+def _claimant_entered_facts(claim: dict[str, object]) -> dict[str, str]:
+    corrections = claim.get("pending_corrections")
+    corrected = corrections if isinstance(corrections, dict) else {}
+    candidates = {
+        "policy_number": corrected.get("policy_number") or claim.get("policy_number_hint"),
+        "incident_date": corrected.get("incident_date"),
+    }
+    return {
+        field_name: str(value).strip()
+        for field_name, value in candidates.items()
+        if value is not None and str(value).strip()
+    }
+
+
+def _canonical_active_fact(
+    documents: list[ClaimDocument], field_name: str
+) -> str | None:
+    values: dict[str, str] = {}
+    for document in documents:
+        if document.status == "superseded":
+            continue
+        value = document.evidence_facts.get(field_name)
+        if value and value.strip():
+            values.setdefault(_normalize_fact_value(value), value.strip())
+    return next(iter(values.values())) if len(values) == 1 else None
+
+
+def _current_fact_value(
+    claim: dict[str, object],
+    documents: list[ClaimDocument],
+    field_name: str,
+    claimant_facts: dict[str, str],
+) -> object:
+    canonical = _canonical_active_fact(documents, field_name)
+    if canonical is not None:
+        return canonical
+    has_scoped_fact = any(
+        document.evidence_facts.get(field_name)
+        for document in documents
+    )
+    if has_scoped_fact:
+        return claimant_facts.get(field_name)
+    # Backward compatibility for claims created before per-artifact facts were
+    # persisted. Once scoped facts exist, the claim-level extracted value is no
+    # longer used as evidence provenance.
+    return claimant_facts.get(field_name) or claim.get(field_name)
+
+
+def _normalize_fact_value(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
 
 
 def _build_review_evidence_parts(

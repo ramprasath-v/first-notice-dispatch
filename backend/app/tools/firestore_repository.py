@@ -345,7 +345,15 @@ class FirestoreClaimRepository:
         self._update_document(
             claim_id,
             document_id,
-            {"resume_extraction_result": extraction.model_dump(mode="python")},
+            {
+                "resume_extraction_result": extraction.model_dump(mode="python"),
+                "evidence_facts": (
+                    extraction.evidence_facts.fact_values()
+                    if extraction.evidence_facts
+                    else {}
+                ),
+                "evidence_findings": list(extraction.evidence_findings),
+            },
             "save document resume extraction",
         )
 
@@ -358,6 +366,186 @@ class FirestoreClaimRepository:
             {"resume_quality_processed_at": utc_now()},
             "mark document resume quality processed",
         )
+
+    def mark_document_resume_retry_required(
+        self,
+        claim_id: str,
+        document_id: str,
+        *,
+        error_type: str,
+    ) -> None:
+        self._update_document(
+            claim_id,
+            document_id,
+            {
+                "resume_result_status": "retry_required",
+                "resume_error": (
+                    f"{error_type}: document resume failed; retry is required."
+                ),
+                "resume_retry_required_at": utc_now(),
+            },
+            "mark document resume retry required",
+        )
+
+    def mark_document_resume_rejected(
+        self,
+        claim_id: str,
+        document_id: str,
+        *,
+        error_type: str,
+    ) -> None:
+        """Persist a permanent resume failure and return the claim to its pause."""
+        claim_ref = self._client.collection("claims").document(claim_id)
+        document_ref = claim_ref.collection("documents").document(document_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def reject(transaction):
+            claim_snapshot = claim_ref.get(transaction=transaction)
+            document_snapshot = document_ref.get(transaction=transaction)
+            if not claim_snapshot.exists or not document_snapshot.exists:
+                raise FirestoreWriteError(
+                    "Could not reject document resume: claim or document is missing."
+                )
+            claim = claim_snapshot.to_dict()
+            document = document_snapshot.to_dict()
+            if document.get("resume_processed_at") is not None:
+                return
+            if (
+                claim.get("active_resume_document_id") != document_id
+                or claim.get("status") != ClaimStatus.REVIEW_PROCESSING.value
+            ):
+                raise FirestoreWriteError(
+                    "Could not reject document resume: operation is not active."
+                )
+            now = utc_now()
+            validate_claim_status_transition(
+                ClaimStatus.REVIEW_PROCESSING, ClaimStatus.AWAITING_DOCUMENTS
+            )
+            transaction.update(
+                claim_ref,
+                {
+                    "status": ClaimStatus.AWAITING_DOCUMENTS.value,
+                    "active_resume_document_id": firestore.DELETE_FIELD,
+                    "active_resume_idempotency_key": firestore.DELETE_FIELD,
+                    "active_resume_correlation_id": firestore.DELETE_FIELD,
+                    "updated_at": now,
+                },
+            )
+            transaction.update(
+                document_ref,
+                {
+                    "status": "unusable",
+                    "resume_processed_at": now,
+                    "resume_result_status": "rejected",
+                    "resume_error": (
+                        f"{error_type}: unsupported document type; retry disabled."
+                    ),
+                    "resume_retry_required_at": firestore.DELETE_FIELD,
+                },
+            )
+
+        try:
+            reject(transaction)
+        except ClaimRepositoryError:
+            raise
+        except Exception as exc:
+            self._raise_write_error("reject document resume", exc)
+
+    def complete_requested_evidence_item(
+        self,
+        *,
+        claim_id: str,
+        document: ClaimDocument,
+        extraction: DocumentExtractionResult,
+        remaining_actions: list[UploadDocumentRequestedAction],
+        idempotency_key: str,
+    ) -> None:
+        """Atomically finalize one item while a multi-item request remains paused."""
+        claim = self.get_claim(claim_id)
+        if claim is None:
+            raise FirestoreWriteError(f"Claim {claim_id} does not exist.")
+        now = utc_now()
+        claim_ref = self._client.collection("claims").document(claim_id)
+        document_ref = claim_ref.collection("documents").document(document.document_id)
+        batch = self._client.batch()
+        successful = extraction.usable
+        actions = remaining_actions if successful else [
+            action
+            for action in parse_requested_actions(claim.get("requested_actions", []))
+            if isinstance(action, UploadDocumentRequestedAction)
+        ]
+        reservations = dict(claim.get("replacement_upload_reservations") or {})
+        if document.requested_action_id:
+            if successful:
+                reservations.pop(document.requested_action_id, None)
+            elif isinstance(reservations.get(document.requested_action_id), dict):
+                reservations[document.requested_action_id] = {
+                    **reservations[document.requested_action_id],
+                    "status": "retry_required",
+                    "updated_at": now,
+                }
+        batch.update(
+            claim_ref,
+            {
+                "status": ClaimStatus.AWAITING_DOCUMENTS.value,
+                "requested_actions": [item.model_dump(mode="python") for item in actions],
+                "missing_documents": [
+                    {
+                        "type": item.document_type,
+                        "reason": item.instruction,
+                        "source_requirement": "adjuster_request",
+                    }
+                    for item in actions
+                ],
+                "missing_document_count": len(actions),
+                "replacement_upload_reservations": reservations,
+                "active_resume_document_id": firestore.DELETE_FIELD,
+                "active_resume_idempotency_key": firestore.DELETE_FIELD,
+                "active_resume_correlation_id": firestore.DELETE_FIELD,
+                "updated_at": now,
+            },
+        )
+        batch.update(
+            document_ref,
+            {
+                "status": "validated" if successful else "unusable",
+                "quality_reason": extraction.reason,
+                "supported_capabilities": list(extraction.supported_capabilities),
+                "evidence_findings": list(extraction.evidence_findings),
+                "evidence_facts": (
+                    extraction.evidence_facts.fact_values()
+                    if extraction.evidence_facts
+                    else {}
+                ),
+                "resume_idempotency_key": idempotency_key,
+                "resume_processed_at": now,
+                "resume_result_status": ClaimStatus.AWAITING_DOCUMENTS.value,
+                "resume_error": None,
+                **(
+                    {
+                        "requested_action_id": document.requested_action_id,
+                        "replaces_document_id": document.replaces_document_id,
+                    }
+                    if successful and document.replaces_document_id
+                    else {}
+                ),
+            },
+        )
+        if successful and document.replaces_document_id:
+            batch.update(
+                claim_ref.collection("documents").document(
+                    document.replaces_document_id
+                ),
+                {
+                    "status": "superseded",
+                    "superseded_by_document_id": document.document_id,
+                },
+            )
+        try:
+            batch.commit()
+        except Exception as exc:
+            self._raise_write_error("complete requested evidence item", exc)
 
     def append_claim_event(
         self,
@@ -604,6 +792,7 @@ class FirestoreClaimRepository:
         *,
         supported_capabilities: list[str] | None = None,
         evidence_findings: list[str] | None = None,
+        evidence_facts: dict[str, str] | None = None,
     ) -> None:
         self._update_document(
             claim_id,
@@ -613,6 +802,7 @@ class FirestoreClaimRepository:
                 "quality_reason": reason,
                 "supported_capabilities": list(supported_capabilities or []),
                 "evidence_findings": list(evidence_findings or []),
+                "evidence_facts": dict(evidence_facts or {}),
             },
             "mark claim document unusable",
         )
@@ -625,6 +815,7 @@ class FirestoreClaimRepository:
         quality_reason: str | None = None,
         supported_capabilities: list[str] | None = None,
         evidence_findings: list[str] | None = None,
+        evidence_facts: dict[str, str] | None = None,
     ) -> None:
         self._update_document(
             claim_id,
@@ -634,6 +825,7 @@ class FirestoreClaimRepository:
                 "quality_reason": quality_reason,
                 "supported_capabilities": list(supported_capabilities or []),
                 "evidence_findings": list(evidence_findings or []),
+                "evidence_facts": dict(evidence_facts or {}),
             },
             "mark claim document validated",
         )
@@ -981,6 +1173,7 @@ class FirestoreClaimRepository:
         correction_type: str | None,
         target_document_id: str | None,
         now: datetime,
+        requested_evidence: list[dict[str, str]] | None = None,
     ) -> tuple[HumanReviewRecord | None, bool]:
         """Atomically consume a review token; returns (record, duplicate)."""
         token_ref = self._client.collection("human_review_tokens").document(token_hash)
@@ -1017,6 +1210,7 @@ class FirestoreClaimRepository:
                 "reviewer_label": reviewer_label,
                 "correction_type": correction_type,
                 "target_document_id": target_document_id,
+                "requested_evidence": list(requested_evidence or []),
                 "decision_event_id": (
                     f"{current.claim_id}:{current.review_id}:{decision}:v1"
                 ),
@@ -1152,6 +1346,44 @@ class FirestoreClaimRepository:
             return
         except Exception as exc:
             self._raise_write_error("resume claim after human review", exc)
+
+    def complete_manual_human_review(
+        self, *, claim_id: str, review_id: str, correlation_id: str
+    ) -> None:
+        claim = self.get_claim(claim_id)
+        if claim is None:
+            raise FirestoreWriteError(f"Claim {claim_id} does not exist.")
+        if claim.get("status") != ClaimStatus.HUMAN_REVIEW_REQUIRED.value:
+            raise FirestoreWriteError(
+                "Manual handling requires a human_review_required claim."
+            )
+        now = utc_now()
+        claim_ref = self._client.collection("claims").document(claim_id)
+        review_ref = claim_ref.collection("human_reviews").document(review_id)
+        event_ref = claim_ref.collection("events").document(
+            f"{review_id}-manual-handling"
+        )
+        try:
+            batch = self._client.batch()
+            batch.update(claim_ref, {
+                "manual_handling": True,
+                "updated_at": now,
+            })
+            batch.update(review_ref, {"completed_at": now})
+            batch.create(event_ref, self._event_document(
+                timestamp=now,
+                action="human_review_manual_handling",
+                actor="firstnoticeai",
+                from_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
+                to_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
+                details={"review_id": review_id},
+                correlation_id=correlation_id,
+            ))
+            batch.commit()
+        except AlreadyExists:
+            return
+        except Exception as exc:
+            self._raise_write_error("continue manual human review", exc)
 
     def save_claim_correction(
         self,
@@ -1428,6 +1660,7 @@ class FirestoreClaimRepository:
         *,
         correlation_id: str | None = None,
         document_type_updates: dict[str, str] | None = None,
+        document_evidence_updates: dict[str, dict[str, object]] | None = None,
     ) -> None:
         """Atomically save intake into an existing new claim shell."""
         claim = self.get_claim(claim_id)
@@ -1459,15 +1692,21 @@ class FirestoreClaimRepository:
         )
         try:
             batch.update(claim_ref, update)
-            for document_id, document_type in sorted(
-                (document_type_updates or {}).items()
-            ):
+            document_ids = set(document_type_updates or {}) | set(
+                document_evidence_updates or {}
+            )
+            for document_id in sorted(document_ids):
                 document_ref = claim_ref.collection("documents").document(
                     document_id
                 )
-                batch.update(
-                    document_ref, {"document_type": document_type}
+                document_update = dict(
+                    (document_evidence_updates or {}).get(document_id, {})
                 )
+                if document_id in (document_type_updates or {}):
+                    document_update["document_type"] = (
+                        document_type_updates or {}
+                    )[document_id]
+                batch.update(document_ref, document_update)
             batch.create(event_ref, event)
             batch.commit()
         except Exception as exc:
@@ -2206,6 +2445,10 @@ class FirestoreClaimRepository:
             "priority_reason": review_result.priority_reason,
             "review_confidence": review_result.confidence,
             "human_review_reason": review_result.human_review_reason,
+            "review_outcome": review_result.review_outcome,
+            "ambiguity_reason": review_result.ambiguity_reason,
+            "recommended_next_step": review_result.recommended_next_step,
+            "ambiguity_summary": review_result.ambiguity_summary,
             "operational_indicators": review_result.operational_indicators.model_dump(
                 mode="python"
             ),
@@ -2309,6 +2552,14 @@ class FirestoreClaimRepository:
             details={
                 "intake_complete": review_result.intake_complete,
                 "intake_priority": review_result.intake_priority,
+                "review_outcome": review_result.review_outcome,
+                "ambiguity_reason": review_result.ambiguity_reason,
+                "ambiguity_summary": review_result.ambiguity_summary,
+                "recommended_next_step": review_result.recommended_next_step,
+                "review_context": (
+                    "evidence_resume" if resume_document_id else "initial_submission"
+                ),
+                "review_generation_key": review_generation_key,
                 "missing_documents": [
                     {"type": item.type, "reason": item.reason}
                     for item in review_result.missing_documents
@@ -2349,6 +2600,7 @@ class FirestoreClaimRepository:
                         "resume_idempotency_key": resume_idempotency_key,
                         "resume_processed_at": now,
                         "resume_result_status": target.value,
+                        "resume_error": None,
                         **(
                             {
                                 "status": "validated",
@@ -2365,6 +2617,9 @@ class FirestoreClaimRepository:
                                 ),
                                 "evidence_findings": list(
                                     replacement_document.evidence_findings
+                                ),
+                                "evidence_facts": dict(
+                                    replacement_document.evidence_facts
                                 ),
                             }
                             if replacement_document is not None

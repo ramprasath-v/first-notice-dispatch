@@ -6,14 +6,15 @@ from unittest.mock import MagicMock, patch
 
 from google.api_core.exceptions import AlreadyExists, ServiceUnavailable
 
-from app.models.intake_result import EvidenceFinding, IntakeResult
-from app.models.claim_document import ClaimDocument
+from app.models.claim_document import ClaimDocument, DocumentExtractionResult
+from app.models.intake_result import EvidenceArtifactFacts, EvidenceFinding, IntakeResult
 from app.models.inspection_appointment import InspectionAppointment, InspectionSlot
 from app.models.notification import AdjusterNotification
 from app.models.adjuster_packet import AdjusterPacket
 from app.domain.claim_status import ClaimStatus
 from app.models.review_result import (
     CurrentEvidenceFinding,
+    MissingEvidence,
     ReviewResult,
     UnresolvedUncertainty,
 )
@@ -238,13 +239,99 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
             "CLM-A1B2C3D4",
             self.result,
             document_type_updates={"DOC-IMAGE-REPORT": "police_report"},
+            document_evidence_updates={
+                "DOC-IMAGE-REPORT": {
+                    "evidence_facts": {"incident_date": "2026-08-01"},
+                    "evidence_findings": ["incident_date: 2026-08-01"],
+                }
+            },
         )
 
         documents_collection.document.assert_called_once_with("DOC-IMAGE-REPORT")
         self.batch.update.assert_any_call(
-            document_ref, {"document_type": "police_report"}
+            document_ref,
+            {
+                "document_type": "police_report",
+                "evidence_facts": {"incident_date": "2026-08-01"},
+                "evidence_findings": ["incident_date: 2026-08-01"],
+            },
         )
         self.batch.commit.assert_called_once_with()
+
+    def test_resume_extraction_persists_normalized_document_facts(self) -> None:
+        extraction = DocumentExtractionResult(
+            usable=True,
+            reason="The replacement evidence is readable.",
+            evidence_facts=EvidenceArtifactFacts(
+                source="replacement.jpg",
+                license_plate="ABC123",
+                damage_location="rear",
+            ),
+            evidence_findings=[
+                "damage_location: rear",
+                "license_plate: ABC123",
+            ],
+        )
+
+        self.repository.save_document_resume_extraction(
+            "CLM-A1B2C3D4", "DOC-REPLACEMENT", extraction
+        )
+
+        update = self.event_ref.update.call_args.args[0]
+        self.assertEqual(
+            update["evidence_facts"],
+            {"license_plate": "ABC123", "damage_location": "rear"},
+        )
+        self.assertEqual(update["evidence_findings"], extraction.evidence_findings)
+        self.assertNotIn("vehicle_make", update["evidence_facts"])
+
+    def test_resume_failure_persists_recoverable_retry_state(self) -> None:
+        self.repository.mark_document_resume_retry_required(
+            "CLM-A1B2C3D4", "DOC-RETRY", error_type="DocumentExtractionError"
+        )
+
+        update = self.event_ref.update.call_args.args[0]
+        self.assertEqual(update["resume_result_status"], "retry_required")
+        self.assertIn("DocumentExtractionError", update["resume_error"])
+        self.assertIsInstance(update["resume_retry_required_at"], datetime)
+
+    def test_permanent_resume_failure_is_rejected_and_returns_to_pause(self) -> None:
+        claim_snapshot = MagicMock(exists=True)
+        claim_snapshot.to_dict.return_value = {
+            "status": "review_processing",
+            "active_resume_document_id": "DOC-UNSUPPORTED",
+        }
+        document_snapshot = MagicMock(exists=True)
+        document_snapshot.to_dict.return_value = {
+            "status": "received",
+            "resume_processed_at": None,
+        }
+        self.claim_ref.get.return_value = claim_snapshot
+        documents = MagicMock()
+        document_ref = MagicMock()
+        documents.document.return_value = document_ref
+        document_ref.get.return_value = document_snapshot
+        self.claim_ref.collection.return_value = documents
+        transaction = MagicMock()
+        self.client.transaction.return_value = transaction
+
+        with patch(
+            "app.tools.firestore_repository.firestore.transactional",
+            side_effect=lambda function: function,
+        ):
+            self.repository.mark_document_resume_rejected(
+                "CLM-A1B2C3D4",
+                "DOC-UNSUPPORTED",
+                error_type="UnsupportedResumeDocumentTypeError",
+            )
+
+        claim_update = transaction.update.call_args_list[0].args[1]
+        document_update = transaction.update.call_args_list[1].args[1]
+        self.assertEqual(claim_update["status"], "awaiting_documents")
+        self.assertEqual(document_update["status"], "unusable")
+        self.assertEqual(document_update["resume_result_status"], "rejected")
+        self.assertIsInstance(document_update["resume_processed_at"], datetime)
+        self.assertIn("retry disabled", document_update["resume_error"])
 
     def test_append_claim_event_creates_expected_event(self) -> None:
         event_id = self.repository.append_claim_event(
@@ -434,6 +521,10 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
                     sources=["followup.jpg"],
                 )
             ],
+            review_outcome="ambiguous",
+            ambiguity_reason="insufficient_evidence",
+            recommended_next_step="retry_with_deeper_reasoning",
+            ambiguity_summary="Damage extent cannot be resolved from current evidence.",
         )
 
         status = self.repository.save_review_result(
@@ -452,11 +543,91 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         self.assertEqual(
             claim_update["uncertainties"], ["Damage extent remains unclear."]
         )
+        self.assertEqual(claim_update["review_outcome"], "ambiguous")
+        self.assertEqual(claim_update["ambiguity_reason"], "insufficient_evidence")
+        self.assertEqual(
+            claim_update["recommended_next_step"], "retry_with_deeper_reasoning"
+        )
+        self.assertEqual(
+            claim_update["ambiguity_summary"],
+            "Damage extent cannot be resolved from current evidence.",
+        )
         event = self.batch.create.call_args.args[1]
         self.assertEqual(event["action"], "claim_review_completed")
         self.assertEqual(event["from_status"], "review_processing")
         self.assertEqual(event["to_status"], "inspection_ready")
+        self.assertEqual(event["details"]["review_outcome"], "ambiguous")
+        self.assertEqual(
+            event["details"]["recommended_next_step"],
+            "retry_with_deeper_reasoning",
+        )
+        self.assertEqual(event["details"]["review_context"], "initial_submission")
+        self.assertIsNone(event["details"]["review_generation_key"])
         self.batch.commit.assert_called_once_with()
+
+    def test_review_events_preserve_initial_and_resume_outcomes(self) -> None:
+        snapshot = MagicMock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {"status": "review_processing"}
+        self.claim_ref.get.return_value = snapshot
+        initial = ReviewResult(
+            intake_complete=False,
+            intake_priority="routine",
+            priority_reason="Claimant evidence can resolve the gap.",
+            confidence=0.8,
+            inspection_required=True,
+            missing_documents=[
+                MissingEvidence(
+                    type="policy_document",
+                    reason="Policy evidence is missing.",
+                    source_requirement="policy_document",
+                )
+            ],
+            requires_human_review=False,
+            review_outcome="claimant_remediable",
+            recommended_next_step="request_claimant_evidence",
+        )
+        resumed = ReviewResult(
+            intake_complete=True,
+            intake_priority="routine",
+            priority_reason="No urgent operational indicator.",
+            confidence=0.9,
+            inspection_required=True,
+            requires_human_review=False,
+            review_outcome="resolved",
+            recommended_next_step="continue",
+        )
+
+        self.repository.save_review_result(
+            "CLM-A1B2C3D4",
+            initial,
+            correlation_id="corr-initial",
+            review_generation_key="CLM-A1B2C3D4:submitted-review:v1",
+        )
+        self.repository.save_review_result(
+            "CLM-A1B2C3D4",
+            resumed,
+            correlation_id="corr-resume",
+            resume_document_id="DOC-NEW",
+            review_generation_key="resume-generation-1",
+        )
+
+        events = [call.args[1] for call in self.batch.create.call_args_list]
+        self.assertEqual(
+            [event["details"]["review_outcome"] for event in events],
+            ["claimant_remediable", "resolved"],
+        )
+        self.assertEqual(
+            [event["details"]["review_context"] for event in events],
+            ["initial_submission", "evidence_resume"],
+        )
+        self.assertEqual(
+            [event["correlation_id"] for event in events],
+            ["corr-initial", "corr-resume"],
+        )
+        latest_claim_update = self.batch.update.call_args_list[-1].args[1]
+        self.assertEqual(latest_claim_update["review_outcome"], "resolved")
+        self.assertEqual(latest_claim_update["recommended_next_step"], "continue")
 
     def test_replacement_acceptance_and_supersession_share_review_batch(self) -> None:
         snapshot = MagicMock()

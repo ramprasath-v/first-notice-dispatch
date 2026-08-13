@@ -65,6 +65,23 @@ export class AdjusterReviewPage {
     this.decide('correction');
   }
 
+  continueManualReview(): void {
+    if (this.deciding() || this.review()?.status !== 'pending') return;
+    this.requestInfoOpen.set(false);
+    this.deciding.set(true);
+    this.error.set('');
+    this.api.continueManualHandling(this.token)
+      .pipe(finalize(() => this.deciding.set(false)))
+      .subscribe({
+        next: (result) => {
+          window.sessionStorage.removeItem('firstnotice.reviewToken');
+          this.review.update((review) => review ? { ...review, status: result.status } : review);
+          this.completedMessage.set(result.message);
+        },
+        error: () => this.error.set('We could not record the decision. Please try again.'),
+      });
+  }
+
   comparisonFacts(): Array<{ source: string; finding: string }> {
     const persisted = this.review()?.evidence_comparison ?? [];
     if (persisted.length) return persisted;
@@ -113,7 +130,10 @@ export class AdjusterReviewPage {
     this.error.set('');
     const request = action === 'approve'
       ? this.api.approveHumanReview(this.token)
-      : this.api.requestHumanReviewCorrection(this.token, this.decisionNote);
+      : this.api.requestHumanReviewCorrection(
+          this.token,
+          this.decisionNote,
+        );
     request.pipe(finalize(() => this.deciding.set(false))).subscribe({
       next: (result) => {
         window.sessionStorage.removeItem('firstnotice.reviewToken');
@@ -125,7 +145,9 @@ export class AdjusterReviewPage {
           error.status === 410
             ? 'This review link has expired.'
             : error.status === 409
-              ? 'This review has already been completed.'
+              ? (typeof error.error?.detail === 'string'
+                  ? error.error.detail
+                  : 'This review has already been completed.')
               : 'We could not record the decision. Please try again.',
         );
       },

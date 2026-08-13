@@ -59,6 +59,28 @@ export class ClaimApiService {
     );
   }
 
+  uploadDocuments(
+    claimId: string,
+    requests: Array<{
+      documentType: string;
+      file: File;
+      requestedActionId: string;
+      idempotencyKey: string;
+    }>,
+  ): Observable<DocumentAcceptedResponse[]> {
+    const body = new FormData();
+    for (const request of requests) {
+      body.append('document_types', request.documentType);
+      body.append('requested_action_ids', request.requestedActionId);
+      body.append('idempotency_keys', request.idempotencyKey);
+      body.append('files', request.file, request.file.name);
+    }
+    return this.http.post<DocumentAcceptedResponse[]>(
+      `${this.baseUrl}/claims/${claimId}/documents/batch`,
+      body,
+    );
+  }
+
   getHumanReview(token: string): Observable<HumanReview> {
     return this.http.get<HumanReview>(
       `${this.baseUrl}/reviews/current`,
@@ -84,6 +106,14 @@ export class ClaimApiService {
     return this.http.post<HumanReviewDecision>(
       `${this.baseUrl}/reviews/current/request-correction`,
       { decision_note: decisionNote || null },
+      { headers: { 'X-Review-Token': token } },
+    );
+  }
+
+  continueManualHandling(token: string): Observable<HumanReviewDecision> {
+    return this.http.post<HumanReviewDecision>(
+      `${this.baseUrl}/reviews/current/manual-handling`,
+      {},
       { headers: { 'X-Review-Token': token } },
     );
   }

@@ -9,11 +9,13 @@ from app.domain.claim_status import ClaimStatus
 from app.events.claim_events import (
     ClaimHumanReviewApprovedEvent,
     ClaimHumanReviewCorrectionRequestedEvent,
+    ClaimHumanReviewManualHandlingEvent,
 )
 from app.integrations.gmail_service import GmailError, GmailSendResult
 from app.models.human_review import (
     HumanReviewBriefing,
     HumanReviewDecisionRequest,
+    HumanReviewEvidenceRequest,
     HumanReviewDecisionResponse,
     HumanReviewPublicResponse,
     HumanReviewRecord,
@@ -540,7 +542,7 @@ class HumanReviewServiceTests(unittest.TestCase):
         )
         self.assertEqual(len(created.unresolved_uncertainties), 1)
 
-    def test_replacement_decision_uses_only_checkpoint_source_reference(self) -> None:
+    def test_free_text_never_authorizes_checkpoint_replacement_target(self) -> None:
         source = EvidenceSourceReference(
             document_id="DOC-DAMAGE",
             filename="initial-damage.jpg",
@@ -569,8 +571,8 @@ class HumanReviewServiceTests(unittest.TestCase):
         decided = pending.model_copy(
             update={
                 "status": "correction_requested",
-                "correction_type": "replace_document",
-                "target_document_id": "DOC-DAMAGE",
+                "correction_type": "upload_document",
+                "target_document_id": None,
             }
         )
         self.repository.decide_human_review.return_value = (decided, False)
@@ -578,14 +580,115 @@ class HumanReviewServiceTests(unittest.TestCase):
         self.service.request_correction(
             "secure-token",
             HumanReviewDecisionRequest(
+                decision_note="Please upload a clearer vehicle photo.",
                 correction_type="text",
                 target_document_id="DOC-BROWSER-OVERRIDE",
             ),
         )
 
         call = self.repository.decide_human_review.call_args.kwargs
-        self.assertEqual(call["correction_type"], "replace_document")
-        self.assertEqual(call["target_document_id"], "DOC-DAMAGE")
+        self.assertEqual(call["correction_type"], "upload_document")
+        self.assertIsNone(call["target_document_id"])
+
+    def test_adjuster_can_request_multiple_structured_evidence_items(self) -> None:
+        pending = record()
+        self.repository.get_human_review_by_token_hash.return_value = pending
+        decided = pending.model_copy(
+            update={"status": "correction_requested", "correction_type": "upload_document"}
+        )
+        self.repository.decide_human_review.return_value = (decided, False)
+        requested = [
+            HumanReviewEvidenceRequest(
+                document_type="policy_document",
+                instruction="Please upload the correct policy document.",
+            ),
+            HumanReviewEvidenceRequest(
+                document_type="police_report",
+                instruction="Please upload the correct police report.",
+            ),
+        ]
+
+        self.service.request_correction(
+            "secure-token",
+            HumanReviewDecisionRequest(requested_evidence=requested),
+        )
+
+        call = self.repository.decide_human_review.call_args.kwargs
+        self.assertEqual(call["correction_type"], "upload_document")
+        self.assertEqual(call["requested_evidence"], [
+            item.model_dump(mode="python") for item in requested
+        ])
+        self.assertIsNone(call["target_document_id"])
+
+    def test_structured_replacement_target_is_validated_and_persisted(self) -> None:
+        pending = record()
+        self.repository.get_human_review_by_token_hash.return_value = pending
+        self.repository.get_document.return_value = ClaimDocument(
+            document_id="DOC-POLICY",
+            claim_id=CLAIM_ID,
+            document_type="policy_document",
+            filename="old-policy.pdf",
+            status="validated",
+            received_at=NOW,
+        )
+        self.repository.decide_human_review.return_value = (
+            pending.model_copy(update={"status": "correction_requested"}),
+            False,
+        )
+        requested = HumanReviewEvidenceRequest(
+            document_type="policy_document",
+            instruction="Upload the correct policy document.",
+            replaces_document_id="DOC-POLICY",
+        )
+
+        self.service.request_correction(
+            "secure-token",
+            HumanReviewDecisionRequest(requested_evidence=[requested]),
+        )
+
+        self.repository.get_document.assert_called_once_with(CLAIM_ID, "DOC-POLICY")
+        persisted = self.repository.decide_human_review.call_args.kwargs[
+            "requested_evidence"
+        ]
+        self.assertEqual(persisted[0]["replaces_document_id"], "DOC-POLICY")
+
+    def test_invalid_structured_replacement_targets_are_rejected(self) -> None:
+        self.repository.get_human_review_by_token_hash.return_value = record()
+        invalid_targets = [
+            None,
+            ClaimDocument(
+                document_id="DOC-TARGET", claim_id="CLM-OTHER",
+                document_type="policy_document", filename="other.pdf",
+                status="validated", received_at=NOW,
+            ),
+            ClaimDocument(
+                document_id="DOC-TARGET", claim_id=CLAIM_ID,
+                document_type="policy_document", filename="old.pdf",
+                status="superseded", received_at=NOW,
+            ),
+            ClaimDocument(
+                document_id="DOC-TARGET", claim_id=CLAIM_ID,
+                document_type="damage_evidence", filename="photo.jpg",
+                status="validated", received_at=NOW,
+            ),
+        ]
+        for target in invalid_targets:
+            with self.subTest(target=target):
+                self.repository.get_document.return_value = target
+                with self.assertRaisesRegex(
+                    HumanReviewConflictError, "active matching document"
+                ):
+                    self.service.request_correction(
+                        "secure-token",
+                        HumanReviewDecisionRequest(requested_evidence=[
+                            HumanReviewEvidenceRequest(
+                                document_type="policy_document",
+                                instruction="Upload the correct policy document.",
+                                replaces_document_id="DOC-TARGET",
+                            )
+                        ]),
+                    )
+        self.repository.decide_human_review.assert_not_called()
 
     def test_unrelated_or_superseded_replacement_target_is_rejected(self) -> None:
         source = EvidenceSourceReference(
@@ -634,7 +737,7 @@ class HumanReviewServiceTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaisesRegex(HumanReviewConflictError, "cannot safely"):
+        with self.assertRaisesRegex(HumanReviewConflictError, "Describe"):
             self.service.request_correction(
                 "secure-token", HumanReviewDecisionRequest()
             )
@@ -718,6 +821,41 @@ class HumanReviewServiceTests(unittest.TestCase):
             with self.assertRaises(HumanReviewExpiredError):
                 self.service.get_public_review("expired-token")
 
+    def test_public_review_exposes_active_filenames_without_internal_ids(self) -> None:
+        sources = [
+            EvidenceSourceReference(
+                document_id="DOC-ACTIVE", filename="active-policy.pdf",
+                document_type="policy_document", replacement_eligible=True,
+            ),
+            EvidenceSourceReference(
+                document_id="DOC-SUPERSEDED", filename="old-policy.pdf",
+                document_type="policy_document", replacement_eligible=True,
+            ),
+        ]
+        self.repository.get_human_review_by_token_hash.return_value = record(
+            source_references=sources
+        )
+        self.repository.get_documents.return_value = [
+            ClaimDocument(
+                document_id="DOC-ACTIVE", claim_id=CLAIM_ID,
+                document_type="policy_document", filename="active-policy.pdf",
+                status="validated", received_at=NOW,
+            ),
+            ClaimDocument(
+                document_id="DOC-SUPERSEDED", claim_id=CLAIM_ID,
+                document_type="policy_document", filename="old-policy.pdf",
+                status="superseded", received_at=NOW,
+            ),
+        ]
+
+        public = self.service.get_public_review("secure-token")
+
+        self.assertEqual(len(public.source_references), 1)
+        self.assertEqual(public.source_references[0].filename, "active-policy.pdf")
+        self.assertNotIn(
+            "DOC-ACTIVE", public.model_dump_json()
+        )
+
     def test_approve_consumes_token_and_publishes_versioned_event(self) -> None:
         approved = record(
             status="approved",
@@ -781,7 +919,10 @@ class HumanReviewServiceTests(unittest.TestCase):
         self.repository.get_human_review_by_token_hash.return_value = record()
 
         self.service.request_correction(
-            "secure-token", HumanReviewDecisionRequest(decision_note="Confirm policy")
+            "secure-token",
+            HumanReviewDecisionRequest(
+                decision_note="Please provide the correct policy number."
+            ),
         )
 
         self.assertIsInstance(
@@ -816,6 +957,86 @@ class HumanReviewServiceTests(unittest.TestCase):
         decision = self.repository.decide_human_review.call_args.kwargs
         self.assertEqual(decision["correction_type"], "upload_document")
         self.assertIsNone(decision["target_document_id"])
+
+    def test_free_text_requests_map_to_one_allowlisted_action(self) -> None:
+        cases = [
+            ("Please upload the correct policy document.", "upload_document"),
+            ("Please upload the police report.", "upload_document"),
+            ("Please upload a clearer vehicle photo.", "upload_document"),
+            ("Please provide the correct policy number.", "text"),
+        ]
+        for instruction, expected_type in cases:
+            with self.subTest(instruction=instruction):
+                self.repository.reset_mock()
+                pending = record()
+                decided = pending.model_copy(update={
+                    "status": "correction_requested",
+                    "correction_type": expected_type,
+                })
+                self.repository.get_human_review_by_token_hash.return_value = pending
+                self.repository.get_claim.return_value = {
+                    "claim_id": CLAIM_ID,
+                    "status": "human_review_required",
+                    "current_human_review_id": REVIEW_ID,
+                }
+                self.repository.decide_human_review.return_value = (decided, False)
+
+                self.service.request_correction(
+                    "secure-token",
+                    HumanReviewDecisionRequest(decision_note=instruction),
+                )
+
+                call = self.repository.decide_human_review.call_args.kwargs
+                self.assertEqual(call["correction_type"], expected_type)
+                self.assertEqual(call["requested_evidence"], [])
+                self.assertIsNone(call["target_document_id"])
+
+    def test_vague_free_text_keeps_review_pending(self) -> None:
+        self.repository.get_human_review_by_token_hash.return_value = record()
+        with self.assertRaisesRegex(HumanReviewConflictError, "specific supported"):
+            self.service.request_correction(
+                "secure-token",
+                HumanReviewDecisionRequest(
+                    decision_note="I need something else about the vehicle."
+                ),
+            )
+        self.repository.decide_human_review.assert_not_called()
+
+    def test_manual_handling_is_durable_and_publishes_distinct_event(self) -> None:
+        pending = record()
+        decided = pending.model_copy(update={
+            "status": "manual_handling",
+            "decision_event_id": f"{CLAIM_ID}:{REVIEW_ID}:manual_handling:v1",
+            "decision_publish_status": "pending",
+        })
+        self.repository.get_human_review_by_token_hash.return_value = pending
+        self.repository.decide_human_review.return_value = (decided, False)
+
+        result = self.service.continue_manual_handling(
+            "secure-token", HumanReviewDecisionRequest()
+        )
+
+        self.assertEqual(result.status, "manual_handling")
+        self.assertIsInstance(
+            self.publisher.publish.call_args.args[0],
+            ClaimHumanReviewManualHandlingEvent,
+        )
+
+    def test_duplicate_manual_handling_is_idempotent(self) -> None:
+        decided = record(
+            status="manual_handling",
+            decision_event_id=f"{CLAIM_ID}:{REVIEW_ID}:manual_handling:v1",
+            decision_publish_status="published",
+        )
+        self.repository.get_human_review_by_token_hash.return_value = decided
+        self.repository.decide_human_review.return_value = (decided, True)
+
+        result = self.service.continue_manual_handling(
+            "secure-token", HumanReviewDecisionRequest()
+        )
+
+        self.assertTrue(result.duplicate)
+        self.publisher.publish.assert_not_called()
 
     def test_stale_inspection_decision_generation_cannot_mutate_claim(self) -> None:
         self.repository.get_human_review_by_token_hash.return_value = record()
@@ -892,6 +1113,110 @@ class HumanReviewResumeWorkflowTests(unittest.TestCase):
         call = self.repository.complete_human_review_resume.call_args.kwargs
         self.assertEqual(call["claim_id"], CLAIM_ID)
         self.assertEqual(call["conflicts"], [])
+
+    def test_adjuster_prose_builds_one_typed_claimant_action(self) -> None:
+        cases = [
+            ("Please upload the correct policy document.", "upload_document", "policy_document"),
+            ("Please upload the police report.", "upload_document", "police_report"),
+            ("Please upload a clearer vehicle photo.", "upload_document", "damage_evidence"),
+            ("Please provide the correct policy number.", "enter_text", "policy_number"),
+        ]
+        for instruction, action_type, value in cases:
+            with self.subTest(instruction=instruction):
+                self.repository.reset_mock()
+                self.repository.get_claim.return_value = {
+                    "claim_id": CLAIM_ID,
+                    "status": "human_review_required",
+                    "current_human_review_id": REVIEW_ID,
+                    "conflicts": [],
+                    "missing_documents": [],
+                    "unusable_evidence": [],
+                }
+                self.repository.get_human_review.return_value = record(
+                    status="correction_requested",
+                    correction_type=(
+                        "upload_document" if action_type == "upload_document" else "text"
+                    ),
+                    decision_note=instruction,
+                )
+
+                self.workflow.request_correction(CLAIM_ID, REVIEW_ID, "corr")
+
+                actions = self.repository.complete_human_review_resume.call_args.kwargs[
+                    "requested_actions"
+                ]
+                self.assertEqual(len(actions), 1)
+                self.assertEqual(actions[0]["action_type"], action_type)
+                self.assertEqual(
+                    actions[0][
+                        "document_type" if action_type == "upload_document" else "field_name"
+                    ],
+                    value,
+                )
+                self.assertIsNone(actions[0].get("replaces_document_id"))
+
+    def test_manual_handling_keeps_claim_manual_without_remediation(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "human_review_required",
+            "current_human_review_id": REVIEW_ID,
+        }
+        self.repository.get_human_review.return_value = record(
+            status="manual_handling"
+        )
+
+        result = self.workflow.continue_manual_handling(
+            CLAIM_ID, REVIEW_ID, "corr"
+        )
+
+        self.assertEqual(result["final_status"], "human_review_required")
+        self.repository.complete_manual_human_review.assert_called_once_with(
+            claim_id=CLAIM_ID,
+            review_id=REVIEW_ID,
+            correlation_id="corr",
+        )
+        self.repository.complete_human_review_resume.assert_not_called()
+
+    def test_multiple_adjuster_evidence_items_become_distinct_actions(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "human_review_required",
+            "current_human_review_id": REVIEW_ID,
+            "conflicts": [], "missing_documents": [], "unusable_evidence": [],
+        }
+        self.repository.get_human_review.return_value = record(
+            status="correction_requested",
+            correction_type="upload_document",
+            requested_evidence=[
+                HumanReviewEvidenceRequest(
+                    document_type="policy_document",
+                    instruction="Please upload the correct policy document.",
+                    replaces_document_id="DOC-POLICY",
+                ),
+                HumanReviewEvidenceRequest(
+                    document_type="police_report",
+                    instruction="Please upload the correct police report.",
+                ),
+            ],
+        )
+
+        result = self.workflow.request_correction(CLAIM_ID, REVIEW_ID, "corr")
+
+        call = self.repository.complete_human_review_resume.call_args.kwargs
+        self.assertEqual(result["final_status"], "awaiting_documents")
+        self.assertEqual(
+            [item["document_type"] for item in call["requested_actions"]],
+            ["policy_document", "police_report"],
+        )
+        self.assertEqual(
+            [item["replaces_document_id"] for item in call["requested_actions"]],
+            ["DOC-POLICY", None],
+        )
+        self.assertEqual(len({item["action_id"] for item in call["requested_actions"]}), 2)
+        self.assertEqual(
+            [item["type"] for item in call["missing_documents"]],
+            ["policy_document", "police_report"],
+        )
 
     def test_approval_does_not_bypass_unresolved_missing_requirements(self) -> None:
         self.repository.get_claim.return_value = {
@@ -1088,6 +1413,15 @@ class HumanReviewApiTests(unittest.TestCase):
             event_id="approve-event",
             message="Review approved.",
         )
+        self.review_service.continue_manual_handling.return_value = (
+            HumanReviewDecisionResponse(
+                review_id=REVIEW_ID,
+                claim_id=CLAIM_ID,
+                status="manual_handling",
+                event_id="manual-event",
+                message="Manual handling recorded.",
+            )
+        )
 
         headers = {"X-Review-Token": "secure-review-token-123"}
         self.assertEqual(
@@ -1097,6 +1431,12 @@ class HumanReviewApiTests(unittest.TestCase):
         self.assertEqual(
             self.client.post(
                 "/api/reviews/current/approve", json={}, headers=headers
+            ).status_code,
+            202,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/reviews/current/manual-handling", json={}, headers=headers
             ).status_code,
             202,
         )

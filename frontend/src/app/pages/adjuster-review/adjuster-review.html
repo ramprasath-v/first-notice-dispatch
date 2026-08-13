@@ -66,7 +66,7 @@
             <h3>Evidence sources</h3>
             <ul>
               @for (source of item.source_references ?? []; track source.filename) {
-                <li>{{ source.filename }} · {{ humanize(source.document_type) }}</li>
+                <li>{{ source.filename }}</li>
               }
             </ul>
           }
@@ -77,11 +77,12 @@
         <div class="alert success-alert" role="status">{{ completedMessage() }}</div>
       } @else {
         @if (requestInfoOpen()) {
-          <label class="field more-info-field">
-            <span>What additional information do you need?</span>
-            <textarea [(ngModel)]="decisionNote" rows="3" maxlength="1000"
-              placeholder="Please upload a clearer photo of the passenger-side rear damage."></textarea>
-          </label>
+          <section class="more-info-field">
+            <label class="field"><span>What additional information do you need?</span>
+              <textarea [(ngModel)]="decisionNote" rows="4" maxlength="500"
+                placeholder="Please upload a clearer vehicle photo."></textarea>
+            </label>
+          </section>
         }
         <p class="kicker decision-kicker">Decision</p>
         <div class="actions">
@@ -90,6 +91,9 @@
             (click)="requestMoreInformation()">
             {{ requestInfoOpen() ? 'Send Request' : 'Request More Info' }}
           </button>
+          @if (review()?.checkpoint_status === 'human_review_required') {
+            <button class="secondary" type="button" [disabled]="deciding()" (click)="continueManualReview()">Continue Manual Handling</button>
+          }
           <button class="primary" type="button" [disabled]="deciding()" (click)="approve()">
             {{ deciding() ? 'Recording…' : 'Approve Inspection' }}
           </button>

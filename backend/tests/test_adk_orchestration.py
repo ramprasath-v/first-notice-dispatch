@@ -17,6 +17,7 @@ from app.models.adk_orchestration import ClaimStateResult, EvidenceInput
 from app.models.claim_document import ClaimDocument
 from app.models.intake_result import (
     EvidenceArtifactClassification,
+    EvidenceArtifactFacts,
     ImageEvidenceCapabilities,
     IntakeResult,
 )
@@ -334,7 +335,71 @@ class AdkToolAdapterTests(unittest.TestCase):
                     "damage_evidence", "vehicle_identity", "license_plate_photo"
                 ],
             )],
+            "evidence_artifact_facts": [
+                EvidenceArtifactFacts(
+                    source="policy-card.pdf",
+                    policy_number="POL-12345",
+                    vehicle_identity="2024 Example Sedan",
+                    vehicle_make="Example",
+                    vehicle_model="Sedan",
+                    vehicle_year="2024",
+                ),
+                EvidenceArtifactFacts(
+                    source="official-report.pdf",
+                    vehicle_identity="2024 Example Sedan",
+                    vehicle_make="Example",
+                    vehicle_model="Sedan",
+                    incident_date="2026-08-01",
+                ),
+                EvidenceArtifactFacts(
+                    source="vehicle-damage.jpg",
+                    license_plate="ABC123",
+                    damage_location="rear",
+                ),
+            ],
         })
+        expected_evidence_updates = {
+            "DOC-DAMAGE": {
+                "evidence_facts": {
+                    "license_plate": "ABC123",
+                    "damage_location": "rear",
+                },
+                "evidence_findings": [
+                    "damage_location: rear",
+                    "license_plate: ABC123",
+                ],
+            },
+            "DOC-PDF-REPORT": {
+                "evidence_facts": {
+                    "vehicle_identity": "2024 Example Sedan",
+                    "vehicle_make": "Example",
+                    "vehicle_model": "Sedan",
+                    "incident_date": "2026-08-01",
+                },
+                "evidence_findings": [
+                    "incident_date: 2026-08-01",
+                    "vehicle_identity: 2024 Example Sedan",
+                    "vehicle_make: Example",
+                    "vehicle_model: Sedan",
+                ],
+            },
+            "DOC-POLICY": {
+                "evidence_facts": {
+                    "policy_number": "POL-12345",
+                    "vehicle_identity": "2024 Example Sedan",
+                    "vehicle_make": "Example",
+                    "vehicle_model": "Sedan",
+                    "vehicle_year": "2024",
+                },
+                "evidence_findings": [
+                    "policy_number: POL-12345",
+                    "vehicle_identity: 2024 Example Sedan",
+                    "vehicle_make: Example",
+                    "vehicle_model: Sedan",
+                    "vehicle_year: 2024",
+                ],
+            },
+        }
         self.repository.get_documents.return_value = documents
         self.repository.get_claim.return_value = {
             "claim_id": "CLM-ADK00001",
@@ -353,6 +418,7 @@ class AdkToolAdapterTests(unittest.TestCase):
                 "DOC-DAMAGE": "damage_evidence",
                 "DOC-POLICY": "policy_document",
             },
+            document_evidence_updates=expected_evidence_updates,
         )
         self.assertEqual(state.status, "intake_complete")
         authoritative_types = {
@@ -366,7 +432,10 @@ class AdkToolAdapterTests(unittest.TestCase):
             result,
             [
                 item.model_copy(
-                    update={"document_type": authoritative_types[item.document_id]}
+                    update={
+                        "document_type": authoritative_types[item.document_id],
+                        **expected_evidence_updates.get(item.document_id, {}),
+                    }
                 )
                 for item in documents
             ],
@@ -388,6 +457,18 @@ class AdkToolAdapterTests(unittest.TestCase):
                 if item.filename == "policy-card.pdf"
             },
         )
+        policy_evidence = next(
+            item
+            for item in review_metadata.uploaded_evidence
+            if item.filename == "policy-card.pdf"
+        )
+        self.assertIn("vehicle_identity: 2024 Example Sedan", policy_evidence.evidence_findings)
+        image_evidence = next(
+            item
+            for item in review_metadata.uploaded_evidence
+            if item.filename == "vehicle-damage.jpg"
+        )
+        self.assertNotIn("policy_number: POL-12345", image_evidence.evidence_findings)
 
     def test_review_adapter_calls_existing_review_service(self) -> None:
         initial_claim = {

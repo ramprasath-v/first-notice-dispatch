@@ -429,6 +429,45 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
             "replacement-event",
         )
 
+    def test_requested_action_carries_policy_replacement_target(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+        }
+        action = UploadDocumentRequestedAction(
+            action_id="ACT-POLICY-REPLACE",
+            review_id="AUTONOMOUS-POLICY",
+            document_type="policy_document",
+            instruction="Upload the correct policy document.",
+            replaces_document_id="DOC-OLD-POLICY",
+        )
+        self.repository.reserve_replacement_upload.return_value = (
+            ReplacementUploadReservation(
+                action=action,
+                document_id="DOC-NEW-POLICY",
+                event_id="policy-replacement-event",
+                correlation_id="policy-replacement-correlation",
+                status="uploading",
+                should_upload=True,
+            )
+        )
+
+        self.service.add_missing_document(
+            claim_id=CLAIM_ID,
+            document_type="ignored_by_server",
+            requested_action_id="ACT-POLICY-REPLACE",
+            idempotency_key="policy-replacement-key",
+            evidence=evidence(
+                filename="correct-policy.pdf",
+                content_type="application/pdf",
+            ),
+        )
+
+        document = self.repository.add_document.call_args.args[0]
+        self.assertEqual(document.document_type, "policy_document")
+        self.assertEqual(document.requested_action_id, "ACT-POLICY-REPLACE")
+        self.assertEqual(document.replaces_document_id, "DOC-OLD-POLICY")
+
     def test_duplicate_replacement_upload_returns_same_effective_document(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,
@@ -538,6 +577,22 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
             response.action_display.title, "Vehicle identity not verified"
         )
         self.assertIn("readable license plate", response.action_display.explanation)
+
+    def test_get_claim_exposes_durable_manual_handling_state(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "human_review_required",
+            "manual_handling": True,
+            "missing_documents": [],
+            "unusable_evidence": [],
+            "updated_at": NOW,
+        }
+        self.repository.get_scheduled_appointment.return_value = None
+
+        response = self.service.get_claim(CLAIM_ID)
+
+        self.assertTrue(response.manual_handling)
+        self.assertEqual(response.requested_actions, [])
 
     def test_get_claim_exposes_one_upload_action_for_flow_3_remediation(self) -> None:
         self.repository.get_claim.return_value = {
@@ -732,6 +787,39 @@ class ClaimantApiEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["document_id"], DOCUMENT_ID)
+
+    def test_batch_evidence_upload_preserves_action_to_file_association(self) -> None:
+        self.service.add_missing_document.side_effect = [
+            DocumentAcceptedResponse(
+                claim_id=CLAIM_ID, document_id="DOC-POLICY",
+                status="received", event_id="event-policy",
+            ),
+            DocumentAcceptedResponse(
+                claim_id=CLAIM_ID, document_id="DOC-REPORT",
+                status="received", event_id="event-report",
+            ),
+        ]
+
+        response = self.client.post(
+            f"/claims/{CLAIM_ID}/documents/batch",
+            files=[
+                ("document_types", (None, "policy_document")),
+                ("document_types", (None, "police_report")),
+                ("requested_action_ids", (None, "ACT-POLICY")),
+                ("requested_action_ids", (None, "ACT-REPORT")),
+                ("idempotency_keys", (None, "policy-upload-key")),
+                ("idempotency_keys", (None, "report-upload-key")),
+                ("files", ("policy.pdf", b"policy", "application/pdf")),
+                ("files", ("report.pdf", b"report", "application/pdf")),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 202)
+        calls = self.service.add_missing_document.call_args_list
+        self.assertEqual(calls[0].kwargs["requested_action_id"], "ACT-POLICY")
+        self.assertEqual(calls[1].kwargs["requested_action_id"], "ACT-REPORT")
+        self.assertEqual(calls[0].kwargs["evidence"].filename, "policy.pdf")
+        self.assertEqual(calls[1].kwargs["evidence"].filename, "report.pdf")
 
     def test_replacement_upload_contract_forwards_action_and_idempotency_only(self) -> None:
         self.service.add_missing_document.return_value = DocumentAcceptedResponse(

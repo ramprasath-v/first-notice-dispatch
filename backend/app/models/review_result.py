@@ -4,6 +4,28 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.models.requested_action import RequestedAction
 
+ReviewOutcome = Literal[
+    "resolved",
+    "claimant_remediable",
+    "ambiguous",
+    "requires_human_judgment",
+]
+AmbiguityReason = Literal[
+    "conflicting_sources_no_arbitrator",
+    "insufficient_evidence",
+    "low_quality_evidence",
+    "multiple_plausible_interpretations",
+    "attribution_uncertain",
+    "policy_or_business_judgment",
+    "other",
+]
+RecommendedNextStep = Literal[
+    "continue",
+    "request_claimant_evidence",
+    "retry_with_deeper_reasoning",
+    "human_review",
+]
+
 
 class UploadedEvidence(BaseModel):
     evidence_type: str = Field(description="Deterministic evidence category.")
@@ -71,10 +93,10 @@ class EvidenceConflict(BaseModel):
 
 
 class ConflictSourceAssertion(BaseModel):
-    field: str
-    value: str
+    field: str = Field(description="Conflict field asserted by this source.")
+    value: str = Field(description="Concise comparable value stated by this source.")
     source_identity: str
-    filename: str
+    filename: str = Field(description="Exact submitted filename for this assertion.")
     document_id: str | None = None
     document_type: str | None = None
     replaceable: bool = False
@@ -84,7 +106,10 @@ class ConflictSourceAssertion(BaseModel):
 class SourceAwareConflict(BaseModel):
     fingerprint: str
     field: str
-    assertions: list[ConflictSourceAssertion] = Field(default_factory=list)
+    assertions: list[ConflictSourceAssertion] = Field(
+        default_factory=list,
+        description="One source-aligned field/value assertion per participating file.",
+    )
     selected_outlier_document_id: str | None = None
 
 
@@ -149,6 +174,23 @@ class ReviewResult(BaseModel):
         default_factory=OperationalIndicators,
         description="Evidence-derived indicators used by deterministic routing rules.",
     )
+    review_outcome: ReviewOutcome = Field(
+        default="resolved",
+        description="Observed evidence-review resolution outcome; instrumentation only.",
+    )
+    ambiguity_reason: AmbiguityReason | None = Field(
+        default=None,
+        description="Grounded reason the review remained ambiguous, when applicable.",
+    )
+    recommended_next_step: RecommendedNextStep = Field(
+        default="continue",
+        description="Review's suggested next step; deterministic routing remains authoritative.",
+    )
+    ambiguity_summary: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Short grounded explanation of unresolved ambiguity, when applicable.",
+    )
 
     @model_validator(mode="after")
     def require_human_review_reason(self) -> "ReviewResult":
@@ -202,4 +244,8 @@ def review_result_from_claim(claim: dict[str, object]) -> ReviewResult:
         operational_indicators=OperationalIndicators.model_validate(
             claim.get("operational_indicators", {})
         ),
+        review_outcome=claim.get("review_outcome", "resolved"),
+        ambiguity_reason=claim.get("ambiguity_reason"),
+        recommended_next_step=claim.get("recommended_next_step", "continue"),
+        ambiguity_summary=claim.get("ambiguity_summary"),
     )

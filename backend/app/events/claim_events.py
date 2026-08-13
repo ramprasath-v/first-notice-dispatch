@@ -79,6 +79,11 @@ class ClaimHumanReviewCorrectionRequestedEvent(ClaimEventBase):
     payload: HumanReviewPayload
 
 
+class ClaimHumanReviewManualHandlingEvent(ClaimEventBase):
+    event_type: Literal["claim.human_review.manual_handling"]
+    payload: HumanReviewPayload
+
+
 class ClaimCorrectionReceivedEvent(ClaimEventBase):
     event_type: Literal["claim.correction.received"]
     payload: CorrectionReceivedPayload
@@ -90,6 +95,7 @@ ClaimEvent = Annotated[
     | ClaimInspectionReadyEvent
     | ClaimHumanReviewApprovedEvent
     | ClaimHumanReviewCorrectionRequestedEvent
+    | ClaimHumanReviewManualHandlingEvent
     | ClaimCorrectionReceivedEvent,
     Field(discriminator="event_type"),
 ]

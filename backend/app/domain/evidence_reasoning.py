@@ -14,7 +14,11 @@ from app.models.review_result import (
 )
 
 
-REPLACEABLE_DOCUMENT_TYPES = {"damage_evidence", "license_plate_photo"}
+REPLACEABLE_DOCUMENT_TYPES = {
+    "damage_evidence",
+    "license_plate_photo",
+    "policy_document",
+}
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,8 @@ def canonical_active_evidence(
     """Collapse per-capability metadata into stable, order-independent artifacts."""
     grouped: dict[str, dict[str, object]] = {}
     for evidence in uploaded_evidence:
+        if evidence.status == "superseded":
+            continue
         identity = evidence.source_identity or (
             f"document:{evidence.document_id}"
             if evidence.document_id
@@ -179,6 +185,7 @@ def shape_source_aware_conflicts(
     conflicts: list[EvidenceConflict],
     findings: list[CurrentEvidenceFinding],
     uploaded_evidence: list[UploadedEvidence],
+    review_conflicts: list[SourceAwareConflict] | None = None,
 ) -> list[SourceAwareConflict]:
     artifacts = canonical_active_evidence(uploaded_evidence)
     by_filename = {_normalize_text(item.filename): item for item in artifacts}
@@ -191,50 +198,198 @@ def shape_source_aware_conflicts(
     shaped: list[SourceAwareConflict] = []
     for conflict in conflicts:
         assertions: list[ConflictSourceAssertion] = []
+        review_values, _ = _review_assertion_values(
+            conflict, review_conflicts or []
+        )
         aligned_values = (
             conflict.values if len(conflict.values) == len(conflict.sources) else []
         )
-        for index, raw_source in enumerate(conflict.sources):
-            source_key = _normalize_text(raw_source)
-            artifact = by_filename.get(source_key)
+        seeded_values = review_values or {
+            _normalize_text(source): value
+            for source, raw_value in zip(conflict.sources, aligned_values)
+            if (value := _normalize_assertion(conflict.field, raw_value)) is not None
+        }
+        candidate_values = set(seeded_values.values())
+        for artifact in artifacts:
+            source_key = _normalize_text(artifact.filename)
             source_findings = list(findings_by_source.get(source_key, []))
-            if artifact is not None:
-                source_findings.extend(artifact.findings)
-            value = _assertion_value(conflict.field, source_findings)
-            if value is None and aligned_values:
-                value = _normalize_assertion(conflict.field, aligned_values[index])
+            source_findings.extend(artifact.findings)
+            value = seeded_values.get(source_key) or _candidate_assertion_value(
+                conflict.field, source_findings, candidate_values
+            )
             if value is None:
                 continue
-            identity = (
-                artifact.source_identity
-                if artifact is not None
-                else f"source:{source_key}"
-            )
             assertions.append(
                 ConflictSourceAssertion(
                     field=conflict.field,
                     value=value,
-                    source_identity=identity,
-                    filename=artifact.filename if artifact else raw_source,
-                    document_id=artifact.document_id if artifact else None,
-                    document_type=artifact.document_type if artifact else None,
-                    replaceable=artifact.replaceable if artifact else False,
-                    evidence_generation=(
-                        artifact.evidence_generation if artifact else None
-                    ),
+                    source_identity=artifact.source_identity,
+                    filename=artifact.filename,
+                    document_id=artifact.document_id,
+                    document_type=artifact.document_type,
+                    replaceable=artifact.replaceable,
+                    evidence_generation=artifact.evidence_generation,
                 )
             )
         assertions = _deduplicate_assertions(assertions)
+        selected_outlier = _safe_outlier(assertions)
+        comparable_fields = _comparable_fields(conflict.field)
+        prefer_atomic_vehicle_facts = (
+            _canonical_issue_field(conflict.field) == "vehicle_identity"
+        )
+        if selected_outlier is None or prefer_atomic_vehicle_facts:
+            comparable_selected: str | None = None
+            comparable_selected_assertions: list[ConflictSourceAssertion] = []
+            has_comparable_assertions = False
+            conflicting_candidates = False
+            for comparable_field in comparable_fields:
+                comparable_assertions = _persisted_assertions(
+                    comparable_field, artifacts, findings_by_source
+                )
+                has_comparable_assertions = (
+                    has_comparable_assertions or bool(comparable_assertions)
+                )
+                candidate = _safe_outlier(comparable_assertions)
+                if candidate is None:
+                    continue
+                if (
+                    comparable_selected is not None
+                    and comparable_selected != candidate
+                ):
+                    conflicting_candidates = True
+                    break
+                comparable_selected = candidate
+                comparable_selected_assertions = comparable_assertions
+            if prefer_atomic_vehicle_facts and has_comparable_assertions:
+                selected_outlier = (
+                    None if conflicting_candidates else comparable_selected
+                )
+                if comparable_selected_assertions:
+                    assertions = comparable_selected_assertions
+            elif selected_outlier is None and not conflicting_candidates:
+                selected_outlier = comparable_selected
+                if comparable_selected_assertions:
+                    assertions = comparable_selected_assertions
         fingerprint = conflict_fingerprint(conflict, assertions, by_filename)
         shaped.append(
             SourceAwareConflict(
                 fingerprint=fingerprint,
                 field=conflict.field,
                 assertions=assertions,
-                selected_outlier_document_id=_safe_outlier(assertions),
+                selected_outlier_document_id=selected_outlier,
             )
         )
     return shaped
+
+
+def _comparable_fields(field: str) -> tuple[str, ...]:
+    canonical_field = _canonical_issue_field(field)
+    vehicle_identity_fields = (
+        "vin",
+        "license_plate",
+        "vehicle_make_model",
+        "vehicle_year",
+    )
+    if canonical_field == "vehicle_identity":
+        return vehicle_identity_fields
+    if canonical_field == "vehicle_evidence_disagreement":
+        return (*vehicle_identity_fields, "damage_location")
+    return ()
+
+
+def _persisted_assertions(
+    field: str,
+    artifacts: list[CanonicalEvidenceArtifact],
+    findings_by_source: dict[str, list[str]],
+) -> list[ConflictSourceAssertion]:
+    assertions = []
+    for artifact in artifacts:
+        findings = [
+            *findings_by_source.get(_normalize_text(artifact.filename), []),
+            *artifact.findings,
+        ]
+        value = _assertion_value(field, findings)
+        if value is None:
+            continue
+        assertions.append(ConflictSourceAssertion(
+            field=field,
+            value=value,
+            source_identity=artifact.source_identity,
+            filename=artifact.filename,
+            document_id=artifact.document_id,
+            document_type=artifact.document_type,
+            replaceable=artifact.replaceable,
+            evidence_generation=artifact.evidence_generation,
+        ))
+    return _deduplicate_assertions(assertions)
+
+
+def _candidate_assertion_value(
+    field: str,
+    findings: list[str],
+    candidate_values: set[str],
+) -> str | None:
+    """Ground one known comparable value in persisted findings, if unambiguous."""
+    if not candidate_values:
+        return _assertion_value(field, findings)
+    comparable_findings = [_comparable_text(finding) for finding in findings]
+    matches = {
+        candidate
+        for candidate in candidate_values
+        if _comparable_text(candidate)
+        and any(
+            f" {_comparable_text(candidate)} " in f" {finding} "
+            for finding in comparable_findings
+        )
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _comparable_text(value: str) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", value.casefold()).split())
+
+
+def _review_assertion_values(
+    conflict: EvidenceConflict,
+    review_conflicts: list[SourceAwareConflict],
+) -> tuple[dict[str, str] | None, bool]:
+    """Return untrusted Review values keyed by grounded source filename."""
+    expected_sources = {_normalize_text(source) for source in conflict.sources}
+    candidates = [
+        item
+        for item in review_conflicts
+        if item.field == conflict.field
+        and any(
+            _normalize_text(assertion.filename) in expected_sources
+            for assertion in item.assertions
+        )
+    ]
+    if not candidates:
+        return None, False
+    candidate = max(
+        candidates,
+        key=lambda item: len(
+            {
+                _normalize_text(assertion.filename)
+                for assertion in item.assertions
+                if _normalize_text(assertion.filename) in expected_sources
+            }
+        ),
+    )
+    values_by_source: dict[str, set[str]] = {}
+    for assertion in candidate.assertions:
+        source = _normalize_text(assertion.filename)
+        if assertion.field != conflict.field or source not in expected_sources:
+            continue
+        value = _normalize_assertion(conflict.field, assertion.value)
+        if value is not None:
+            values_by_source.setdefault(source, set()).add(value)
+    values = {
+        source: next(iter(source_values))
+        for source, source_values in values_by_source.items()
+        if len(source_values) == 1
+    }
+    return values, set(values) == expected_sources
 
 
 def fingerprint_uncertainties(
@@ -411,12 +566,52 @@ def _safe_outlier(assertions: list[ConflictSourceAssertion]) -> str | None:
 
 
 def _assertion_value(field: str, findings: list[str]) -> str | None:
+    if field == "vehicle_make_model":
+        _, vehicle_make = _canonical_assertion_value("vehicle_make", findings)
+        _, vehicle_model = _canonical_assertion_value("vehicle_model", findings)
+        if vehicle_make is None or vehicle_model is None:
+            return None
+        return f"{vehicle_make} {vehicle_model}"
+
+    canonical_finding_present, canonical_value = _canonical_assertion_value(
+        field, findings
+    )
+    if field in {
+        "vehicle_make",
+        "vehicle_model",
+        "vehicle_year",
+        "license_plate",
+        "vin",
+    }:
+        return canonical_value
+    if canonical_finding_present:
+        return canonical_value
+
     values = {
         value
         for finding in findings
         if (value := _normalize_assertion(field, finding)) is not None
     }
     return next(iter(values)) if len(values) == 1 else None
+
+
+def _canonical_assertion_value(
+    field: str, findings: list[str]
+) -> tuple[bool, str | None]:
+    canonical_values: set[str] = set()
+    canonical_finding_present = False
+    for finding in findings:
+        finding_field, separator, raw_value = finding.partition(":")
+        if not separator or finding_field.strip().casefold() != field.casefold():
+            continue
+        canonical_finding_present = True
+        value = _normalize_assertion(field, raw_value)
+        if value is not None:
+            canonical_values.add(value)
+    return (
+        canonical_finding_present,
+        next(iter(canonical_values)) if len(canonical_values) == 1 else None,
+    )
 
 
 def _assertions_for_sources(

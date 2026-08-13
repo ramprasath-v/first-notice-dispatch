@@ -21,6 +21,9 @@ from app.events.claim_event_handler import (
 )
 from app.integrations.gmail_service import GmailError
 from app.services.claim_review_service import ClaimReviewError
+from app.services.document_extraction_service import (
+    UnsupportedResumeDocumentTypeError,
+)
 from app.events.claim_events import (
     CLAIM_EVENT_ADAPTER,
     ClaimCorrectionReceivedEvent,
@@ -97,6 +100,23 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.repository.complete_claim_event.assert_called_once()
         self.assertEqual(result.outcome, "processed")
 
+    async def test_transient_submitted_failure_retries_and_completes_once(self) -> None:
+        self.repository.begin_claim_event.side_effect = [True, True]
+        self.coordinator.process_submitted_claim.side_effect = [
+            RuntimeError("502 Bad Gateway"),
+            {"kind": "review_completed"},
+        ]
+
+        with self.assertRaises(ClaimEventProcessingError) as raised:
+            await self.handler.handle(submitted_event())
+        result = await self.handler.handle(submitted_event())
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(result.outcome, "processed")
+        self.assertEqual(self.coordinator.process_submitted_claim.await_count, 2)
+        self.repository.fail_claim_event.assert_called_once()
+        self.repository.complete_claim_event.assert_called_once()
+
     async def test_document_received_routes_to_resume_workflow(self) -> None:
         document = MagicMock(document_id="DOC-5678")
         self.repository.get_document.return_value = document
@@ -133,6 +153,29 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(raised.exception.retryable)
         self.assertEqual(raised.exception.stage, "business_event_route")
         self.repository.complete_claim_event.assert_not_called()
+
+    async def test_unsupported_resume_document_type_is_non_retryable(self) -> None:
+        document = MagicMock(document_id="DOC-5678")
+        self.repository.get_document.return_value = document
+        self.resume.resume.side_effect = UnsupportedResumeDocumentTypeError(
+            "Unsupported resume document type: unknown_artifact"
+        )
+        event = ClaimDocumentReceivedEvent(
+            event_id=EVENT_ID,
+            event_type="claim.document.received",
+            claim_id=CLAIM_ID,
+            payload=DocumentReceivedPayload(document_id="DOC-5678"),
+        )
+
+        with self.assertRaises(ClaimEventProcessingError) as raised:
+            await self.handler.handle(event)
+
+        self.assertFalse(raised.exception.retryable)
+        failure = self.repository.fail_claim_event.call_args.kwargs
+        self.assertEqual(
+            failure["error_type"], "UnsupportedResumeDocumentTypeError"
+        )
+        self.assertFalse(failure["retryable"])
 
     async def test_submitted_claim_publishes_inspection_ready_after_transition(self) -> None:
         self.repository.get_claim.side_effect = [
@@ -178,7 +221,7 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.publisher.publish.assert_not_called()
         self.human_review_service.ensure_review_requested.assert_not_called()
 
-    async def test_human_review_does_not_publish_inspection_ready(self) -> None:
+    async def test_human_review_requests_adjuster_without_inspection_dispatch(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,
             "status": "human_review_required",
@@ -187,7 +230,9 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         await self.handler.handle(submitted_event())
 
         self.publisher.publish.assert_not_called()
-        self.human_review_service.ensure_review_requested.assert_not_called()
+        self.human_review_service.ensure_review_requested.assert_called_once_with(
+            CLAIM_ID, correlation_id="corr-123"
+        )
 
     async def test_inspection_ready_requests_decision_without_dispatch(self) -> None:
         self.repository.get_claim.return_value = {
