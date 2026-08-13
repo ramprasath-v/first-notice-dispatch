@@ -1782,6 +1782,87 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertEqual(review.requested_actions, [])
         self.assertTrue(review.requires_human_review)
 
+    def test_partial_atomic_vehicle_facts_create_targeted_composite_replacement(
+        self,
+    ) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type=document_type,
+                filename=filename,
+                document_id=document_id,
+                source_identity=f"document:{document_id}",
+                document_type=document_type,
+                status=status,
+                usable=usable,
+                evidence_findings=findings,
+            )
+            for document_type, filename, document_id, status, usable, findings in (
+                (
+                    "policy_document", "insurance2.pdf", "DOC-POLICY",
+                    "received", None,
+                    [
+                        "vehicle_identity: 2014 Toyota Corolla (Dark Grey)",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "vehicle_year: 2014", "license_plate: 7ABX123",
+                    ],
+                ),
+                (
+                    "police_report", "policeReport2.pdf", "DOC-REPORT",
+                    "received", None,
+                    [
+                        "vehicle_identity: 2014 Toyota Corolla (Dark Grey)",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "vehicle_year: 2014", "license_plate: 7ABX123",
+                    ],
+                ),
+                (
+                    "license_plate_photo", "image3.jpg", "DOC-WRONG",
+                    "unusable", False,
+                    ["vehicle_identity: Honda SUV", "vehicle_make: Honda"],
+                ),
+                (
+                    "license_plate_photo", "imageL2.png", "DOC-CORRECT",
+                    "validated", True,
+                    [
+                        "vehicle_identity: Toyota Corolla",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "license_plate: 7ABX123",
+                    ],
+                ),
+            )
+        ]
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Honda SUV", "2014 Toyota Corolla (Dark Grey)"],
+            sources=["image3.jpg", "insurance2.pdf"],
+            reason="The submitted sources identify different vehicles.",
+        )
+
+        review = self.run_review(
+            metadata=complete_metadata(
+                uploaded_evidence=uploaded,
+                vehicle_identity_clear=True,
+            ),
+            model_review=ai_review(
+                intake_complete=False,
+                conflicts=[conflict],
+                review_outcome="requires_human_judgment",
+                ambiguity_reason="multiple_plausible_interpretations",
+                recommended_next_step="human_review",
+                ambiguity_summary="The submitted images appear inconsistent.",
+            ),
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertEqual(action.replaces_document_id, "DOC-WRONG")
+        self.assertEqual(
+            review.source_aware_conflicts[0].selected_outlier_document_id,
+            "DOC-WRONG",
+        )
+
     def test_source_aligned_three_way_conflict_does_not_guess(self) -> None:
         metadata = complete_metadata(
             vehicle_identity_clear=True,

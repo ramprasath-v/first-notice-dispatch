@@ -240,15 +240,25 @@ def shape_source_aware_conflicts(
         if selected_outlier is None or prefer_atomic_vehicle_facts:
             comparable_selected: str | None = None
             comparable_selected_assertions: list[ConflictSourceAssertion] = []
-            has_comparable_assertions = False
+            complete_comparable_assertions: list[ConflictSourceAssertion] = []
             conflicting_candidates = False
+            composite_sources = {
+                assertion.source_identity for assertion in assertions
+            }
             for comparable_field in comparable_fields:
                 comparable_assertions = _persisted_assertions(
                     comparable_field, artifacts, findings_by_source
                 )
-                has_comparable_assertions = (
-                    has_comparable_assertions or bool(comparable_assertions)
-                )
+                comparable_sources = {
+                    assertion.source_identity
+                    for assertion in comparable_assertions
+                }
+                if (
+                    composite_sources
+                    and composite_sources <= comparable_sources
+                    and not complete_comparable_assertions
+                ):
+                    complete_comparable_assertions = comparable_assertions
                 candidate = _safe_outlier(comparable_assertions)
                 if candidate is None:
                     continue
@@ -260,12 +270,15 @@ def shape_source_aware_conflicts(
                     break
                 comparable_selected = candidate
                 comparable_selected_assertions = comparable_assertions
-            if prefer_atomic_vehicle_facts and has_comparable_assertions:
-                selected_outlier = (
-                    None if conflicting_candidates else comparable_selected
-                )
+            if prefer_atomic_vehicle_facts and conflicting_candidates:
+                selected_outlier = None
+            elif prefer_atomic_vehicle_facts and comparable_selected is not None:
+                selected_outlier = comparable_selected
                 if comparable_selected_assertions:
                     assertions = comparable_selected_assertions
+            elif prefer_atomic_vehicle_facts and complete_comparable_assertions:
+                selected_outlier = None
+                assertions = complete_comparable_assertions
             elif selected_outlier is None and not conflicting_candidates:
                 selected_outlier = comparable_selected
                 if comparable_selected_assertions:

@@ -81,6 +81,147 @@ CONFLICT = EvidenceConflict(
 
 
 class EvidenceReasoningTests(unittest.TestCase):
+    def test_partial_atomic_facts_preserve_safe_composite_vehicle_outlier(
+        self,
+    ) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type=document_type,
+                filename=filename,
+                document_id=document_id,
+                source_identity=f"document:{document_id}",
+                document_type=document_type,
+                evidence_findings=findings,
+            )
+            for document_type, filename, document_id, findings in (
+                (
+                    "policy_document", "insurance2.pdf", "DOC-POLICY",
+                    [
+                        "vehicle_identity: 2014 Toyota Corolla (Dark Grey)",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "vehicle_year: 2014", "license_plate: 7ABX123",
+                    ],
+                ),
+                (
+                    "police_report", "policeReport2.pdf", "DOC-REPORT",
+                    [
+                        "vehicle_identity: 2014 Toyota Corolla (Dark Grey)",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "vehicle_year: 2014", "license_plate: 7ABX123",
+                    ],
+                ),
+                (
+                    "license_plate_photo", "image3.jpg", "DOC-WRONG",
+                    ["vehicle_identity: Honda SUV", "vehicle_make: Honda"],
+                ),
+                (
+                    "license_plate_photo", "imageL2.png", "DOC-CORRECT",
+                    [
+                        "vehicle_identity: Toyota Corolla",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "license_plate: 7ABX123",
+                    ],
+                ),
+            )
+        ]
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Honda SUV", "2014 Toyota Corolla (Dark Grey)"],
+            sources=["image3.jpg", "insurance2.pdf"],
+            reason="The submitted sources identify different vehicles.",
+        )
+
+        assessment = shape_source_aware_conflicts(
+            [conflict], [], uploaded, []
+        )[0]
+
+        self.assertEqual(
+            assessment.selected_outlier_document_id, "DOC-WRONG"
+        )
+        self.assertEqual(
+            {item.filename for item in assessment.assertions},
+            {"insurance2.pdf", "policeReport2.pdf", "image3.jpg"},
+        )
+
+    def test_complete_atomic_vehicle_disagreement_remains_authoritative(
+        self,
+    ) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type=document_type,
+                filename=filename,
+                document_id=document_id,
+                source_identity=f"document:{document_id}",
+                document_type=document_type,
+                evidence_findings=[
+                    f"vehicle_identity: {identity}", f"vin: {vin}"
+                ],
+            )
+            for document_type, filename, document_id, identity, vin in (
+                (
+                    "policy_document", "policy.pdf", "DOC-POLICY",
+                    "Honda Accord", "VIN-SAME",
+                ),
+                (
+                    "police_report", "report.pdf", "DOC-REPORT",
+                    "Toyota Corolla", "VIN-SAME",
+                ),
+                (
+                    "damage_evidence", "vehicle.png", "DOC-PHOTO",
+                    "Toyota Corolla", "VIN-DIFFERENT",
+                ),
+            )
+        ]
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Honda Accord", "Toyota Corolla"],
+            sources=["policy.pdf", "report.pdf", "vehicle.png"],
+            reason="The submitted sources identify different vehicles.",
+        )
+
+        assessment = shape_source_aware_conflicts(
+            [conflict], [], uploaded, []
+        )[0]
+
+        self.assertEqual({item.field for item in assessment.assertions}, {"vin"})
+        self.assertEqual(
+            assessment.selected_outlier_document_id, "DOC-PHOTO"
+        )
+
+    def test_incomplete_one_vs_one_vehicle_conflict_remains_ambiguous(self) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type="police_report",
+                filename="report.pdf",
+                document_id="DOC-REPORT",
+                source_identity="document:DOC-REPORT",
+                document_type="police_report",
+                evidence_findings=["vehicle_identity: Toyota Corolla"],
+            ),
+            UploadedEvidence(
+                evidence_type="license_plate_photo",
+                filename="image.jpg",
+                document_id="DOC-IMAGE",
+                source_identity="document:DOC-IMAGE",
+                document_type="license_plate_photo",
+                evidence_findings=[
+                    "vehicle_identity: Honda SUV", "vehicle_make: Honda"
+                ],
+            ),
+        ]
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Toyota Corolla", "Honda SUV"],
+            sources=["report.pdf", "image.jpg"],
+            reason="The two submitted sources identify different vehicles.",
+        )
+
+        assessment = shape_source_aware_conflicts(
+            [conflict], [], uploaded, []
+        )[0]
+
+        self.assertIsNone(assessment.selected_outlier_document_id)
+
     def test_canonical_facts_reconstruct_three_source_two_value_conflict(self) -> None:
         uploaded = [
             UploadedEvidence(
