@@ -615,9 +615,34 @@ class ClaimReviewServiceTests(unittest.TestCase):
 
         self.assertEqual(review.intake_priority, "urgent_human_review")
         self.assertTrue(review.requires_human_review)
+        self.assertTrue(review.operational_indicators.possible_injury)
         self.assertEqual(
             review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
         )
+
+    def test_positive_provider_injury_survives_summary_omission(self) -> None:
+        review = self.run_review(
+            model_review=ai_review(
+                operational_indicators=OperationalIndicators(
+                    possible_injury=True
+                )
+            )
+        )
+
+        self.assertTrue(review.operational_indicators.possible_injury)
+        self.assertTrue(review.requires_human_review)
+        self.assertEqual(review.intake_priority, "urgent_human_review")
+        self.assertEqual(
+            review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
+        )
+
+    def test_no_injury_signal_keeps_existing_routine_route(self) -> None:
+        review = self.run_review()
+
+        self.assertFalse(review.operational_indicators.possible_injury)
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.intake_priority, "routine")
+        self.assertEqual(review_target_status(review), ClaimStatus.INSPECTION_READY)
 
     def test_injury_indicator_overrides_resolvable_missing_evidence(self) -> None:
         metadata = complete_metadata(

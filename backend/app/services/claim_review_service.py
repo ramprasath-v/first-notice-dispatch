@@ -379,8 +379,10 @@ Deterministic checklist evaluations:
         )
         possible_injury = metadata.injury_mentioned or (
             indicators.possible_injury
-            and "injur" in incident_text
             and not explicitly_no_injury
+        )
+        indicators = indicators.model_copy(
+            update={"possible_injury": possible_injury}
         )
         safety_concern = metadata.safety_concern or indicators.safety_concern
         significant_damage = (

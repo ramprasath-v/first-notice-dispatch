@@ -76,6 +76,26 @@ class GeminiDocumentExtractorTests(unittest.TestCase):
 
         self.client.models.generate_content.assert_not_called()
 
+    def test_medical_document_is_received_without_content_analysis(self) -> None:
+        document = ClaimDocument(
+            document_id="DOC-MEDICAL",
+            claim_id="CLM-A1B2C3D4",
+            document_type="medical_document",
+            filename="medical-record.pdf",
+            storage_path="gs://evidence/medical-record.pdf",
+            content_type="application/pdf",
+            received_at=datetime.now(timezone.utc),
+        )
+
+        result = self.extractor.extract(document, "medical_document")
+
+        self.assertTrue(result.usable)
+        self.assertEqual(result.satisfies_requirement, "medical_document")
+        self.assertEqual(result.evidence_findings, [])
+        self.assertIsNone(result.evidence_facts)
+        self.assertEqual(result.conflicts, [])
+        self.client.models.generate_content.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

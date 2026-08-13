@@ -47,6 +47,13 @@ class HumanReviewSourceSummary(BaseModel):
     filename: str
 
 
+class HumanReviewSupportingDocument(BaseModel):
+    document_id: str
+    filename: str
+    document_type: str
+    status: str
+
+
 class HumanReviewEvidenceRequest(BaseModel):
     document_type: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
     instruction: str = Field(min_length=1, max_length=500)
@@ -108,6 +115,9 @@ class HumanReviewPublicResponse(BaseModel):
     reason: str
     briefing: HumanReviewBriefing
     source_references: list[HumanReviewSourceSummary] = Field(default_factory=list)
+    supporting_documents: list[HumanReviewSupportingDocument] = Field(
+        default_factory=list
+    )
     generation: int = Field(default=1, ge=1)
     ai_recommendation: str = "Physical inspection recommended."
     claim_snapshot: dict[str, str | bool | None] = Field(default_factory=dict)

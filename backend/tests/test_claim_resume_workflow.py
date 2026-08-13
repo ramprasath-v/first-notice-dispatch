@@ -1426,6 +1426,111 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.assertFalse(result.evidence_usable)
         self.repository.mark_document_unusable.assert_called_once()
 
+    def test_medical_attachment_preserves_injury_human_review_boundary(self) -> None:
+        self.claim.update({
+            "operational_indicators": {"possible_injury": True},
+            "missing_documents": [],
+            "requested_actions": [{
+                "action_id": "ACT-MEDICAL",
+                "action_type": "upload_document",
+                "review_id": "HRV-INJURY",
+                "document_type": "medical_document",
+                "instruction": "Please upload medical documentation.",
+                "replaces_document_id": None,
+            }],
+        })
+        medical = document(
+            document_id="DOC-MEDICAL", document_type="medical_document"
+        ).model_copy(update={
+            "filename": "medical-record.pdf",
+            "requested_action_id": "ACT-MEDICAL",
+        })
+        self.documents[medical.document_id] = medical
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="Medical documentation was received for human review.",
+            satisfies_requirement="medical_document",
+        )
+        self.review_service.review.return_value = review_result(
+            complete=False, human_review=True
+        )
+
+        result = self.workflow.resume("CLM-A1B2C3D4", medical)
+
+        metadata = self.review_service.review.call_args.args[1]
+        self.assertTrue(metadata.injury_mentioned)
+        self.assertEqual(
+            self.review_service.review.call_args.kwargs["evidence_parts"], []
+        )
+        self.assertEqual(result.final_status, "human_review_required")
+        saved = self.documents[medical.document_id]
+        self.assertEqual(saved.status, "validated")
+        self.assertEqual(saved.evidence_findings, [])
+        self.assertEqual(saved.evidence_facts, {})
+
+    def test_medical_resume_cannot_downgrade_durable_injury_signal(self) -> None:
+        self.claim.update({
+            "operational_indicators": {"possible_injury": True},
+            "missing_documents": [],
+            "requested_actions": [{
+                "action_id": "ACT-MEDICAL",
+                "action_type": "upload_document",
+                "review_id": "HRV-INJURY",
+                "document_type": "medical_document",
+                "instruction": (
+                    "Please upload medical documentation related to the "
+                    "reported injury."
+                ),
+                "replaces_document_id": None,
+            }],
+        })
+        medical = document(
+            document_id="DOC-MEDICAL", document_type="medical_document"
+        ).model_copy(update={
+            "filename": "medical-record.pdf",
+            "requested_action_id": "ACT-MEDICAL",
+        })
+        self.documents[medical.document_id] = medical
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="Medical documentation was received for human review.",
+            satisfies_requirement="medical_document",
+        )
+        provider = MagicMock(name="gemini_client")
+        provider.models.generate_content.return_value.text = ReviewResult(
+            intake_complete=True,
+            intake_priority="routine",
+            priority_reason="No urgent indicator.",
+            confidence=0.9,
+            inspection_required=True,
+            requires_human_review=False,
+            operational_indicators=OperationalIndicators(
+                possible_injury=False
+            ),
+            review_outcome="requires_human_judgment",
+            recommended_next_step="human_review",
+        ).model_dump_json()
+        self.workflow._review_service = ClaimReviewService(
+            provider, "configured-model-id"
+        )
+
+        result = self.workflow.resume("CLM-A1B2C3D4", medical)
+
+        persisted_review = self.repository.save_review_result.call_args.args[1]
+        self.assertEqual(result.final_status, "human_review_required")
+        self.assertTrue(persisted_review.operational_indicators.possible_injury)
+        self.assertTrue(persisted_review.requires_human_review)
+        self.assertEqual(
+            review_target_status(persisted_review),
+            ClaimStatus.HUMAN_REVIEW_REQUIRED,
+        )
+        self.assertEqual(
+            self.workflow._review_service._client.models.generate_content.call_count,
+            1,
+        )
+        self.assertEqual(self.documents[medical.document_id].evidence_findings, [])
+        self.assertEqual(self.documents[medical.document_id].evidence_facts, {})
+
     def test_unrelated_document_does_not_start_downstream_review(self) -> None:
         unrelated = document(document_type="repair_estimate")
 

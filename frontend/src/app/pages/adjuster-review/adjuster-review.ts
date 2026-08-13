@@ -82,6 +82,17 @@ export class AdjusterReviewPage {
       });
   }
 
+  viewSupportingDocument(documentId: string): void {
+    this.api.getHumanReviewDocument(this.token, documentId).subscribe({
+      next: (content) => {
+        const url = URL.createObjectURL(content);
+        window.open(url, '_blank', 'noopener,noreferrer');
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      },
+      error: () => this.error.set('We could not open the supporting document.'),
+    });
+  }
+
   comparisonFacts(): Array<{ source: string; finding: string }> {
     const persisted = this.review()?.evidence_comparison ?? [];
     if (persisted.length) return persisted;

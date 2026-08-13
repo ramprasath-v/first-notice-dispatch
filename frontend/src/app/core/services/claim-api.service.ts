@@ -88,6 +88,16 @@ export class ClaimApiService {
     );
   }
 
+  getHumanReviewDocument(token: string, documentId: string): Observable<Blob> {
+    return this.http.get(
+      `${this.baseUrl}/reviews/current/documents/${encodeURIComponent(documentId)}`,
+      {
+        headers: { 'X-Review-Token': token },
+        responseType: 'blob',
+      },
+    );
+  }
+
   approveHumanReview(
     token: string,
     decisionNote = '',

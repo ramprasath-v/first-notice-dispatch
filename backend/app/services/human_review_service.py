@@ -38,6 +38,7 @@ from app.models.requested_action import (
     UploadDocumentRequestedAction,
 )
 from app.services.document_extraction_service import SUPPORTED_RESUME_DOCUMENT_TYPES
+from app.services.claim_storage_service import ClaimStorageService
 from app.tools.firestore_repository import FirestoreClaimRepository
 
 
@@ -94,6 +95,7 @@ class HumanReviewService:
         publisher: ClaimEventPublisher,
         settings: HumanReviewSettings,
         gmail_sender: GmailSender | None = None,
+        storage_service: ClaimStorageService | None = None,
         recipient: str = "",
         sender: str = "",
     ) -> None:
@@ -101,6 +103,7 @@ class HumanReviewService:
         self._publisher = publisher
         self._settings = settings
         self._gmail_sender = gmail_sender
+        self._storage_service = storage_service
         self._recipient = recipient
         self._sender = sender
 
@@ -318,6 +321,17 @@ class HumanReviewService:
                 for item in review.source_references
                 if item.document_id in active_document_ids
             ],
+            "supporting_documents": [
+                {
+                    "document_id": item.document_id,
+                    "filename": item.filename,
+                    "document_type": item.document_type,
+                    "status": item.status,
+                }
+                for item in documents
+                if item.document_type == "medical_document"
+                and item.status != "superseded"
+            ],
             "checkpoint_status": claim.get("status"),
             "ai_recommendation": _inspection_recommendation(claim),
             "claim_snapshot": _inspection_claim_snapshot(claim, documents),
@@ -335,6 +349,25 @@ class HumanReviewService:
                 self._repository.get_claim_events(review.claim_id)
             ),
         })
+
+    def get_supporting_document(
+        self, token: str, document_id: str
+    ) -> tuple[bytes, str, str]:
+        review = self._review_for_token(token)
+        document = self._repository.get_document(review.claim_id, document_id)
+        if (
+            document is None
+            or document.status == "superseded"
+            or document.document_type != "medical_document"
+            or not document.object_name
+            or self._storage_service is None
+        ):
+            raise HumanReviewNotFoundError("Supporting document is unavailable.")
+        return (
+            self._storage_service.download_claim_document(document.object_name),
+            document.filename,
+            document.content_type or "application/octet-stream",
+        )
 
     def approve(
         self, token: str, request: HumanReviewDecisionRequest
@@ -768,6 +801,15 @@ def _interpret_adjuster_instruction(instruction: str) -> tuple[str, str]:
             "Request a specific supported document, vehicle photo, policy number, "
             "or incident date."
         )
+    medical_terms = (
+        "medical documentation",
+        "medical document",
+        "medical record",
+        "injury documentation",
+        "documentation related to the reported injury",
+    )
+    if any(term in normalized for term in medical_terms):
+        return "upload_document", "medical_document"
     if "policy" in normalized and "document" in normalized:
         return "upload_document", "policy_document"
     if "police" in normalized and "report" in normalized:

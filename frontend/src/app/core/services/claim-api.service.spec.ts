@@ -103,6 +103,14 @@ describe('ClaimApiService', () => {
     expect(load.request.headers.get('X-Review-Token')).toBe('token/value');
     load.flush({});
 
+    service.getHumanReviewDocument('token/value', 'DOC-MEDICAL').subscribe();
+    const document = http.expectOne(
+      'http://localhost:8080/reviews/current/documents/DOC-MEDICAL',
+    );
+    expect(document.request.headers.get('X-Review-Token')).toBe('token/value');
+    expect(document.request.responseType).toBe('blob');
+    document.flush(new Blob(['medical']));
+
     service.approveHumanReview('token/value').subscribe();
     const approve = http.expectOne('http://localhost:8080/reviews/current/approve');
     expect(approve.request.method).toBe('POST');

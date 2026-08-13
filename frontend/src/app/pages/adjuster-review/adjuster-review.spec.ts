@@ -46,6 +46,7 @@ describe('AdjusterReviewPage', () => {
     approveHumanReview: vi.fn(),
     requestHumanReviewCorrection: vi.fn(),
     continueManualHandling: vi.fn(),
+    getHumanReviewDocument: vi.fn(),
   };
 
   beforeEach(() => {
@@ -66,6 +67,7 @@ describe('AdjusterReviewPage', () => {
       event_id: 'manual-event', duplicate: false,
       message: 'Manual handling recorded. No claimant action was requested.',
     }));
+    api.getHumanReviewDocument.mockReturnValue(of(new Blob(['medical'])));
   });
 
   async function create(): Promise<ComponentFixture<AdjusterReviewPage>> {
@@ -261,6 +263,25 @@ describe('AdjusterReviewPage', () => {
     expect(cards[0].textContent).toContain('Current damage photo');
     expect(cards[0].querySelectorAll('li')).toHaveLength(2);
     expect(fixture.nativeElement.textContent.match(/Rear bumper damage is visible\./g)).toHaveLength(1);
+  });
+
+  it('shows received medical documentation as a supporting attachment', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      supporting_documents: [{
+        document_id: 'DOC-MEDICAL',
+        filename: 'medical-record.pdf',
+        document_type: 'medical_document',
+        status: 'validated',
+      }],
+    }));
+
+    const fixture = await create();
+
+    expect(fixture.nativeElement.textContent).toContain('Supporting documents');
+    expect(fixture.nativeElement.textContent).toContain('Medical documentation');
+    expect(fixture.nativeElement.textContent).toContain('medical-record.pdf');
+    expect(fixture.nativeElement.textContent).toContain('Received');
   });
 
   it('builds one group per source using case-insensitive finding deduplication', () => {

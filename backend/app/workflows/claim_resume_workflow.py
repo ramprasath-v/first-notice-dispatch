@@ -812,6 +812,13 @@ def _build_review_metadata(
 
     return ClaimEvidenceMetadata(
         uploaded_evidence=uploaded,
+        injury_mentioned=bool(
+            (
+                claim.get("operational_indicators")
+                if isinstance(claim.get("operational_indicators"), dict)
+                else {}
+            ).get("possible_injury")
+        ),
         police_attended=any(
             item.get("type") == "police_report"
             for item in claim.get("missing_documents", [])
@@ -987,7 +994,12 @@ def _build_review_evidence_parts(
 ) -> list[types.Part]:
     parts: list[types.Part] = []
     ordered = sorted(
-        (document for document in documents if document.status != "superseded"),
+        (
+            document
+            for document in documents
+            if document.status != "superseded"
+            and document.document_type != "medical_document"
+        ),
         key=lambda document: document.document_id,
     )
     for document in ordered:

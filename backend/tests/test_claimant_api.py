@@ -429,6 +429,44 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
             "replacement-event",
         )
 
+    def test_authorized_medical_requested_action_persists_attachment_type(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+        }
+        action = UploadDocumentRequestedAction(
+            action_id="ACT-MEDICAL",
+            review_id="HRV-INJURY",
+            document_type="medical_document",
+            instruction="Please upload medical documentation.",
+        )
+        self.repository.reserve_replacement_upload.return_value = (
+            ReplacementUploadReservation(
+                action=action,
+                document_id="DOC-MEDICAL",
+                event_id="medical-event",
+                correlation_id="medical-correlation",
+                status="uploading",
+                should_upload=True,
+            )
+        )
+
+        response = self.service.add_missing_document(
+            claim_id=CLAIM_ID,
+            document_type="ignored_by_server",
+            requested_action_id="ACT-MEDICAL",
+            idempotency_key="medical-upload-key",
+            evidence=evidence(
+                filename="medical-record.pdf", content_type="application/pdf"
+            ),
+        )
+
+        document = self.repository.add_document.call_args.args[0]
+        self.assertEqual(response.document_id, "DOC-MEDICAL")
+        self.assertEqual(document.document_type, "medical_document")
+        self.assertEqual(document.requested_action_id, "ACT-MEDICAL")
+        self.assertIsNone(document.replaces_document_id)
+
     def test_requested_action_carries_policy_replacement_target(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,

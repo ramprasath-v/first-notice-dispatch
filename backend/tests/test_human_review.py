@@ -856,6 +856,57 @@ class HumanReviewServiceTests(unittest.TestCase):
             "DOC-ACTIVE", public.model_dump_json()
         )
 
+    def test_public_review_exposes_received_medical_attachment(self) -> None:
+        self.repository.get_human_review_by_token_hash.return_value = record()
+        self.repository.get_documents.return_value = [
+            ClaimDocument(
+                document_id="DOC-MEDICAL",
+                claim_id=CLAIM_ID,
+                document_type="medical_document",
+                filename="medical-record.pdf",
+                status="validated",
+                object_name="claims/claim/documents/medical/medical-record.pdf",
+                received_at=NOW,
+            )
+        ]
+
+        public = self.service.get_public_review("secure-token")
+
+        self.assertEqual(len(public.supporting_documents), 1)
+        self.assertEqual(
+            public.supporting_documents[0].filename, "medical-record.pdf"
+        )
+        self.assertEqual(
+            public.supporting_documents[0].document_type, "medical_document"
+        )
+
+    def test_medical_attachment_download_is_scoped_to_review_claim(self) -> None:
+        self.repository.get_human_review_by_token_hash.return_value = record()
+        self.repository.get_document.return_value = ClaimDocument(
+            document_id="DOC-MEDICAL",
+            claim_id=CLAIM_ID,
+            document_type="medical_document",
+            filename="medical-record.pdf",
+            status="validated",
+            object_name="claims/claim/documents/medical/medical-record.pdf",
+            content_type="application/pdf",
+            received_at=NOW,
+        )
+        storage = MagicMock()
+        storage.download_claim_document.return_value = b"medical-bytes"
+        self.service._storage_service = storage
+
+        content, filename, content_type = self.service.get_supporting_document(
+            "secure-token", "DOC-MEDICAL"
+        )
+
+        self.assertEqual(content, b"medical-bytes")
+        self.assertEqual(filename, "medical-record.pdf")
+        self.assertEqual(content_type, "application/pdf")
+        storage.download_claim_document.assert_called_once_with(
+            "claims/claim/documents/medical/medical-record.pdf"
+        )
+
     def test_approve_consumes_token_and_publishes_versioned_event(self) -> None:
         approved = record(
             status="approved",
@@ -1002,6 +1053,43 @@ class HumanReviewServiceTests(unittest.TestCase):
             )
         self.repository.decide_human_review.assert_not_called()
 
+    def test_medical_document_request_preserves_exact_instruction(self) -> None:
+        instruction = (
+            "Please upload medical documentation related to the reported injury."
+        )
+        pending = record()
+        decided = pending.model_copy(update={
+            "status": "correction_requested",
+            "correction_type": "upload_document",
+            "decision_note": instruction,
+        })
+        self.repository.get_human_review_by_token_hash.return_value = pending
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "human_review_required",
+            "current_human_review_id": REVIEW_ID,
+        }
+        self.repository.decide_human_review.return_value = (decided, False)
+
+        self.service.request_correction(
+            "secure-token", HumanReviewDecisionRequest(decision_note=instruction)
+        )
+
+        call = self.repository.decide_human_review.call_args.kwargs
+        self.assertEqual(call["correction_type"], "upload_document")
+        self.assertEqual(call["decision_note"], instruction)
+
+    def test_vague_injury_request_is_rejected(self) -> None:
+        self.repository.get_human_review_by_token_hash.return_value = record()
+        with self.assertRaisesRegex(HumanReviewConflictError, "specific supported"):
+            self.service.request_correction(
+                "secure-token",
+                HumanReviewDecisionRequest(
+                    decision_note="Please explain more about the injury."
+                ),
+            )
+        self.repository.decide_human_review.assert_not_called()
+
     def test_manual_handling_is_durable_and_publishes_distinct_event(self) -> None:
         pending = record()
         decided = pending.model_copy(update={
@@ -1118,6 +1206,11 @@ class HumanReviewResumeWorkflowTests(unittest.TestCase):
         cases = [
             ("Please upload the correct policy document.", "upload_document", "policy_document"),
             ("Please upload the police report.", "upload_document", "police_report"),
+            (
+                "Please upload medical documentation related to the reported injury.",
+                "upload_document",
+                "medical_document",
+            ),
             ("Please upload a clearer vehicle photo.", "upload_document", "damage_evidence"),
             ("Please provide the correct policy number.", "enter_text", "policy_number"),
         ]

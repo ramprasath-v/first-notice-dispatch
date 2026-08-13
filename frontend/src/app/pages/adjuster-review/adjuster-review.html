@@ -52,6 +52,23 @@
         </ul></section>
       }
 
+      @if ((item.supporting_documents ?? []).length) {
+        <section>
+          <p class="kicker">Supporting documents</p>
+          <div class="evidence-grid">
+            @for (document of item.supporting_documents ?? []; track document.document_id) {
+              <article class="evidence-card">
+                <strong>Medical documentation</strong>
+                <p>{{ document.filename }}</p>
+                <p>Received</p>
+                <button class="secondary compact" type="button"
+                  (click)="viewSupportingDocument(document.document_id)">View document</button>
+              </article>
+            }
+          </div>
+        </section>
+      }
+
       <details class="analysis-details">
         <summary>View AI analysis</summary>
         <section class="briefing">

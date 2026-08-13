@@ -10,6 +10,7 @@ from app.services.intake_extraction_service import evidence_part
 SUPPORTED_RESUME_DOCUMENT_TYPES = {
     "damage_evidence",
     "license_plate_photo",
+    "medical_document",
     "police_report",
     "police_report_page",
     "policy_document",
@@ -48,6 +49,12 @@ class GeminiDocumentExtractor:
         if not document.storage_path:
             raise DocumentExtractionError(
                 f"Document {document.document_id} has no evidence storage path."
+            )
+        if document.document_type == "medical_document":
+            return DocumentExtractionResult(
+                usable=True,
+                reason="Medical documentation was received for human review.",
+                satisfies_requirement=candidate_requirement,
             )
 
         document_part = evidence_part(

@@ -15,6 +15,7 @@ export interface HumanReview {
   reason: string;
   briefing: HumanReviewBriefing;
   source_references?: EvidenceSourceReference[];
+  supporting_documents?: SupportingDocument[];
   generation?: number;
   recommended_remediation?: RecommendedRemediation;
   ai_recommendation?: string;
@@ -24,6 +25,13 @@ export interface HumanReview {
   expires_at: string;
   decision_at?: string | null;
   checkpoint_status?: string | null;
+}
+
+export interface SupportingDocument {
+  document_id: string;
+  filename: string;
+  document_type: string;
+  status: string;
 }
 
 export interface EvidenceSourceReference {

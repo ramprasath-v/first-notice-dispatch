@@ -1,6 +1,7 @@
 from collections.abc import Callable
+from urllib.parse import quote
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, Response, status
 
 from app.models.human_review import (
     ClaimCorrectionAcceptedResponse,
@@ -27,6 +28,24 @@ def create_reviews_router(
         token: str = Header(..., alias="X-Review-Token", min_length=16, max_length=256)
     ) -> HumanReviewPublicResponse:
         return _call(lambda: get_service().get_public_review(token))
+
+    @router.get("/reviews/current/documents/{document_id}")
+    def get_supporting_document(
+        document_id: str,
+        token: str = Header(..., alias="X-Review-Token", min_length=16, max_length=256),
+    ) -> Response:
+        content, filename, content_type = _call(
+            lambda: get_service().get_supporting_document(token, document_id)
+        )
+        return Response(
+            content=content,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": (
+                    "inline; filename*=UTF-8''" + quote(filename, safe="")
+                )
+            },
+        )
 
     @router.post(
         "/reviews/current/approve",
