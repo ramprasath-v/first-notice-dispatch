@@ -12,10 +12,12 @@ from app.models.requested_action import (
     parse_requested_actions,
 )
 from app.models.review_result import (
+    ConflictSourceAssertion,
     CurrentEvidenceFinding,
     EvidenceConflict,
     OperationalIndicators,
     ReviewResult,
+    SourceAwareConflict,
 )
 from app.services.claim_review_service import ClaimReviewService
 from app.services.claim_review_service import ClaimReviewError
@@ -1328,6 +1330,138 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         replay = self.workflow.resume("CLM-A1B2C3D4", replacement)
         self.assertTrue(replay.idempotent_replay)
         self.assertEqual(self.repository.save_review_result.call_count, 1)
+
+    def test_accepted_requested_upload_is_promoted_to_safe_replacement(self) -> None:
+        self.claim["requested_actions"] = [{
+            "action_id": "ACT-GENERIC-IMAGE",
+            "action_type": "upload_document",
+            "review_id": "AUTONOMOUS-GENERIC",
+            "document_type": "license_plate_photo",
+            "instruction": "Upload a clear vehicle image with a readable plate.",
+            "replaces_document_id": None,
+        }]
+        self.documents["DOC-REPORT"] = ClaimDocument(
+            document_id="DOC-REPORT",
+            claim_id="CLM-A1B2C3D4",
+            document_type="police_report",
+            filename="police-report.pdf",
+            status="validated",
+            evidence_findings=["damage_location: rear"],
+            received_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        )
+        self.documents["DOC-WRONG"] = ClaimDocument(
+            document_id="DOC-WRONG",
+            claim_id="CLM-A1B2C3D4",
+            document_type="damage_evidence",
+            filename="wrong-front.jpg",
+            status="validated",
+            supported_capabilities=["damage_evidence"],
+            evidence_findings=["damage_location: front"],
+            received_at=datetime(2026, 8, 5, 0, 1, tzinfo=timezone.utc),
+        )
+        accepted = ClaimDocument(
+            document_id="DOC-CORRECT",
+            claim_id="CLM-A1B2C3D4",
+            document_type="license_plate_photo",
+            filename="correct-rear-plate.jpg",
+            requested_action_id="ACT-GENERIC-IMAGE",
+            status="received",
+            received_at=datetime.now(timezone.utc),
+        )
+        self.documents[accepted.document_id] = accepted
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="Rear damage and a readable plate are visible.",
+            supported_capabilities=[
+                "damage_evidence", "license_plate_photo", "vehicle_identity"
+            ],
+            evidence_findings=["damage_location: rear"],
+        )
+        conflict = EvidenceConflict(
+            field="damage_location",
+            values=["rear", "front"],
+            sources=[
+                "police-report.pdf", "wrong-front.jpg", "correct-rear-plate.jpg"
+            ],
+            reason="The old image conflicts with corroborated current evidence.",
+        )
+        targeted_action = UploadDocumentRequestedAction(
+            action_id="ACT-TARGETED-IMAGE",
+            review_id="AUTONOMOUS-TARGETED",
+            document_type="license_plate_photo",
+            instruction="Upload the correct vehicle image.",
+            replaces_document_id="DOC-WRONG",
+        )
+        first_review = review_result(complete=False).model_copy(update={
+            "conflicts": [conflict],
+            "current_evidence_findings": [
+                CurrentEvidenceFinding(
+                    source="police-report.pdf", finding="damage_location: rear"
+                ),
+                CurrentEvidenceFinding(
+                    source="wrong-front.jpg", finding="damage_location: front"
+                ),
+                CurrentEvidenceFinding(
+                    source="correct-rear-plate.jpg", finding="damage_location: rear"
+                ),
+            ],
+            "requested_actions": [targeted_action],
+            "source_aware_conflicts": [SourceAwareConflict(
+                fingerprint="damage-location-conflict",
+                field="damage_location",
+                assertions=[
+                    ConflictSourceAssertion(
+                        field="damage_location", value="rear",
+                        source_identity="DOC-REPORT", filename="police-report.pdf",
+                        document_id="DOC-REPORT", document_type="police_report",
+                        replaceable=False,
+                    ),
+                    ConflictSourceAssertion(
+                        field="damage_location", value="front",
+                        source_identity="DOC-WRONG", filename="wrong-front.jpg",
+                        document_id="DOC-WRONG", document_type="damage_evidence",
+                        replaceable=True,
+                    ),
+                    ConflictSourceAssertion(
+                        field="damage_location", value="rear",
+                        source_identity="DOC-CORRECT",
+                        filename="correct-rear-plate.jpg",
+                        document_id="DOC-CORRECT",
+                        document_type="license_plate_photo", replaceable=True,
+                    ),
+                ],
+                selected_outlier_document_id="DOC-WRONG",
+            )],
+            "operational_indicators": OperationalIndicators(),
+        })
+
+        def review_sequence(intake, metadata, *, evidence_parts):
+            if self.review_service.review.call_count == 1:
+                return first_review
+            active_sources = {item.filename for item in metadata.uploaded_evidence}
+            self.assertNotIn("wrong-front.jpg", active_sources)
+            self.assertIn("correct-rear-plate.jpg", active_sources)
+            return review_result(complete=True)
+
+        self.review_service.review.side_effect = review_sequence
+
+        result = self.workflow.resume("CLM-A1B2C3D4", accepted)
+
+        self.assertEqual(result.final_status, "inspection_ready")
+        self.assertEqual(self.review_service.review.call_count, 2)
+        self.assertEqual(self.documents["DOC-WRONG"].status, "superseded")
+        self.assertEqual(
+            self.documents["DOC-WRONG"].superseded_by_document_id, "DOC-CORRECT"
+        )
+        promoted = self.documents["DOC-CORRECT"]
+        self.assertEqual(promoted.replaces_document_id, "DOC-WRONG")
+        self.assertEqual(promoted.requested_action_id, "ACT-TARGETED-IMAGE")
+
+        replay = self.workflow.resume("CLM-A1B2C3D4", accepted)
+
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(self.repository.save_review_result.call_count, 1)
+        self.assertEqual(self.review_service.review.call_count, 2)
 
     def test_replacement_does_not_preserve_identity_from_superseded_target(self) -> None:
         self.claim["missing_documents"] = []

@@ -622,7 +622,7 @@ def _reconcile_current_document_as_replacement(
     metadata: ClaimEvidenceMetadata,
 ) -> ClaimDocument | None:
     """Bind current evidence only when deterministic review proves its target."""
-    if current_document.requested_action_id or current_document.replaces_document_id:
+    if current_document.replaces_document_id:
         return None
     capabilities = set(current_document.supported_capabilities)
     if "damage_evidence" not in capabilities or not (
@@ -650,6 +650,11 @@ def _reconcile_current_document_as_replacement(
         and action.replaces_document_id == outlier.document_id
     ]
     if len(actions) != 1 or len(review_result.requested_actions) != 1:
+        return None
+    if actions[0].document_type not in {
+        "damage_evidence",
+        "license_plate_photo",
+    }:
         return None
 
     assessments = [
