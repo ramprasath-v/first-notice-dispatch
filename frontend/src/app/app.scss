@@ -3,4 +3,8 @@
 .header-inner { max-width: 1120px; margin: auto; padding: 1.1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
 .brand { color: #103c36; font-weight: 800; text-decoration: none; font-size: 1.2rem; letter-spacing: -.02em; }
 .brand span { color: #16826f; }
-.eyebrow { color: #67817b; font-size: .72rem; text-transform: uppercase; letter-spacing: .12em; }
+.product-positioning { color: #67817b; font-size: .82rem; }
+@media (max-width: 650px) {
+  .header-inner { align-items: flex-start; flex-direction: column; gap: .25rem; }
+  .product-positioning { font-size: .76rem; }
+}

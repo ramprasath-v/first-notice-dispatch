@@ -58,16 +58,18 @@ export class ClaimTimeline {
   @Input() events: ClaimEvent[] = [];
 
   get presented(): PresentedEvent[] {
-    return normalizedEvents(this.events)
+    const projected = normalizedEvents(this.events)
       .flatMap((event): PresentedEvent[] => {
         const copy = presentationFor(event);
         return copy ? [{ key: eventKey(event), ...copy, timestamp: event.timestamp, event }] : [];
-      })
-      .reverse();
+      });
+    return deduplicatePresentedEvents(projected).reverse();
   }
 
   get technical(): ClaimEvent[] {
-    return normalizedEvents(this.events).filter((event) => TECHNICAL.has(event.action));
+    return normalizedEvents(this.events).filter(
+      (event) => TECHNICAL.has(event.action) && !isRawClaimTransportEvent(event),
+    );
   }
 
   get activity(): AgentActivityItem[] {
@@ -111,6 +113,20 @@ export function normalizedEvents(events: ClaimEvent[]): ClaimEvent[] {
       seen.add(key);
       return [event];
     });
+}
+
+export function deduplicatePresentedEvents(events: PresentedEvent[]): PresentedEvent[] {
+  return events.reduce<PresentedEvent[]>((result, event) => {
+    const previous = result.at(-1);
+    if (previous?.title === event.title) return result;
+    result.push(event);
+    return result;
+  }, []);
+}
+
+function isRawClaimTransportEvent(event: ClaimEvent): boolean {
+  const eventType = event.details['event_type'];
+  return typeof eventType === 'string' && eventType.startsWith('claim.');
 }
 
 function presentationFor(event: ClaimEvent): { title: string; description: string } | null {
