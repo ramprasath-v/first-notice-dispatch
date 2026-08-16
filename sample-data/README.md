@@ -1,16 +1,9 @@
-# Demo Sample Data
+# Sample Data
 
-Only synthetic or redistribution-approved data should be committed here.
+Only synthetic or redistribution-approved evidence belongs in this directory. The checked-in files support local tests and controlled workflow demonstrations; they must never be treated as real claim records.
 
-| File | Intended use | Review status |
-|---|---|---|
-| `police-report.pdf` | Synthetic mock police report; policy `POL-DEMO-1001`; explicit no-injury/drivable narrative | Synthetic and judge-useful |
-| `vehicle-photo.jpg` | Scenario A damage image with no readable vehicle identity | No visible PII; confirm image redistribution rights before publishing |
-| `accident-photo.jpg` | Legacy local fixture with a real-looking California plate | Local-only and ignored; do not publish without provenance and privacy clearance |
+Current public fixtures include synthetic policy, police-report, medical-support, receipt, and vehicle-image variants under `Testing/`, plus a small set of top-level police-report and vehicle-image examples. They intentionally exercise missing evidence, conflicting evidence, replacement, injury escalation, and human-review attachment paths.
 
-Before recording, provide rights-cleared synthetic images for:
+Before publishing or redistributing an image, confirm its license/provenance and verify that any visible plate, VIN, person, location, or other identifier is fictional. The ignored local file `accident-photo.jpg` is not part of the repository and must not be added without a separate privacy and rights review.
 
-- a clear fictional license plate that remediates Scenario A; and
-- damage plus readable fictional vehicle identity for the isolated Scenario B policy conflict.
-
-Do not add real claim forms, policyholder names, addresses, VINs, plates, audio, police reports, or other personal data.
+Do not add real claim forms, policyholder names, addresses, contact details, VINs, plates, audio, police reports, medical records, credentials, or production exports. Keep generated claims, Firestore exports, Cloud logs, and downloaded Cloud Storage objects outside the repository.
