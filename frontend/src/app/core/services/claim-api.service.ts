@@ -25,9 +25,7 @@ export class ClaimApiService {
     if (submission.policyNumberHint) {
       body.append('policy_number_hint', submission.policyNumberHint);
     }
-    for (const photo of submission.damagePhotos) body.append('files', photo);
-    if (submission.policeReport) body.append('files', submission.policeReport);
-    if (submission.audio) body.append('files', submission.audio);
+    for (const file of submission.evidenceFiles) body.append('files', file);
     return this.http.post<ClaimAcceptedResponse>(`${this.baseUrl}/claims`, body, {
       headers: { 'X-Idempotency-Key': idempotencyKey },
       observe: 'events',
@@ -61,10 +59,42 @@ export class ClaimApiService {
     );
   }
 
+  uploadDocuments(
+    claimId: string,
+    requests: Array<{
+      documentType: string;
+      file: File;
+      requestedActionId: string;
+      idempotencyKey: string;
+    }>,
+  ): Observable<DocumentAcceptedResponse[]> {
+    const body = new FormData();
+    for (const request of requests) {
+      body.append('document_types', request.documentType);
+      body.append('requested_action_ids', request.requestedActionId);
+      body.append('idempotency_keys', request.idempotencyKey);
+      body.append('files', request.file, request.file.name);
+    }
+    return this.http.post<DocumentAcceptedResponse[]>(
+      `${this.baseUrl}/claims/${claimId}/documents/batch`,
+      body,
+    );
+  }
+
   getHumanReview(token: string): Observable<HumanReview> {
     return this.http.get<HumanReview>(
       `${this.baseUrl}/reviews/current`,
       { headers: { 'X-Review-Token': token } },
+    );
+  }
+
+  getHumanReviewDocument(token: string, documentId: string): Observable<Blob> {
+    return this.http.get(
+      `${this.baseUrl}/reviews/current/documents/${encodeURIComponent(documentId)}`,
+      {
+        headers: { 'X-Review-Token': token },
+        responseType: 'blob',
+      },
     );
   }
 
@@ -86,6 +116,14 @@ export class ClaimApiService {
     return this.http.post<HumanReviewDecision>(
       `${this.baseUrl}/reviews/current/request-correction`,
       { decision_note: decisionNote || null },
+      { headers: { 'X-Review-Token': token } },
+    );
+  }
+
+  continueManualHandling(token: string): Observable<HumanReviewDecision> {
+    return this.http.post<HumanReviewDecision>(
+      `${this.baseUrl}/reviews/current/manual-handling`,
+      {},
       { headers: { 'X-Review-Token': token } },
     );
   }

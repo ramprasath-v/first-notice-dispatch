@@ -9,6 +9,50 @@ EvidenceCapabilityType = Literal[
     "license_plate_photo",
 ]
 
+EvidenceArtifactType = Literal[
+    "damage_evidence",
+    "police_report",
+    "policy_document",
+    "voice_note",
+    "other_evidence",
+]
+
+
+class EvidenceArtifactClassification(BaseModel):
+    source: str = Field(description="The submitted filename being classified.")
+    document_type: EvidenceArtifactType = Field(
+        description="What the artifact is, based on its visible or audible content."
+    )
+
+
+class EvidenceArtifactFacts(BaseModel):
+    source: str = Field(description="Exact submitted filename supporting these facts.")
+    policy_number: str | None = None
+    vehicle_identity: str | None = None
+    vehicle_make: str | None = None
+    vehicle_model: str | None = None
+    vehicle_year: str | None = None
+    license_plate: str | None = None
+    vin: str | None = None
+    incident_date: str | None = None
+    damage_location: str | None = None
+
+    def fact_values(self) -> dict[str, str]:
+        values = self.model_dump(
+            mode="python", exclude={"source"}, exclude_none=True
+        )
+        return {
+            field_name: value.strip()
+            for field_name, value in values.items()
+            if value.strip()
+        }
+
+    def canonical_findings(self) -> list[str]:
+        return [
+            f"{field_name}: {value}"
+            for field_name, value in sorted(self.fact_values().items())
+        ]
+
 
 class ImageEvidenceCapabilities(BaseModel):
     source: str = Field(description="The submitted image filename being assessed.")
@@ -84,6 +128,22 @@ class IntakeResult(BaseModel):
         description="Important findings with the filename supporting each finding.",
     )
 
+    evidence_artifact_classifications: list[EvidenceArtifactClassification] = Field(
+        default_factory=list,
+        description=(
+            "Content-derived source type for each submitted artifact, independent "
+            "of MIME type and image evidence capabilities."
+        ),
+    )
+
+    evidence_artifact_facts: list[EvidenceArtifactFacts] = Field(
+        default_factory=list,
+        description=(
+            "Normalized facts grouped by the exact artifact that independently "
+            "supports them. Unknown or unsupported values must remain null."
+        ),
+    )
+
     image_evidence_capabilities: list[ImageEvidenceCapabilities] = Field(
         default_factory=list,
         description=(
@@ -115,5 +175,9 @@ def intake_result_from_claim(claim: dict[str, object]) -> IntakeResult:
     if claim.get("image_evidence_capabilities") is not None:
         data["image_evidence_capabilities"] = claim[
             "image_evidence_capabilities"
+        ]
+    if claim.get("evidence_artifact_classifications") is not None:
+        data["evidence_artifact_classifications"] = claim[
+            "evidence_artifact_classifications"
         ]
     return IntakeResult.model_validate(data)

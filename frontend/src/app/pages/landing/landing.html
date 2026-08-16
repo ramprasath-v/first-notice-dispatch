@@ -1,0 +1,21 @@
+<main class="page landing-page">
+  <section class="landing-copy">
+    <p class="kicker">FirstNotice Dispatch</p>
+    <h1>Claim intake that keeps moving.</h1>
+    <p>Start a new claim or return to an existing one.</p>
+  </section>
+
+  <section class="card landing-actions">
+    <a class="primary action-link" routerLink="/claims/new">Start new claim</a>
+
+    <div class="divider"><span>or</span></div>
+
+    <form [formGroup]="form" (ngSubmit)="continueClaim()">
+      <label for="claim-id">Continue existing claim</label>
+      <div class="continue-row">
+        <input id="claim-id" formControlName="claimId" placeholder="CLM-A1B2C3D4" />
+        <button class="secondary" type="submit">Continue</button>
+      </div>
+    </form>
+  </section>
+</main>

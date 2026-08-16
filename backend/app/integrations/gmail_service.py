@@ -276,10 +276,10 @@ def _build_human_review_message(request: HumanReviewEmailRequest) -> EmailMessag
         or "- Verify the stated operational ambiguity."
     )
     message.set_content(
-        f"""FirstNotice Dispatch paused operational intake for human verification.
+        f"""FirstNotice completed autonomous intake for this claim.
 
 Claim ID: {request.claim_id}
-Reason: {request.reason}
+Status: Ready for inspection decision
 
 Briefing
 {request.summary}
@@ -287,17 +287,17 @@ Briefing
 Conflicts
 {conflicts}
 
-What to verify
+Decision context
 {questions}
 
-Recommended next step
+AI recommendation
 {request.recommended_next_action}
 
 Review claim
 {request.review_url}
 
-This review controls operational intake/routing only. It does not approve or deny
-the insurance claim, determine liability or coverage, or calculate a payout.
+Approve Inspection authorizes a physical inspection only. It does not approve or
+deny the insurance claim, determine liability or coverage, or calculate a payout.
 """.strip()
     )
     return message

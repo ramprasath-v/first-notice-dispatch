@@ -31,6 +31,7 @@ def build_api_dependencies() -> ApiDependencies:
         repository=repository,
         publisher=publisher,
         settings=HumanReviewSettings.from_env(),
+        storage_service=storage_service,
         gmail_sender=(
             GmailService.from_oauth_settings(gmail_settings)
             if gmail_settings.enabled

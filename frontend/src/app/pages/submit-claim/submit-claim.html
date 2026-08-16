@@ -1,58 +1,77 @@
 <main class="page submit-page">
   <section class="intro">
-    <p class="kicker">Start a claim</p>
-    <h1>Tell us what happened.</h1>
-    <p>Share the available evidence now. We’ll analyze it in the background and keep you updated.</p>
+    <p class="kicker">Claim intake</p>
+    <h1>Start your claim</h1>
+    <p>Upload your claim evidence. FirstNotice will sort it automatically.</p>
   </section>
 
-  <form class="card form-card" [formGroup]="form" (ngSubmit)="submit()" novalidate>
-    <div class="field">
-      <label for="incident">Incident description <span>Required</span></label>
-      <textarea id="incident" rows="5" formControlName="incidentDescription" placeholder="Where and when did the incident happen? What was damaged?"></textarea>
-      @if (form.controls.incidentDescription.touched && form.controls.incidentDescription.invalid) {
-        <p class="error">Please describe the incident.</p>
-      }
-    </div>
-
-    <div class="field">
-      <label for="policy">Policy number <span>Optional</span></label>
-      <input id="policy" formControlName="policyNumberHint" placeholder="For example, POL-12345" />
-    </div>
-
-    <div class="upload-grid">
-      <label class="upload-tile">
-        <span class="upload-icon">01</span><strong>Damage photos</strong><small>JPEG or PNG · at least one</small>
-        <input type="file" accept="image/jpeg,image/png" multiple (change)="choosePhotos($event)" />
-        <span class="file-name">{{ damagePhotos().length ? damagePhotos().length + ' selected' : 'Choose photos' }}</span>
-      </label>
-      <label class="upload-tile">
-        <span class="upload-icon">02</span><strong>Police report</strong><small>Optional · PDF</small>
-        <input type="file" accept="application/pdf" (change)="choosePoliceReport($event)" />
-        <span class="file-name">{{ policeReport()?.name || 'Choose PDF' }}</span>
-      </label>
-      <label class="upload-tile">
-        <span class="upload-icon">03</span><strong>Voice note</strong><small>Optional · MP3, WAV, or MP4</small>
-        <input type="file" accept="audio/mpeg,audio/wav,audio/mp4" (change)="chooseAudio($event)" />
-        <span class="file-name">{{ audio()?.name || 'Choose audio' }}</span>
-      </label>
-    </div>
-    @for (error of [errors()['photos'], errors()['police'], errors()['audio']]; track $index) {
-      @if (error) { <p class="error">{{ error }}</p> }
-    }
-
+  <form
+    class="card form-card"
+    [class.is-submitting]="submitting()"
+    [formGroup]="form"
+    (ngSubmit)="submit()"
+    novalidate
+  >
     @if (submitting()) {
-      <div class="progress-wrap" aria-live="polite">
-        <div class="progress-label"><span>Securely uploading evidence</span><strong>{{ progress() }}%</strong></div>
-        <div class="progress"><span [style.width.%]="progress()"></span></div>
-      </div>
+      <section class="submission-progress" aria-live="polite">
+        <span class="submission-spinner" aria-hidden="true"></span>
+        <div>
+          <h2>Submitting your claim...</h2>
+          <p>Uploading evidence and starting FirstNotice analysis.</p>
+        </div>
+        <div class="indeterminate-progress" aria-label="Submitting claim"><span></span></div>
+      </section>
     }
-    @if (requestError()) { <div class="alert error-alert">{{ requestError() }}</div> }
+    <fieldset [disabled]="submitting()">
+      <div class="evidence-section">
+        <div class="evidence-heading">
+          <h2>Upload claim evidence</h2>
+          <p>
+            Add your police report, policy documents, and vehicle photos. FirstNotice
+            will sort them automatically.
+          </p>
+        </div>
+        <label class="upload-tile">
+          <strong>Choose evidence files</strong>
+          <small>PDF, JPG, JPEG, or PNG · multiple files allowed</small>
+          <input
+            type="file"
+            accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+            multiple
+            (change)="chooseEvidence($event)"
+          />
+          <span class="file-name">
+            {{ evidenceFiles().length ? evidenceFiles().length + ' selected' : 'Browse files' }}
+          </span>
+        </label>
+        @if (evidenceFiles().length) {
+          <ul class="selected-files" aria-label="Selected evidence files">
+            @for (file of evidenceFiles(); track file.name + file.size) {
+              <li>
+                <span aria-hidden="true">✓</span>
+                <span class="selected-file-name">{{ file.name }}</span>
+                <button type="button" class="remove-file" (click)="removeEvidence(file)">
+                  Remove
+                </button>
+              </li>
+            }
+          </ul>
+        }
+        @if (errors()['evidence']) {
+          <p class="error">{{ errors()['evidence'] }}</p>
+        }
+      </div>
 
-    <div class="form-footer">
-      <p>Intake and routing only. Claim decisions remain with your insurer.</p>
-      <button class="primary" type="submit" [disabled]="submitting()">
-        {{ submitting() ? 'Submitting…' : 'Submit claim' }}
-      </button>
-    </div>
+      @if (requestError()) {
+        <div class="alert error-alert">{{ requestError() }}</div>
+      }
+
+      <div class="form-footer">
+        <p>Intake and routing only. Claim decisions remain with your insurer.</p>
+        <button class="primary" type="submit" [disabled]="submitting()">
+          {{ submitting() ? 'Submitting…' : 'Submit claim' }}
+        </button>
+      </div>
+    </fieldset>
   </form>
 </main>

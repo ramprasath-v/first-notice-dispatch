@@ -1,10 +1,13 @@
 .missing-panel { background: #fff8e8; border: 1px solid #f0d69b; border-radius: 18px; padding: 1.6rem; }
 .missing-panel h2 { margin: .2rem 0 .5rem; }
 .lead { color: #725f34; }
+.action-context { max-width: 720px; margin-top: .85rem; padding-left: .8rem; border-left: 3px solid #d8b85e; }
+.action-context strong { display: block; color: #5f4b1c; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; }
+.action-context p { margin: .25rem 0 0; color: #725f34; line-height: 1.45; }
 .missing-list { display: grid; gap: .8rem; margin-top: 1.2rem; }
 .missing-item { display: grid; grid-template-columns: 1fr minmax(150px, auto) auto; align-items: center; gap: .8rem; padding: 1rem; background: #fff; border-radius: 12px; }
 .missing-item div { display: grid; gap: .25rem; }
-.missing-item small { color: #887341; text-transform: capitalize; }
+.missing-item small { color: #887341; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
 .file-button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .file-button input { position: absolute; opacity: 0; pointer-events: none; }
 .file-button.disabled { opacity: .55; pointer-events: none; }

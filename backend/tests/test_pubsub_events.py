@@ -2,7 +2,7 @@ import base64
 import json
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 from google.api_core.exceptions import AlreadyExists
@@ -20,6 +20,10 @@ from app.events.claim_event_handler import (
     EventHandlingResult,
 )
 from app.integrations.gmail_service import GmailError
+from app.services.claim_review_service import ClaimReviewError
+from app.services.document_extraction_service import (
+    UnsupportedResumeDocumentTypeError,
+)
 from app.events.claim_events import (
     CLAIM_EVENT_ADAPTER,
     ClaimCorrectionReceivedEvent,
@@ -96,6 +100,23 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.repository.complete_claim_event.assert_called_once()
         self.assertEqual(result.outcome, "processed")
 
+    async def test_transient_submitted_failure_retries_and_completes_once(self) -> None:
+        self.repository.begin_claim_event.side_effect = [True, True]
+        self.coordinator.process_submitted_claim.side_effect = [
+            RuntimeError("502 Bad Gateway"),
+            {"kind": "review_completed"},
+        ]
+
+        with self.assertRaises(ClaimEventProcessingError) as raised:
+            await self.handler.handle(submitted_event())
+        result = await self.handler.handle(submitted_event())
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(result.outcome, "processed")
+        self.assertEqual(self.coordinator.process_submitted_claim.await_count, 2)
+        self.repository.fail_claim_event.assert_called_once()
+        self.repository.complete_claim_event.assert_called_once()
+
     async def test_document_received_routes_to_resume_workflow(self) -> None:
         document = MagicMock(document_id="DOC-5678")
         self.repository.get_document.return_value = document
@@ -112,6 +133,49 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         await self.handler.handle(event)
 
         self.resume.resume.assert_called_once_with(CLAIM_ID, document)
+
+    async def test_resource_exhausted_document_review_remains_retryable(self) -> None:
+        document = MagicMock(document_id="DOC-5678")
+        self.repository.get_document.return_value = document
+        self.resume.resume.side_effect = ClaimReviewError(
+            "Gemini evidence review failed: 429 RESOURCE_EXHAUSTED"
+        )
+        event = ClaimDocumentReceivedEvent(
+            event_id=EVENT_ID,
+            event_type="claim.document.received",
+            claim_id=CLAIM_ID,
+            payload=DocumentReceivedPayload(document_id="DOC-5678"),
+        )
+
+        with self.assertRaises(ClaimEventProcessingError) as raised:
+            await self.handler.handle(event)
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.stage, "business_event_route")
+        self.repository.complete_claim_event.assert_not_called()
+
+    async def test_unsupported_resume_document_type_is_non_retryable(self) -> None:
+        document = MagicMock(document_id="DOC-5678")
+        self.repository.get_document.return_value = document
+        self.resume.resume.side_effect = UnsupportedResumeDocumentTypeError(
+            "Unsupported resume document type: unknown_artifact"
+        )
+        event = ClaimDocumentReceivedEvent(
+            event_id=EVENT_ID,
+            event_type="claim.document.received",
+            claim_id=CLAIM_ID,
+            payload=DocumentReceivedPayload(document_id="DOC-5678"),
+        )
+
+        with self.assertRaises(ClaimEventProcessingError) as raised:
+            await self.handler.handle(event)
+
+        self.assertFalse(raised.exception.retryable)
+        failure = self.repository.fail_claim_event.call_args.kwargs
+        self.assertEqual(
+            failure["error_type"], "UnsupportedResumeDocumentTypeError"
+        )
+        self.assertFalse(failure["retryable"])
 
     async def test_submitted_claim_publishes_inspection_ready_after_transition(self) -> None:
         self.repository.get_claim.side_effect = [
@@ -155,8 +219,9 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         await self.handler.handle(submitted_event())
 
         self.publisher.publish.assert_not_called()
+        self.human_review_service.ensure_review_requested.assert_not_called()
 
-    async def test_human_review_does_not_publish_inspection_ready(self) -> None:
+    async def test_human_review_requests_adjuster_without_inspection_dispatch(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,
             "status": "human_review_required",
@@ -168,6 +233,37 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.human_review_service.ensure_review_requested.assert_called_once_with(
             CLAIM_ID, correlation_id="corr-123"
         )
+
+    async def test_inspection_ready_requests_decision_without_dispatch(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "inspection_ready",
+        }
+
+        await self.handler.handle(submitted_event())
+
+        self.human_review_service.ensure_review_requested.assert_called_once_with(
+            CLAIM_ID, correlation_id="corr-123"
+        )
+        self.publisher.publish.assert_not_called()
+
+    async def test_decision_notification_failure_does_not_hide_durable_ready_state(self) -> None:
+        self.repository.get_claim.side_effect = [
+            {"claim_id": CLAIM_ID, "status": "review_processing"},
+            {"claim_id": CLAIM_ID, "status": "inspection_ready"},
+        ]
+        self.human_review_service.ensure_review_requested.side_effect = GmailError(
+            "Gmail temporarily unavailable", retryable=True
+        )
+
+        with self.assertRaises(ClaimEventProcessingError) as raised:
+            await self.handler.handle(submitted_event())
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.stage, "inspection_decision_boundary")
+        self.coordinator.process_submitted_claim.assert_awaited_once_with(CLAIM_ID)
+        self.repository.fail_claim_event.assert_called_once()
+        self.publisher.publish.assert_not_called()
 
     async def test_approved_review_resumes_same_claim_and_publishes_inspection(self) -> None:
         self.repository.get_claim.return_value = {
@@ -240,7 +336,7 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.repository.begin_claim_event.return_value = False
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,
-            "status": "human_review_required",
+            "status": "inspection_ready",
             "current_human_review_generation": 2,
             "current_human_review_id": "HRV-CYCLE-2",
         }
@@ -479,9 +575,33 @@ class PubSubEndpointTests(unittest.TestCase):
         )
         client = TestClient(create_app(handler))
 
-        response = client.post("/events/pubsub", json=push_body(submitted_event()))
+        with patch("app.api.pubsub.logger.error") as log_exception:
+            response = client.post("/events/pubsub", json=push_body(submitted_event()))
 
         self.assertEqual(response.status_code, 503)
+        fields = log_exception.call_args.kwargs["extra"]
+        self.assertEqual(fields["event_id"], EVENT_ID)
+        self.assertEqual(fields["event_type"], "claim.submitted")
+        self.assertEqual(fields["claim_id"], CLAIM_ID)
+        self.assertEqual(fields["pubsub_message_id"], "message-123")
+        self.assertEqual(fields["workflow_stage"], "unknown")
+        self.assertTrue(log_exception.call_args.kwargs["exc_info"])
+
+    def test_request_validation_logs_shape_without_raw_payload(self) -> None:
+        client = TestClient(create_app(MagicMock()))
+
+        with patch("app.api.pubsub.logger.warning") as log_warning:
+            response = client.post(
+                "/events/pubsub",
+                json={"subscription": "sensitive-payload-must-not-be-logged"},
+            )
+
+        self.assertEqual(response.status_code, 422)
+        fields = log_warning.call_args.kwargs["extra"]
+        self.assertEqual(fields["workflow_stage"], "request_validation")
+        self.assertEqual(fields["request_path"], "/events/pubsub")
+        self.assertEqual(fields["validation_errors"][0]["location"], "body.message")
+        self.assertNotIn("sensitive-payload", str(log_warning.call_args))
 
     def test_invalid_base64_returns_400(self) -> None:
         client = TestClient(create_app(MagicMock()))

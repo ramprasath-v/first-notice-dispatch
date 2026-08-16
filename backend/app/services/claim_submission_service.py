@@ -9,6 +9,7 @@ from app.events.claim_events import (
     ClaimSubmittedEvent,
     DocumentReceivedPayload,
 )
+from app.domain.claimant_action_display import build_claimant_action_display
 from app.domain.claimant_evidence_requests import build_claimant_evidence_requests
 from app.events.pubsub_publisher import ClaimEventPublisher
 from app.models.claim_api import (
@@ -18,20 +19,28 @@ from app.models.claim_api import (
     DocumentAcceptedResponse,
 )
 from app.models.claim_document import ClaimDocument
-from app.models.requested_action import parse_requested_actions
+from app.models.requested_action import (
+    UploadDocumentRequestedAction,
+    parse_requested_actions,
+)
 from app.services.claim_storage_service import (
     ClaimStorageService,
     ClaimStorageValidationError,
     ValidatedUpload,
     infer_document_type,
 )
-from app.services.document_extraction_service import SUPPORTED_RESUME_DOCUMENT_TYPES
 from app.tools.firestore_repository import (
     FirestoreClaimRepository,
     generate_claim_id,
     generate_document_id,
     utc_now,
 )
+
+
+SUPPORTED_UNBOUND_RESUME_DOCUMENT_TYPES = {
+    "license_plate_photo",
+    "police_report_page",
+}
 
 
 class ClaimSubmissionError(RuntimeError):
@@ -80,15 +89,8 @@ class ClaimSubmissionService:
         idempotency_key: str,
     ) -> ClaimAcceptedResponse:
         description = incident_description.strip()
-        if not description:
-            raise ClaimStorageValidationError(
-                "incident_description must not be empty."
-            )
         prepared = self._prepare_evidence(evidence)
-        if not any(item.upload.content_type.startswith("image/") for item in prepared):
-            raise ClaimStorageValidationError(
-                "At least one JPEG or PNG damage photo is required."
-            )
+
         _validate_idempotency_key(idempotency_key)
 
         claim_id = generate_claim_id()
@@ -327,18 +329,27 @@ class ClaimSubmissionService:
             raise ClaimSubmissionError(
                 f"Claim {claim_id} has no persisted timestamp.", claim_id=claim_id
             )
+        requested_actions = parse_requested_actions(
+            claim.get("requested_actions", [])
+        )
+        requested_evidence = build_claimant_evidence_requests(
+            claim.get("missing_documents", []),
+            claim.get("unusable_evidence", []),
+        )
+        if any(
+            isinstance(action, UploadDocumentRequestedAction)
+            for action in requested_actions
+        ):
+            requested_evidence = []
         return ClaimSummaryResponse(
             claim_id=claim_id,
             status=str(claim.get("status")),
             intake_priority=claim.get("intake_priority"),
             missing_documents=list(claim.get("missing_documents", [])),
-            requested_evidence=build_claimant_evidence_requests(
-                claim.get("missing_documents", []),
-                claim.get("unusable_evidence", []),
-            ),
-            requested_actions=parse_requested_actions(
-                claim.get("requested_actions", [])
-            ),
+            requested_evidence=requested_evidence,
+            requested_actions=requested_actions,
+            action_display=build_claimant_action_display(claim, requested_actions),
+            manual_handling=bool(claim.get("manual_handling")),
             inspection=(
                 appointment.model_dump(mode="python") if appointment else None
             ),
@@ -453,7 +464,7 @@ def _validate_resume_document_type(document_type: str) -> None:
     if not re.fullmatch(r"[a-z0-9_]{1,64}", document_type):
         raise ClaimStorageValidationError("Invalid document_type.")
     if (
-        document_type not in SUPPORTED_RESUME_DOCUMENT_TYPES
+        document_type not in SUPPORTED_UNBOUND_RESUME_DOCUMENT_TYPES
         and not document_type.startswith("police_report_page_")
     ):
         raise ClaimStorageValidationError(

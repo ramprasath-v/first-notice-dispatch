@@ -147,6 +147,14 @@ class ClaimStorageService:
             document_id=document_id,
         )
 
+    def download_claim_document(self, object_name: str) -> bytes:
+        try:
+            return self._bucket.blob(object_name).download_as_bytes()
+        except Exception as exc:
+            raise ClaimStorageError(
+                "Could not read the requested evidence object."
+            ) from exc
+
 
 def sanitize_filename(filename: str) -> str:
     basename = re.split(r"[/\\]+", filename)[-1]

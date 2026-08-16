@@ -110,7 +110,7 @@ After the initial claimant submission, FirstNotice:
 
 The claimant performs only actions that genuinely require claimant evidence. The adjuster enters only at the consequential checkpoint or final handoff.
 
-## Evidence for judges
+## Implementation evidence
 
 | Claim | Repository evidence |
 |---|---|
@@ -123,7 +123,7 @@ The claimant performs only actions that genuinely require claimant evidence. The
 | Human checkpoint | `backend/app/services/human_review_service.py` |
 | Calendar and Gmail actions | `backend/app/integrations/google_calendar_service.py`, `backend/app/integrations/gmail_service.py` |
 | Dispatch workflow | `backend/app/workflows/claim_dispatch_workflow.py` |
-| Judge-facing observability | `frontend/src/app/components/claim-timeline/` |
+| Workflow observability | `frontend/src/app/components/claim-timeline/` |
 | Regression discipline | `backend/tests/`, Angular `*.spec.ts` files |
 
 ## Honest boundary

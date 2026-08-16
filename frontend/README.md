@@ -1,6 +1,6 @@
 # FirstNotice Dispatch claimant frontend
 
-Angular 22 standalone application for claim submission, live claim status, missing-evidence upload, claimant timeline, judge-facing Agent Activity, and tokenized adjuster review.
+Angular 22 standalone application for claim submission, live claim status, missing-evidence upload, claimant timeline, technical Agent Activity, and tokenized adjuster review.
 
 The frontend contains no credentials. Local development uses `http://localhost:8080`; the production nginx container generates `config.js` from the non-secret `API_BASE_URL` environment variable.
 
@@ -35,11 +35,11 @@ The multi-stage [`Dockerfile`](Dockerfile) builds Angular with Node and serves `
 Build and publish with Cloud Build:
 
 ```bash
-API_BASE_URL='https://<firstnotice-claimant-api-url>/api'
-IMAGE_URL='us-central1-docker.pkg.dev/firstnotice-ai/firstnotice-containers/firstnotice-web:latest'
+API_BASE_URL='https://<claimant-api-host>/api'
+IMAGE_URL='<region>-docker.pkg.dev/<project-id>/<repository>/firstnotice-web:latest'
 
 gcloud builds submit . --config=cloudbuild.yaml \
   --substitutions="_API_BASE_URL=$API_BASE_URL,_IMAGE_URL=$IMAGE_URL"
 ```
 
-See the repository [README](../README.md), [architecture](../docs/ARCHITECTURE.md), and [demo guide](../DEMO.md) for the full system context.
+See the repository [README](../README.md), [architecture](../docs/ARCHITECTURE.md), and [deployment guide](../docs/DEPLOYMENT.md) for the full system context.

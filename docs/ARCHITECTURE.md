@@ -1,318 +1,280 @@
 # FirstNotice Dispatch Architecture
 
-## 1. High-level architecture
+## 1. System overview
 
-FirstNotice is a durable event-driven coordinator. Browser requests establish claim state and evidence; Pub/Sub wakes a private processor; Gemini and ADK perform bounded reasoning; deterministic code owns routing and external actions.
+FirstNotice Dispatch is a durable, event-driven coordinator for the first mile of an auto-insurance claim. A browser request establishes claim and evidence records; typed Pub/Sub events wake a private processor; Google ADK coordinates bounded intake and review stages; Gemini 3.5 Flash on Vertex AI returns structured extraction or review output; application services validate that output; and deterministic Python owns consequential routing and state transitions.
+
+Firestore is the workflow source of truth. Cloud Storage holds raw evidence separately. A browser, model response, or Pub/Sub delivery never directly changes the legal workflow state without passing through application validation and repository persistence.
+
+The concise project diagram and rendered artifacts are in
+[`docs/architecture/`](architecture/firstnotice-architecture.md).
+
+## 2. Component responsibilities
+
+| Component | Responsibility | Boundary |
+|---|---|---|
+| Angular web (`firstnotice-web`) | Claim submission, status polling, requested evidence upload, curated activity, and tokenized adjuster review | Public Cloud Run; contains no Google credentials |
+| Claimant API (`firstnotice-claimant-api`) | Validates browser requests, reserves idempotency keys, stores evidence, creates durable records, publishes typed events, and serves token-scoped review operations | Public demo Cloud Run; does not expose `/events/pubsub` |
+| Cloud Storage | Stores raw PDF/image evidence objects | Raw bytes stay out of Firestore and Pub/Sub |
+| Pub/Sub | Delivers typed lifecycle events to private processing | OIDC-authenticated push to private dispatch |
+| Dispatch (`firstnotice-dispatch`) | Receives `/events/pubsub`, reserves event processing, invokes the eligible workflow, and records completion/failure | Private Cloud Run; no `allUsers` invoker |
+| Google ADK coordinator | Routes durable claim states to bounded Intake Agent, Review Agent, wait, or dispatch actions | Coordinates stages; does not replace deterministic state rules |
+| Intake Agent and application service | Sends submitted multimodal evidence to Gemini and validates the structured `IntakeResult` | Model output is not persisted until application validation succeeds |
+| Review Agent and application service | Obtains grounded quality/completeness/conflict analysis and validates the structured review result | Recommendations are advisory to deterministic routing |
+| Deterministic evidence/routing services | Apply evidence requirements, active-artifact reasoning, safety escalation, legal state transitions, and allowed claimant actions | Authoritative for workflow routing |
+| Firestore repository | Persists claims, document metadata, requested actions, human-review generations, events/idempotency, appointments, and notifications | Durable pause/resume source of truth |
+| Human-review service | Creates expiring hash-only review tokens and accepts an allowlisted decision | Adjuster can request information, authorize inspection, or continue manual handling |
+| Dispatch workflow | Selects the deterministic inspection slot, persists the appointment, creates the Calendar event, drafts the handoff, and sends Gmail | Operational handoff only; no claim adjudication |
+
+## 3. High-level topology
 
 ```mermaid
 flowchart TB
-    subgraph Public["Public demo surface"]
-        Browser["Claimant / adjuster browser"]
-        Web["firstnotice-web<br/>Angular SPA on nginx"]
-        API["firstnotice-claimant-api<br/>FastAPI /api"]
-        Browser --> Web --> API
+    subgraph Users["People"]
+        Claimant["Claimant"]
+        Adjuster["Adjuster"]
+    end
+
+    subgraph Public["Public demo surface · Cloud Run"]
+        Web["Angular web\nfirstnotice-web"]
+        API["Claimant and tokenized-review API\nfirstnotice-claimant-api"]
     end
 
     subgraph Data["Durable Google Cloud data"]
-        GCS["Cloud Storage<br/>raw evidence objects"]
-        Firestore["Firestore<br/>claims + workflow records"]
-        PubSub["Pub/Sub<br/>typed lifecycle events"]
+        GCS["Cloud Storage\nraw PDF and image evidence"]
+        PubSub["Pub/Sub\ntyped lifecycle events"]
+        Firestore["Firestore\ndurable workflow state and metadata"]
     end
 
-    subgraph Private["Private workflow execution"]
-        Dispatch["firstnotice-dispatch<br/>FastAPI Pub/Sub receiver"]
-        Handler["ClaimEventHandler"]
+    subgraph Private["Private workflow execution · Cloud Run"]
+        Receiver["firstnotice-dispatch\nOIDC Pub/Sub receiver"]
         ADK["Google ADK coordinator"]
-        Gemini["Gemini on Vertex AI"]
-        Rules["Deterministic checklist,<br/>routing, state, idempotency"]
-        Dispatch --> Handler
-        Handler --> ADK
-        ADK --> Gemini
-        ADK --> Rules
+        Agents["Intake Agent + Review Agent"]
+        Gemini["Gemini 3.5 Flash\nVertex AI via Google GenAI SDK"]
+        Validation["Application validation\nPydantic structured output"]
+        Rules["Deterministic evidence reasoning,\nrouting and state transitions"]
+        Repository["Firestore repository"]
     end
 
-    API --> GCS
-    API --> Firestore
-    API --> PubSub
-    PubSub -->|"OIDC-authenticated push"| Dispatch
-    Gemini --> Firestore
-    Rules --> Firestore
-    Rules --> PubSub
-    Rules --> Calendar["Google Calendar API"]
-    Rules --> Gmail["Gmail API"]
-    Gmail --> Adjuster["Human adjuster"]
+    Claimant --> Web --> API
+    API -->|"raw evidence"| GCS
+    API -->|"claim and document metadata"| Firestore
+    API -->|"claim.submitted / claim.document.received / decisions"| PubSub
+    PubSub -->|"OIDC push"| Receiver --> ADK --> Agents
+    Agents --> Gemini --> Validation --> Rules --> Repository --> Firestore
+    Rules -. "reads active evidence metadata" .-> Firestore
+    Agents -. "reads evidence objects" .-> GCS
+
+    Rules -->|"missing or invalid evidence"| Request["Requested claimant action\ndurable pause"]
+    Request --> Firestore
+    Request --> Web
+    Rules -->|"unsafe, ambiguous, or injury signal"| Review["Human-review checkpoint"]
+    Review --> Firestore
+    Review --> GmailReview["Secure Gmail review request"] --> Adjuster
     Adjuster -->|"tokenized decision"| API
+    Rules -->|"safe continuation or authorized inspection"| DispatchFlow["Inspection dispatch"]
+    DispatchFlow --> Calendar["Google Calendar"]
+    DispatchFlow --> GmailHandoff["Gmail adjuster handoff"]
 ```
 
-## 2. Deployed Cloud Run topology
+There is deliberately no Gemini-to-Firestore edge. Gemini responses pass through typed application validation and deterministic logic before repository writes.
 
-| Service | Exposure | Entry point | Responsibility | Identity |
-|---|---|---|---|---|
-| `firstnotice-web` | Public | nginx on port 8080 | Serves Angular and generates non-secret runtime `config.js` | Default compute identity; no application credentials configured |
-| `firstnotice-claimant-api` | Public demo API | `uvicorn claimant_main:app` | Claim submission/status/events/evidence and tokenized review routes under `/api` | `firstnotice-runtime@firstnotice-ai.iam.gserviceaccount.com` |
-| `firstnotice-dispatch` | Private | `uvicorn main:app` | Receives `/events/pubsub` and executes workflows/external actions | `firstnotice-runtime@firstnotice-ai.iam.gserviceaccount.com` |
-
-Verified IAM boundary on August 7, 2026:
-
-- `firstnotice-web`: `allUsers` has Cloud Run Invoker.
-- `firstnotice-claimant-api`: `allUsers` has Cloud Run Invoker.
-- `firstnotice-dispatch`: only `firstnotice-pubsub-push@firstnotice-ai.iam.gserviceaccount.com` has Cloud Run Invoker; there is no `allUsers` binding.
-- `firstnotice-claim-events-push` targets the private service’s `/events/pubsub` endpoint with that push identity.
-
-The public claimant app is deliberately constructed without the Pub/Sub receiver route. nginx also returns 404 for `/api/` and `/events/` on the static web service.
-
-## 3. Data and storage architecture
-
-```text
-claim_submission_keys/{sha256(clientKey)}
-  claim_id, event_id, correlation_id, status, timestamps
-
-claims/{claimId}
-  structured intake, current status, review result, counters,
-  dispatch metadata, created_at, updated_at, workflow_version
-
-claims/{claimId}/documents/{documentId}
-  filename, MIME type, size, GCS URI, evidence type/capabilities,
-  validation status, replacement/resume metadata
-
-claims/{claimId}/events/{eventId}
-  claimant/judge timeline and technical workflow events
-
-claims/{claimId}/processed_events/{eventId}
-  event type/version, attempt state, duplicate/retry outcome
-
-claims/{claimId}/human_reviews/{reviewId}
-  briefing, conflicts, expiration, decision and notification state
-
-claims/{claimId}/appointments/{appointmentId}
-  deterministic slot and Google Calendar metadata
-
-claims/{claimId}/notifications/{notificationId}
-  adjuster handoff status and Gmail delivery metadata
-
-human_review_tokens/{sha256(token)}
-  claim/review lookup, expiration, status; never the raw token
-
-gs://<evidence-bucket>/claims/{claimId}/documents/{documentId}/{filename}
-  raw image, PDF, or audio evidence
-```
-
-Firestore is the workflow source of truth. Raw evidence bytes never enter Firestore or Pub/Sub. Pub/Sub events contain identifiers needed to reload durable state.
-
-## 4. Event model
-
-All lifecycle events use a discriminated Pydantic contract with:
-
-- `event_id`
-- `event_type`
-- `event_version`
-- `claim_id`
-- UTC `occurred_at`
-- `correlation_id`
-- `source`
-- a type-specific minimal payload
+## 4. Submission, Intake, and Review
 
 ```mermaid
 sequenceDiagram
-    participant Producer as API / workflow producer
-    participant Topic as Pub/Sub
-    participant Dispatch as Private dispatch service
-    participant Ledger as Firestore processed_events
-    participant Workflow as Eligible workflow
+    participant C as Claimant
+    participant API as Public claimant API
+    participant GCS as Cloud Storage
+    participant FS as Firestore
+    participant PS as Pub/Sub
+    participant D as Private dispatch
+    participant ADK as ADK coordinator
+    participant G as Gemini / Vertex AI
+    participant App as Validation + deterministic rules
 
-    Producer->>Topic: Publish typed event
-    Topic->>Dispatch: OIDC push /events/pubsub
-    Dispatch->>Ledger: Atomically reserve event_id
-    alt first delivery or retryable failure
-        Dispatch->>Workflow: Load durable claim and execute eligible path
-        Workflow->>Ledger: Persist state and domain events
-        opt next durable boundary reached
-            Workflow->>Topic: Publish deterministic next event
-        end
-        Dispatch->>Ledger: Mark processed
-        Dispatch-->>Topic: 2xx
-    else completed/processing duplicate
-        Dispatch->>Ledger: Record duplicate no-op
-        Dispatch-->>Topic: 2xx
-    end
+    C->>API: Submit evidence with idempotency key
+    API->>FS: Atomically reserve key and create claim shell
+    API->>GCS: Store raw evidence objects
+    API->>FS: Store document metadata
+    API->>PS: Publish claim.submitted
+    API-->>C: Return claim ID immediately
+    PS->>D: OIDC-authenticated push
+    D->>FS: Reserve event ID
+    D->>ADK: Process durable claim state
+    ADK->>G: Intake Agent sends multimodal evidence
+    G-->>ADK: Structured IntakeResult
+    ADK->>App: Validate and normalize output
+    App->>FS: Persist grounded intake and document facts
+    ADK->>G: Review Agent requests grounded review
+    G-->>ADK: Structured review recommendation
+    ADK->>App: Validate + apply deterministic routing
+    App->>FS: Persist review, state, requested actions, and timeline
+    D->>FS: Mark event processed
 ```
 
-Recognized event types:
+Gemini extracts and reasons. Pydantic models reject malformed provider output. Deterministic code evaluates current active evidence, evidence requirements, injury/safety signals, and allowed transitions before Firestore is updated.
 
-- `claim.submitted`
-- `claim.document.received`
-- `claim.human_review.approved`
-- `claim.human_review.correction_requested`
-- `claim.correction.received`
-- `claim.inspection.ready`
+## 5. Claimant remediation and automatic resume
 
-## 5. State machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> new
-    new --> intake_complete: multimodal extraction persisted
-    intake_complete --> review_processing
-    review_processing --> awaiting_documents: resolvable evidence gap
-    review_processing --> human_review_required: injury / safety / significant conflict / consequential ambiguity
-    review_processing --> inspection_pending: intake may safely continue
-    awaiting_documents --> review_processing: document or correction received
-    human_review_required --> review_processing: approved or corrected
-    inspection_pending --> inspection_scheduled: appointment + Calendar persisted
-    inspection_scheduled --> adjuster_notified: packet + notification persisted
-```
-
-Only transitions in `backend/app/domain/claim_status.py` are legal. AI output cannot bypass that graph.
-
-## 6. Agent responsibilities
-
-### Intake Agent
-
-`IntakeSpecialistAgent` delegates multimodal extraction to the existing `IntakeExtractionService`. Gemini sees evidence filenames plus image/PDF/audio parts and returns the `IntakeResult` schema.
-
-### Review Agent
-
-`ReviewSpecialistAgent` delegates review to the workflow tool adapter. Gemini identifies grounded quality/completeness/conflict observations; Python reconstructs authoritative checklist gaps, verifies conflict grounding, applies safety escalation order, and chooses the permitted operational target.
-
-### ADK coordinator
-
-`FirstNoticeCoordinatorAgent` reads durable state and selects a bounded action: intake, review, wait for evidence, stop for human review, dispatch, or complete. For Pub/Sub submission processing it stops at the next event boundary; the event handler publishes dispatch work only after reloading durable `inspection_pending` state.
-
-### Deterministic services
-
-- Claim-state transition validation
-- Required-evidence evaluation
-- Evidence-request consolidation
-- Event idempotency and retries
-- Inspection slot selection and appointment identity
-- Calendar event identity
-- Review token lifecycle
-- Dispatch completion
-
-## 7. Missing-document pause and resume
+Missing or unusable evidence is a durable workflow pause, not a new claim or synchronous loop.
 
 ```mermaid
 sequenceDiagram
     participant C as Claimant
     participant API as Claimant API
-    participant FS as Firestore / GCS
+    participant GCS as Cloud Storage
+    participant FS as Firestore
     participant PS as Pub/Sub
     participant D as Private dispatch
-    participant G as Gemini review
+    participant X as Document extraction / quality
+    participant R as Review + deterministic routing
 
-    C->>API: Submit description + damage image (+ optional evidence)
-    API->>FS: Reserve key, store claim/evidence metadata + objects
-    API->>PS: claim.submitted
-    PS->>D: Authenticated push
-    D->>G: Intake + evidence review
-    D->>FS: status = awaiting_documents; requested evidence
-    C->>API: Upload requested document
-    API->>FS: Store new object and document metadata
-    API->>PS: claim.document.received(document_id)
-    PS->>D: Authenticated push
-    D->>G: Inspect newly uploaded document
-    D->>FS: Mark all supported compatible requirements satisfied
-    D->>FS: Resume review on the same claim
-    alt still incomplete
-        D->>FS: awaiting_documents
-    else ready
-        D->>FS: inspection_pending
-        D->>PS: claim.inspection.ready
+    R->>FS: awaiting_documents + requested action
+    FS-->>C: Status polling exposes claimant-safe request
+    C->>API: Upload requested evidence
+    API->>GCS: Store raw object
+    API->>FS: Store document metadata and action binding
+    API->>PS: claim.document.received
+    PS->>D: OIDC push
+    D->>X: Extract and validate the new document
+    X->>FS: Persist quality, grounded facts, and requirement result
+    alt unusable or another action remains
+        FS->>FS: Keep requested action outstanding
+        FS-->>C: Remain awaiting_documents
+    else all blocking actions satisfied
+        D->>FS: review_processing on the same claim
+        D->>R: Reconcile current non-superseded evidence
+        R->>FS: Persist next authoritative state
     end
 ```
 
-Multiple internal requirements can map to one claimant-facing artifact. A readable license-plate image can satisfy both `license_plate_photo` and `vehicle_identity`.
+One artifact may satisfy multiple compatible requirements. A validated, server-authorized replacement can supersede its target while retaining the old document in audit history. Unusable uploads do not fulfill an action or trigger Review. Redelivered document events are idempotent.
 
-## 8. Human-review pause and resume
+Medical documents are different: `medical_document` is accepted only as supporting material for a human reviewer. FirstNotice does not ask Gemini to infer diagnosis, causation, severity, prognosis, coverage, or payout from that attachment, and a durable positive injury signal is not cleared by its upload.
+
+## 6. Human review
+
+Human review is used when deterministic rules cannot formulate a safe autonomous claimant action, or when an injury/safety boundary requires human judgment.
 
 ```mermaid
 sequenceDiagram
-    participant D as Private dispatch
+    participant Rules as Deterministic routing
     participant FS as Firestore
     participant GM as Gmail API
-    participant H as Adjuster
-    participant API as Claimant/review API
+    participant A as Adjuster
+    participant API as Tokenized review API
     participant PS as Pub/Sub
+    participant D as Private dispatch
 
-    D->>FS: Persist human_review_required + briefing
-    D->>FS: Create review and hash-only token index
-    D->>GM: Send secure review URL
-    GM-->>H: Human-review request
-    H->>API: Approve with raw token in X-Review-Token
+    Rules->>FS: human_review_required + immutable review generation
+    Rules->>FS: Store hash-only expiring token index
+    Rules->>GM: Send secure review request
+    GM-->>A: Review link
+    A->>API: Request more information
     API->>FS: Atomically consume decision
-    API->>PS: claim.human_review.approved
-    PS->>D: Authenticated push
-    D->>FS: Resume review on the same claim
-    alt evidence still unresolved
-        D->>FS: awaiting_documents
-    else safely eligible
-        D->>FS: inspection_pending
-        D->>PS: claim.inspection.ready
-    end
+    API->>PS: claim.human_review.correction_requested
+    PS->>D: Resume into awaiting_documents
+    Note over A,D: Or Approve Inspection -> claim.human_review.approved
+    Note over A,D: Or Continue Manual Handling -> claim.human_review.manual_handling
 ```
 
-Approval controls operational continuation only. It is not a coverage, liability, payout, fraud, approval, or denial decision.
+- **Request more information** creates one allowlisted claimant action and returns the same claim to `awaiting_documents`.
+- **Approve Inspection** authorizes only the physical-inspection step. It cannot bypass unresolved evidence.
+- **Continue Manual Handling** records an explicit manual-handling decision while the claim remains at the human-review boundary; the claimant sees that no action is currently required.
+- Every legitimate new review generation receives a new token and notification; an old consumed token is not reused.
 
-## 9. Calendar and Gmail actions
+## 7. Inspection, Calendar, and Gmail handoff
 
-When a durable claim is `inspection_pending`, `claim.inspection.ready` invokes the existing dispatch workflow:
-
-1. Derive a deterministic appointment and select a slot.
-2. Create a private Google Calendar event using a stable base32hex-compatible event ID and `sendUpdates=none`.
-3. Persist the appointment and move to `inspection_scheduled`.
-4. Build the adjuster-ready packet and use Gemini for a constrained notification draft.
-5. Send the final Gmail message separately.
-6. Persist notification metadata and move to `adjuster_notified`.
-
-Calendar records the inspection; Gmail communicates with the adjuster. Calendar does not add an attendee or send an invitation.
-
-### Dedicated adjuster-owned Calendar
-
-The deployed Calendar ID may refer to any secondary calendar that the Cloud Run runtime identity can edit; the adapter does not assume a calendar owner or derive the Calendar ID from an email address. For the hackathon demo:
-
-1. Sign in to the dedicated `firstnotice.adjuster@gmail.com` account.
-2. Create the secondary calendar **FirstNotice Demo Inspections**.
-3. Share it with `firstnotice-runtime@firstnotice-ai.iam.gserviceaccount.com`.
-4. Grant **Make changes to events**.
-5. Copy its Calendar ID and set it as `GOOGLE_CALENDAR_ID` on `firstnotice-dispatch`.
-
-The runtime service account authenticates to Calendar through ADC and creates the event directly on that shared secondary calendar. The payload deliberately contains no `attendees`, and the request uses `sendUpdates=none`.
-
-Gmail is independent: its OAuth configuration sends the final handoff to `ADJUSTER_EMAIL=firstnotice.adjuster@gmail.com`. Using the same dedicated demo account makes both external actions easy to verify without coupling their implementations or inviting the adjuster to an event already owned by that account.
-
-## 10. Reliability and idempotency
-
-- Submission reservation and claim shell creation share an atomic Firestore batch.
-- The raw browser idempotency key is hashed before persistence.
-- Event reservation uses Firestore create preconditions.
-- Retryable failures can reclaim the same processed-event record and increment attempts.
-- Duplicate completed/processing events return a successful no-op.
-- The event handler reconciles the inspection-ready boundary even during duplicate recovery.
-- Resume records attach deterministic document/idempotency metadata.
-- Scheduling, Calendar event, notification, and human-review identities are deterministic per claim/workflow version.
-- Firestore batches couple key state changes with timeline events.
-- Calendar 409 handling reads and reuses the existing event.
-- Gmail has a deterministic RFC message ID and persisted notification check, but provider acceptance and Firestore persistence cannot be one transaction. A crash in that gap can produce a duplicate send on retry.
-
-The design targets safe at-least-once event processing with idempotent effects; it does not claim global exactly-once delivery.
-
-## 11. Security boundaries
+After autonomous intake is complete, the claim reaches `inspection_ready`. A secure adjuster decision authorizes the physical inspection. Durable `inspection_pending` state then produces the deterministic `claim.inspection.ready` boundary.
 
 ```mermaid
-flowchart LR
-    Internet["Internet"] --> PublicWeb["Public web"]
-    Internet --> PublicAPI["Public claimant/review API<br/>demo limitation"]
-    PublicWeb --> PublicAPI
-    PublicAPI -->|"runtime service identity"| Data["Firestore / GCS / Pub/Sub"]
-    PubSubSA["Dedicated Pub/Sub push SA"] -->|"Cloud Run Invoker + OIDC"| PrivateDispatch["Private dispatch"]
-    PrivateDispatch -->|"runtime service identity"| Data
-    SecretManager["Secret Manager"] -->|"Gmail OAuth only"| PrivateDispatch
-    PrivateDispatch --> Calendar["Calendar API via ADC"]
-    PrivateDispatch --> Gmail["Gmail API via OAuth"]
+sequenceDiagram
+    participant A as Adjuster
+    participant API as Review API
+    participant FS as Firestore
+    participant PS as Pub/Sub
+    participant D as Private dispatch
+    participant CAL as Google Calendar API
+    participant GM as Gmail API
+
+    A->>API: Approve Inspection
+    API->>FS: Persist single-use decision
+    API->>PS: claim.human_review.approved
+    PS->>D: OIDC push
+    D->>FS: inspection_pending
+    D->>PS: deterministic claim.inspection.ready
+    PS->>D: Dispatch wake-up
+    D->>FS: Derive deterministic appointment
+    D->>CAL: Create/reuse Calendar event
+    D->>FS: inspection_scheduled + Calendar metadata
+    D->>GM: Send adjuster-ready handoff
+    D->>FS: adjuster_notified + notification metadata
 ```
 
-- No service-account key file is required; Google Cloud access uses service identity or ADC locally.
-- Gmail OAuth secrets are absent from the public API and web service.
-- Review tokens expire, are stored only as hashes, and are single-use for decision processing.
-- The claimant timeline exposes curated structured events, not raw Pub/Sub payloads or evidence.
-- The public demo API has explicit CORS but no claimant authentication. That is the primary intentional demo security limitation.
+Calendar records the inspection directly on the configured secondary calendar. It uses a deterministic event ID, has no attendees, and uses `sendUpdates=none`. Gmail independently sends the review request and final handoff.
+
+## 8. Persistence boundaries
+
+Firestore stores structured state and metadata, including:
+
+- claim status and validated intake/review results;
+- document metadata, grounded facts, quality, requested-action binding, and supersession relationships;
+- outstanding requested actions and review generations;
+- claimant and technical timeline events;
+- processed-event attempts and idempotency reservations;
+- human-review decisions and hash-only token lookup records;
+- appointment/Calendar metadata; and
+- notification/Gmail metadata.
+
+Cloud Storage stores raw image and PDF evidence under claim/document-scoped object paths. Pub/Sub carries event and document identifiers, not evidence bytes. Application services load only the evidence required for the eligible stage.
+
+## 9. Deterministic safety authority
+
+Gemini can extract facts, assess quality, identify potential conflicts, and recommend a next step. It cannot directly:
+
+- choose a legal claim-state transition;
+- authorize a replacement target supplied by a browser or model;
+- clear durable injury/safety indicators;
+- force inspection while evidence remains unresolved; or
+- create a coverage, liability, fraud, payout, or settlement decision.
+
+Deterministic application code owns those decisions using validated provider output, current active evidence, persisted provenance, and the transition graph in `backend/app/domain/claim_status.py`.
+
+## 10. Idempotency and failure recovery
+
+The design uses at-least-once delivery with idempotent effects:
+
+1. The API hashes and atomically reserves the claimant submission key.
+2. Pub/Sub delivery is reserved in `processed_events` before work begins.
+3. Completed or already-processing redeliveries become no-ops; retryable failures may reclaim the same event.
+4. Document resume, requested-action consumption, and supersession use durable reservations/transactions.
+5. Inspection-ready, appointment, Calendar, review-generation, and notification identities derive from stable workflow keys.
+6. Calendar duplicate creation reuses the deterministic event.
+7. Firestore is reloaded before emitting the next durable event boundary.
+
+Pub/Sub is the outer recovery boundary for provider or integration failures. The stable Phase 1 architecture does not claim application-configured multi-attempt Gemini retries, per-attempt provider hooks, compact resumed Review, or global exactly-once delivery.
+
+## 11. Cloud Run and trust boundaries
+
+| Service | Exposure | Identity |
+|---|---|---|
+| `firstnotice-web` | Public static Angular/nginx service | No application credentials configured |
+| `firstnotice-claimant-api` | Public controlled-demo API | Runtime service identity for Firestore, GCS, and Pub/Sub |
+| `firstnotice-dispatch` | Private Pub/Sub receiver and workflow processor | Runtime service identity; only dedicated push identity has Cloud Run Invoker |
+
+The public claimant service has explicit CORS but no consumer authentication. This is an intentional limitation of the current demonstration deployment. Production requires appropriate consumer authentication and claim-level authorization. Review capabilities are random, expiring, single-use, and stored only as hashes. Gmail OAuth values are supplied only to private dispatch through Secret Manager; Google Cloud access otherwise uses workload identity or local ADC.
+
+## 12. Explicit non-goals
+
+FirstNotice performs intake, evidence coordination, operational routing, inspection scheduling, and adjuster handoff. It does **not** autonomously:
+
+- approve or deny an insurance claim;
+- determine coverage;
+- determine liability;
+- conclude fraud;
+- calculate payout or settlement;
+- make a medical diagnosis; or
+- infer medical causation, severity, or prognosis.
+
+`adjuster_notified` means the FirstNotice intake orchestration completed. It does not mean the insurance claim was adjudicated.

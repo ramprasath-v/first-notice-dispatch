@@ -1,12 +1,13 @@
 .timeline-card, .activity-card { padding: 1.5rem; }
 .timeline { list-style: none; padding: 0; margin: 1.4rem 0 0; }
-.timeline li { position: relative; display: grid; grid-template-columns: 18px 1fr; gap: .8rem; padding-bottom: 1.4rem; }
-.timeline li:not(:last-child)::before { content: ''; position: absolute; left: 5px; top: 14px; bottom: 0; width: 2px; background: #dce9e5; }
+.timeline li { position: relative; display: grid; grid-template-columns: 62px 18px 1fr; gap: .75rem; padding-bottom: 1rem; }
+.timeline li:not(:last-child)::before { content: ''; position: absolute; left: 73px; top: 14px; bottom: 0; width: 2px; background: #dce9e5; }
 .dot { width: 12px; height: 12px; margin-top: 4px; border-radius: 50%; background: #16826f; box-shadow: 0 0 0 4px #e6f3f0; z-index: 1; }
-.timeline p { color: #667d77; margin: .25rem 0; }
+.timeline p { color: #667d77; margin: .2rem 0; }
+.timeline > li > time { padding-top: 2px; text-align: right; }
 time { color: #81928e; font-size: .75rem; }
-.activity-card { background: #102f2b; color: white; }
-.activity-card .kicker { color: #76c9b8; }
+.activity-card { background: white; color: inherit; }
+.activity-card .kicker { color: #28766a; }
 .activity-list { display: grid; gap: .65rem; margin-top: 1rem; }
 .activity-list div { display: grid; grid-template-columns: 130px 1fr auto; gap: 1rem; align-items: center; padding: .8rem; border-radius: 10px; background: rgba(255,255,255,.06); }
 .activity-list span { color: #76c9b8; font-size: .74rem; letter-spacing: .07em; font-weight: 800; }
@@ -17,4 +18,5 @@ time { color: #81928e; font-size: .75rem; }
 .technical summary { cursor: pointer; font-weight: 700; }
 .technical summary span { color: #7a8c87; font-weight: 400; margin-left: .4rem; }
 .technical div { display: flex; justify-content: space-between; padding: .55rem 0; border-top: 1px solid #e3ebe9; }
-@media (max-width: 650px) { .section-heading { align-items: flex-start; flex-direction: column; } .activity-list div { grid-template-columns: 1fr; gap: .25rem; } }
+.technical .technical-activity { display: grid; grid-template-columns: 120px 1fr auto; gap: .75rem; }
+@media (max-width: 650px) { .section-heading { align-items: flex-start; flex-direction: column; } .timeline li { grid-template-columns: 50px 14px 1fr; gap: .55rem; } .timeline li:not(:last-child)::before { left: 59px; } .technical .technical-activity { grid-template-columns: 1fr; gap: .2rem; } }

@@ -29,6 +29,19 @@ Rules:
     If it is visible but blurry, dark, obstructed, or unreadable, list those
     capabilities as unusable. If no plate or identifier is visible, do not list
     them as supported and explain that in quality_observations.
+11. For every submitted artifact, add one evidence_artifact_classifications entry.
+    Classify what the artifact is from its content, not its MIME type, extension,
+    or provisional upload category.
+12. Keep source type separate from evidence capabilities. For example, a vehicle
+    damage photo may prove several image capabilities while its source type remains
+    damage_evidence.
+13. Use police_report for an official police/incident report, policy_document for
+    an insurance policy/declarations/card document, damage_evidence for vehicle or
+    damage photographs, voice_note for claimant audio, and other_evidence only when
+    none of those content-grounded types apply.
+14. For every submitted artifact, add one evidence_artifact_facts entry. Populate
+    only normalized facts directly visible or explicitly stated in that artifact.
+    Keep unsupported or unknown fields null, even if another artifact supplies them.
 """
 
 

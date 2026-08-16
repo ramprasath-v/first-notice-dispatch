@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.intake_result import EvidenceCapabilityType
+from app.models.intake_result import EvidenceArtifactFacts, EvidenceCapabilityType
 from app.models.review_result import EvidenceConflict
 
 
@@ -30,13 +32,27 @@ class ClaimDocument(BaseModel):
     requested_action_id: str | None = None
     quality_reason: str | None = None
     supported_capabilities: list[EvidenceCapabilityType] = Field(default_factory=list)
+    evidence_facts: dict[str, str] = Field(default_factory=dict)
     evidence_findings: list[str] = Field(default_factory=list)
     superseded_by_document_id: str | None = None
     resume_idempotency_key: str | None = None
+    resume_correlation_id: str | None = None
+    resume_matched_requirement: str | None = None
+    resume_started_at: datetime | None = None
+    resume_extraction_result: DocumentExtractionResult | None = None
+    resume_quality_processed_at: datetime | None = None
     resume_processed_at: datetime | None = None
     resume_result_status: str | None = None
+    resume_error: str | None = None
+    resume_retry_required_at: datetime | None = None
 
-    @field_validator("received_at", "resume_processed_at")
+    @field_validator(
+        "received_at",
+        "resume_started_at",
+        "resume_quality_processed_at",
+        "resume_processed_at",
+        "resume_retry_required_at",
+    )
     @classmethod
     def require_utc(cls, value: datetime | None) -> datetime | None:
         if value is None:
@@ -52,6 +68,7 @@ class DocumentExtractionResult(BaseModel):
     satisfies_requirement: str | None = None
     supported_capabilities: list[EvidenceCapabilityType] = Field(default_factory=list)
     evidence_findings: list[str] = Field(default_factory=list)
+    evidence_facts: EvidenceArtifactFacts | None = None
     conflicts: list[EvidenceConflict] = Field(default_factory=list)
 
 

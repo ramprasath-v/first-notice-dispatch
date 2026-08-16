@@ -1,7 +1,7 @@
 <main class="page review-page">
   <section class="review-shell card">
     <p class="kicker">FirstNotice Dispatch</p>
-    <h1>Adjuster Review</h1>
+    <h1>Inspection Decision</h1>
 
     @if (loading()) {
       <p class="muted">Loading the secure review checkpoint…</p>
@@ -9,34 +9,65 @@
       <div class="alert error-alert" role="alert">{{ error() }}</div>
     } @else if (review(); as item) {
       <div class="claim-heading">
-        <div><span>Claim</span><strong>{{ item.claim_id }}</strong></div>
-        <span class="status">Human Review Required</span>
+        <div><span>Claim</span><strong>{{ item.claim_id }}</strong><p>FirstNotice completed autonomous intake. Review the evidence package before authorizing physical inspection.</p></div>
+        <span class="status">Intake Complete</span>
       </div>
-
-      <section>
-        <h2>Why FirstNotice paused</h2>
-        <p>{{ item.reason }}</p>
-      </section>
-
-      @if (comparisonFacts().length) {
-        <section class="comparison-grid" aria-label="Evidence comparison">
-          @for (fact of comparisonFacts(); track fact.source + fact.finding) {
-            <article>
-              <span>{{ fact.source }}</span>
-              <p>{{ fact.finding }}</p>
-            </article>
-          }
-        </section>
-      }
 
       <section class="recommendation" aria-labelledby="recommendation-title">
         <p class="kicker" id="recommendation-title">AI recommendation</p>
-        <h2>{{ item.recommended_remediation.label }}</h2>
-        <p>{{ item.recommended_remediation.instruction }}</p>
-        @if (!item.recommended_remediation.can_request) {
-          <p class="muted">FirstNotice found multiple possible targets and will not choose one automatically.</p>
-        }
+        <h2>Physical inspection recommended</h2>
+        <p>{{ item.ai_recommendation || item.briefing.summary }}</p>
       </section>
+
+      @if (snapshotEntries().length) {
+        <section>
+          <p class="kicker">Claim snapshot</p>
+          <div class="comparison-grid snapshot-grid">
+            @for (entry of snapshotEntries(); track entry.label) {
+              <article><span>{{ entry.label }}</span><p>{{ entry.value }}</p></article>
+            }
+          </div>
+        </section>
+      }
+
+      @if (groupedEvidence().length) {
+        <section><p class="kicker">Current evidence</p>
+        <section class="evidence-grid" aria-label="Current evidence used by FirstNotice">
+          @for (group of groupedEvidence(); track group.source) {
+            <article class="evidence-card">
+              <span>{{ group.label }}</span>
+              <h3>{{ group.source }}</h3>
+              <ul>
+                @for (finding of group.findings; track finding) { <li><b aria-hidden="true">✓</b> {{ finding }}</li> }
+              </ul>
+            </article>
+          }
+        </section>
+        </section>
+      }
+
+      @if ((item.resolution_history ?? []).length) {
+        <section><p class="kicker">Autonomous resolution history</p><ul class="resolution-list">
+          @for (entry of item.resolution_history ?? []; track entry) { <li>✓ {{ entry }}</li> }
+        </ul></section>
+      }
+
+      @if ((item.supporting_documents ?? []).length) {
+        <section>
+          <p class="kicker">Supporting documents</p>
+          <div class="evidence-grid">
+            @for (document of item.supporting_documents ?? []; track document.document_id) {
+              <article class="evidence-card">
+                <strong>Medical documentation</strong>
+                <p>{{ document.filename }}</p>
+                <p>Received</p>
+                <button class="secondary compact" type="button"
+                  (click)="viewSupportingDocument(document.document_id)">View document</button>
+              </article>
+            }
+          </div>
+        </section>
+      }
 
       <details class="analysis-details">
         <summary>View AI analysis</summary>
@@ -46,13 +77,13 @@
             <h3>Conflicts</h3>
             <ul>@for (conflict of item.briefing.conflicts; track conflict) { <li>{{ conflict }}</li> }</ul>
           }
-          <h3>What to verify</h3>
+          <h3>Decision context</h3>
           <ul>@for (question of item.briefing.unresolved_questions; track question) { <li>{{ question }}</li> }</ul>
           @if ((item.source_references ?? []).length) {
             <h3>Evidence sources</h3>
             <ul>
               @for (source of item.source_references ?? []; track source.filename) {
-                <li>{{ source.filename }} · {{ humanize(source.document_type) }}</li>
+                <li>{{ source.filename }}</li>
               }
             </ul>
           }
@@ -62,22 +93,29 @@
       @if (completedMessage()) {
         <div class="alert success-alert" role="status">{{ completedMessage() }}</div>
       } @else {
-        <label class="field">
-          <span>Decision note <small>Optional</small></span>
-          <textarea [(ngModel)]="decisionNote" rows="3" maxlength="1000"
-            placeholder="Add a concise operational note"></textarea>
-        </label>
+        @if (requestInfoOpen()) {
+          <section class="more-info-field">
+            <label class="field"><span>What additional information do you need?</span>
+              <textarea [(ngModel)]="decisionNote" rows="4" maxlength="500"
+                placeholder="Please upload a clearer vehicle photo."></textarea>
+            </label>
+          </section>
+        }
+        <p class="kicker decision-kicker">Decision</p>
         <div class="actions">
-          <button class="primary" type="button" [disabled]="deciding()" (click)="approve()">
-            {{ deciding() ? 'Recording…' : 'Approve & Continue' }}
-          </button>
           <button class="secondary" type="button"
-            [disabled]="deciding() || !item.recommended_remediation.can_request"
+            [disabled]="deciding() || (requestInfoOpen() && !decisionNote.trim())"
             (click)="requestMoreInformation()">
-            Request More Information
+            {{ requestInfoOpen() ? 'Send Request' : 'Request More Info' }}
+          </button>
+          @if (review()?.checkpoint_status === 'human_review_required') {
+            <button class="secondary" type="button" [disabled]="deciding()" (click)="continueManualReview()">Continue Manual Handling</button>
+          }
+          <button class="primary" type="button" [disabled]="deciding()" (click)="approve()">
+            {{ deciding() ? 'Recording…' : 'Approve Inspection' }}
           </button>
         </div>
-        <p class="boundary">This decision resumes operational intake only. It does not approve coverage, liability, or payment.</p>
+        <p class="boundary">Approve Inspection authorizes physical inspection only. It does not approve coverage, liability, or payment.</p>
       }
     }
   </section>

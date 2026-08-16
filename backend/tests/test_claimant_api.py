@@ -429,6 +429,83 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
             "replacement-event",
         )
 
+    def test_authorized_medical_requested_action_persists_attachment_type(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+        }
+        action = UploadDocumentRequestedAction(
+            action_id="ACT-MEDICAL",
+            review_id="HRV-INJURY",
+            document_type="medical_document",
+            instruction="Please upload medical documentation.",
+        )
+        self.repository.reserve_replacement_upload.return_value = (
+            ReplacementUploadReservation(
+                action=action,
+                document_id="DOC-MEDICAL",
+                event_id="medical-event",
+                correlation_id="medical-correlation",
+                status="uploading",
+                should_upload=True,
+            )
+        )
+
+        response = self.service.add_missing_document(
+            claim_id=CLAIM_ID,
+            document_type="ignored_by_server",
+            requested_action_id="ACT-MEDICAL",
+            idempotency_key="medical-upload-key",
+            evidence=evidence(
+                filename="medical-record.pdf", content_type="application/pdf"
+            ),
+        )
+
+        document = self.repository.add_document.call_args.args[0]
+        self.assertEqual(response.document_id, "DOC-MEDICAL")
+        self.assertEqual(document.document_type, "medical_document")
+        self.assertEqual(document.requested_action_id, "ACT-MEDICAL")
+        self.assertIsNone(document.replaces_document_id)
+
+    def test_requested_action_carries_policy_replacement_target(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+        }
+        action = UploadDocumentRequestedAction(
+            action_id="ACT-POLICY-REPLACE",
+            review_id="AUTONOMOUS-POLICY",
+            document_type="policy_document",
+            instruction="Upload the correct policy document.",
+            replaces_document_id="DOC-OLD-POLICY",
+        )
+        self.repository.reserve_replacement_upload.return_value = (
+            ReplacementUploadReservation(
+                action=action,
+                document_id="DOC-NEW-POLICY",
+                event_id="policy-replacement-event",
+                correlation_id="policy-replacement-correlation",
+                status="uploading",
+                should_upload=True,
+            )
+        )
+
+        self.service.add_missing_document(
+            claim_id=CLAIM_ID,
+            document_type="ignored_by_server",
+            requested_action_id="ACT-POLICY-REPLACE",
+            idempotency_key="policy-replacement-key",
+            evidence=evidence(
+                filename="correct-policy.pdf",
+                content_type="application/pdf",
+            ),
+        )
+
+        document = self.repository.add_document.call_args.args[0]
+        self.assertEqual(document.document_type, "policy_document")
+        self.assertEqual(document.requested_action_id, "ACT-POLICY-REPLACE")
+        self.assertEqual(document.replaces_document_id, "DOC-OLD-POLICY")
+
     def test_duplicate_replacement_upload_returns_same_effective_document(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,
@@ -534,6 +611,101 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
             set(request.satisfies_requirements),
             {"vehicle_identity", "license_plate_photo"},
         )
+        self.assertEqual(
+            response.action_display.title, "Vehicle identity not verified"
+        )
+        self.assertIn("readable license plate", response.action_display.explanation)
+
+    def test_get_claim_exposes_durable_manual_handling_state(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "human_review_required",
+            "manual_handling": True,
+            "missing_documents": [],
+            "unusable_evidence": [],
+            "updated_at": NOW,
+        }
+        self.repository.get_scheduled_appointment.return_value = None
+
+        response = self.service.get_claim(CLAIM_ID)
+
+        self.assertTrue(response.manual_handling)
+        self.assertEqual(response.requested_actions, [])
+
+    def test_get_claim_exposes_one_upload_action_for_flow_3_remediation(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+            "intake_priority": "expedited",
+            "missing_documents": [
+                {
+                    "type": "vehicle_identity",
+                    "reason": "Vehicle identity is required.",
+                    "source_requirement": "always_required",
+                },
+                {
+                    "type": "license_plate_photo",
+                    "reason": "A clear plate photo is required.",
+                    "source_requirement": "license_plate_photo",
+                },
+            ],
+            "unusable_evidence": [],
+            "requested_actions": [
+                {
+                    "action_type": "upload_document",
+                    "action_id": "ACT-FLOW-3",
+                    "review_id": "AUTONOMOUS-FLOW-3",
+                    "document_type": "damage_evidence",
+                    "instruction": (
+                        "Please upload a clear photo of the vehicle involved in "
+                        "this incident showing the reported damage and a readable "
+                        "license plate."
+                    ),
+                    "replaces_document_id": "DOC-FRONT",
+                }
+            ],
+            "source_aware_conflicts": [{
+                "fingerprint": "CFP-FLOW-3",
+                "field": "vehicle_identity_and_damage_location",
+                "selected_outlier_document_id": "DOC-FRONT",
+                "assertions": [
+                    {
+                        "field": "damage_location",
+                        "value": "rear",
+                        "source_identity": "document:DOC-REPORT",
+                        "filename": "police-report.pdf",
+                        "document_id": "DOC-REPORT",
+                        "document_type": "police_report",
+                        "replaceable": False,
+                    },
+                    {
+                        "field": "damage_location",
+                        "value": "front",
+                        "source_identity": "document:DOC-FRONT",
+                        "filename": "front.jpg",
+                        "document_id": "DOC-FRONT",
+                        "document_type": "damage_evidence",
+                        "replaceable": True,
+                    },
+                ],
+            }],
+            "updated_at": NOW,
+        }
+        self.repository.get_scheduled_appointment.return_value = None
+
+        response = self.service.get_claim(CLAIM_ID)
+
+        self.assertEqual(len(response.missing_documents), 2)
+        self.assertEqual(response.requested_evidence, [])
+        self.assertEqual(len(response.requested_actions), 1)
+        self.assertEqual(
+            response.requested_actions[0].action_id, "ACT-FLOW-3"
+        )
+        self.assertEqual(response.action_display.title, "Evidence doesn't match")
+        display_json = response.action_display.model_dump_json()
+        self.assertNotIn("DOC-", display_json)
+        self.assertNotIn("ACT-", display_json)
+        self.assertNotIn("AUTONOMOUS-", display_json)
 
 
 class ClaimantApiEndpointTests(unittest.TestCase):
@@ -653,6 +825,39 @@ class ClaimantApiEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["document_id"], DOCUMENT_ID)
+
+    def test_batch_evidence_upload_preserves_action_to_file_association(self) -> None:
+        self.service.add_missing_document.side_effect = [
+            DocumentAcceptedResponse(
+                claim_id=CLAIM_ID, document_id="DOC-POLICY",
+                status="received", event_id="event-policy",
+            ),
+            DocumentAcceptedResponse(
+                claim_id=CLAIM_ID, document_id="DOC-REPORT",
+                status="received", event_id="event-report",
+            ),
+        ]
+
+        response = self.client.post(
+            f"/claims/{CLAIM_ID}/documents/batch",
+            files=[
+                ("document_types", (None, "policy_document")),
+                ("document_types", (None, "police_report")),
+                ("requested_action_ids", (None, "ACT-POLICY")),
+                ("requested_action_ids", (None, "ACT-REPORT")),
+                ("idempotency_keys", (None, "policy-upload-key")),
+                ("idempotency_keys", (None, "report-upload-key")),
+                ("files", ("policy.pdf", b"policy", "application/pdf")),
+                ("files", ("report.pdf", b"report", "application/pdf")),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 202)
+        calls = self.service.add_missing_document.call_args_list
+        self.assertEqual(calls[0].kwargs["requested_action_id"], "ACT-POLICY")
+        self.assertEqual(calls[1].kwargs["requested_action_id"], "ACT-REPORT")
+        self.assertEqual(calls[0].kwargs["evidence"].filename, "policy.pdf")
+        self.assertEqual(calls[1].kwargs["evidence"].filename, "report.pdf")
 
     def test_replacement_upload_contract_forwards_action_and_idempotency_only(self) -> None:
         self.service.add_missing_document.return_value = DocumentAcceptedResponse(

@@ -26,3 +26,25 @@ button, .file-button { border: 0; border-radius: 10px; padding: .8rem 1.15rem; f
 .section-heading h2 { margin: .2rem 0 0; font-size: 1.3rem; }
 .pill { padding: .35rem .65rem; border-radius: 99px; font-size: .72rem; font-weight: 700; }
 .pill.success { color: #126052; background: #dff2ed; }
+.workflow-heartbeat { padding: 1.15rem 1.3rem; box-shadow: none; overflow: hidden; }
+.heartbeat-heading { display: grid; grid-template-columns: 170px 1fr; gap: 1rem; align-items: start; }
+.heartbeat-badge { display: flex; gap: .55rem; align-items: center; color: #17695c; text-transform: uppercase; letter-spacing: .1em; font-size: .72rem; font-weight: 850; }
+.heartbeat-copy strong { font-size: 1.05rem; }
+.heartbeat-copy p { margin: .25rem 0 0; color: #667b76; line-height: 1.45; }
+.indicator-dot { width: 11px; height: 11px; border: 2px solid #7d8e89; border-radius: 50%; background: transparent; }
+.workflow-heartbeat[data-mode='active'] .indicator-dot { border-color: #16826f; background: #22a88f; box-shadow: 0 0 0 5px #dff2ee; animation: live-pulse 1.8s ease-in-out infinite; }
+.workflow-heartbeat[data-mode='claimant'] { border-color: #e1c66f; background: #fffbef; }
+.workflow-heartbeat[data-mode='claimant'] .heartbeat-badge { color: #72520e; }
+.workflow-heartbeat[data-mode='scheduled'] .indicator-dot, .workflow-heartbeat[data-mode='complete'] .indicator-dot { border: 0; background: #16826f; }
+.poll-row { display: flex; gap: .45rem; align-items: center; padding-top: .85rem; margin-top: .85rem; border-top: 1px solid #e3ebe9; color: #35645c; font-size: .78rem; }
+.poll-row small { margin-left: auto; color: #748680; }
+.poll-icon { display: inline-block; width: 1rem; text-align: center; }
+.poll-icon.spinning { animation: heartbeat-spin 1s linear infinite; }
+.indeterminate-progress { height: 6px; margin-top: .8rem; overflow: hidden; border-radius: 99px; background: #e3ece9; }
+.indeterminate-progress span { display: block; width: 34%; height: 100%; border-radius: inherit; background: #16826f; animation: indeterminate 1.45s ease-in-out infinite; }
+.status-changed { animation: status-highlight .8s ease-out; }
+@keyframes heartbeat-spin { to { transform: rotate(360deg); } }
+@keyframes live-pulse { 50% { opacity: .45; transform: scale(.8); } }
+@keyframes indeterminate { from { transform: translateX(-110%); } to { transform: translateX(305%); } }
+@keyframes status-highlight { from { box-shadow: 0 0 0 4px rgba(34,168,143,.18); } }
+@media (prefers-reduced-motion: reduce) { .workflow-heartbeat[data-mode='active'] .indicator-dot, .poll-icon.spinning, .indeterminate-progress span, .status-changed { animation: none; } .indeterminate-progress span { width: 100%; opacity: .55; } }

@@ -57,17 +57,21 @@ class ClaimWorkflowToolAdapter:
         """Persist validated intake and file metadata without storing raw bytes."""
         claim_id = self.repository.save_completed_intake(intake_result)
         received_at = datetime.now(timezone.utc)
+        documents = []
         for evidence in evidence_inputs:
             path = Path(evidence.path).expanduser().resolve()
+            documents.append(ClaimDocument(
+                document_id=generate_document_id(),
+                claim_id=claim_id,
+                document_type=evidence.document_type,
+                filename=path.name,
+                storage_path=str(path),
+                received_at=received_at,
+            ))
+        evidence_updates = _document_evidence_updates(intake_result, documents)
+        for document in documents:
             self.repository.add_document(
-                ClaimDocument(
-                    document_id=generate_document_id(),
-                    claim_id=claim_id,
-                    document_type=evidence.document_type,
-                    filename=path.name,
-                    storage_path=str(path),
-                    received_at=received_at,
-                )
+                document.model_copy(update=evidence_updates.get(document.document_id, {}))
             )
         return self.get_claim_state(claim_id)
 
@@ -95,7 +99,17 @@ class ClaimWorkflowToolAdapter:
     def complete_claim_intake(
         self, claim_id: str, intake_result: IntakeResult
     ) -> ClaimStateResult:
-        self.repository.complete_claim_shell_intake(claim_id, intake_result)
+        documents = self.repository.get_documents(claim_id)
+        document_type_updates = _semantic_document_type_updates(intake_result, documents)
+        document_evidence_updates = _document_evidence_updates(
+            intake_result, documents
+        )
+        self.repository.complete_claim_shell_intake(
+            claim_id,
+            intake_result,
+            document_type_updates=document_type_updates,
+            document_evidence_updates=document_evidence_updates,
+        )
         return self.get_claim_state(claim_id)
 
     def run_claim_review(self, claim_id: str) -> ClaimStateResult:
@@ -103,7 +117,8 @@ class ClaimWorkflowToolAdapter:
         claim = self.repository.get_claim(claim_id)
         if claim is None:
             raise ValueError(f"Claim {claim_id} does not exist.")
-        if claim.get("status") != "intake_complete":
+        current_status = str(claim.get("status"))
+        if current_status not in {"intake_complete", "review_processing"}:
             raise ValueError(
                 f"Claim {claim_id} cannot review from status {claim.get('status')!r}."
             )
@@ -134,7 +149,8 @@ class ClaimWorkflowToolAdapter:
             except (FileNotFoundError, ValueError):
                 continue
 
-        self.repository.update_claim_status(claim_id, "review_processing")
+        if current_status == "intake_complete":
+            self.repository.update_claim_status(claim_id, "review_processing")
         review_result = self.review_service.review(
             intake_result,
             metadata,
@@ -235,6 +251,7 @@ def build_initial_review_metadata(
             status=document.status,
             usable=usable,
             quality_observations=list(dict.fromkeys(observations)),
+            evidence_findings=document.evidence_findings,
         )
         if fact is not None:
             for capability in fact.supported_capabilities:
@@ -250,6 +267,7 @@ def build_initial_review_metadata(
                     quality_observations=list(
                         dict.fromkeys(fact.quality_observations)
                     ),
+                    evidence_findings=document.evidence_findings,
                 )
 
     identity_supported = any(
@@ -306,3 +324,60 @@ def _capabilities_for_document(
         if source_name == filename:
             return fact
     return None
+
+
+def _semantic_document_type_updates(
+    intake_result: IntakeResult,
+    documents: list[ClaimDocument],
+) -> dict[str, str]:
+    """Map unique, validated content classifications to persisted artifacts."""
+    classifications: dict[str, list[str]] = {}
+    for item in intake_result.evidence_artifact_classifications:
+        source = item.source.rstrip("/").rsplit("/", 1)[-1].casefold()
+        classifications.setdefault(source, []).append(item.document_type)
+
+    documents_by_source: dict[str, list[ClaimDocument]] = {}
+    for document in documents:
+        documents_by_source.setdefault(document.filename.casefold(), []).append(
+            document
+        )
+
+    updates: dict[str, str] = {}
+    for source, document_matches in documents_by_source.items():
+        type_matches = classifications.get(source, [])
+        if len(document_matches) == 1 and len(type_matches) == 1:
+            updates[document_matches[0].document_id] = type_matches[0]
+    return updates
+
+
+def _document_evidence_updates(
+    intake_result: IntakeResult,
+    documents: list[ClaimDocument],
+) -> dict[str, dict[str, object]]:
+    """Map source-grounded Intake facts onto uniquely matched initial artifacts."""
+    documents_by_source: dict[str, list[ClaimDocument]] = {}
+    for document in documents:
+        documents_by_source.setdefault(document.filename.casefold(), []).append(
+            document
+        )
+    findings_by_source: dict[str, list[str]] = {}
+    for finding in intake_result.evidence_findings:
+        source = finding.source.rstrip("/").rsplit("/", 1)[-1].casefold()
+        findings_by_source.setdefault(source, []).append(finding.finding)
+
+    updates: dict[str, dict[str, object]] = {}
+    for artifact_facts in intake_result.evidence_artifact_facts:
+        source = artifact_facts.source.rstrip("/").rsplit("/", 1)[-1].casefold()
+        document_matches = documents_by_source.get(source, [])
+        if len(document_matches) != 1:
+            continue
+        facts = artifact_facts.fact_values()
+        canonical_findings = artifact_facts.canonical_findings()
+        updates[document_matches[0].document_id] = {
+            "evidence_facts": facts,
+            "evidence_findings": list(dict.fromkeys([
+                *findings_by_source.get(source, []),
+                *canonical_findings,
+            ])),
+        }
+    return updates

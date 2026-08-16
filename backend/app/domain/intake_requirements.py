@@ -73,7 +73,10 @@ def evaluate_intake_requirements(
         identity_usable = False
     elif vehicle_identity_items:
         identity_usable = not all(item.usable is False for item in vehicle_identity_items)
-
+    has_police_report_context = any(
+        item.evidence_type == "police_report" and item.usable is not False
+        for item in metadata.uploaded_evidence
+    )
     requirements = [
         IntakeRequirement(
             name="policy_number",
@@ -91,10 +94,18 @@ def evaluate_intake_requirements(
         ),
         IntakeRequirement(
             name="incident_description",
-            reason="A factual incident description is required for triage.",
+            reason=(
+                "Factual incident context is required for triage and may come from "
+                "the claimant description or police report."
+            ),
             source_requirement="always_required",
-            present=bool(intake_result.incident_summary.strip()),
-            usable=True if intake_result.incident_summary.strip() else None,
+            present=bool(intake_result.incident_summary.strip())
+            or has_police_report_context,
+            usable=(
+                True
+                if intake_result.incident_summary.strip() or has_police_report_context
+                else None
+            ),
         ),
         IntakeRequirement(
             name="vehicle_identity",

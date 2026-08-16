@@ -31,7 +31,7 @@ def create_claims_router(
         idempotency_key: str = Header(
             ..., alias="X-Idempotency-Key", min_length=8, max_length=128
         ),
-        incident_description: str = Form(..., min_length=1, max_length=4000),
+        incident_description: str = Form("", max_length=4000),
         policy_number_hint: str | None = Form(default=None, max_length=128),
         files: list[UploadFile] = File(...),
     ) -> ClaimAcceptedResponse:
@@ -86,6 +86,52 @@ def create_claims_router(
                 idempotency_key=idempotency_key,
                 evidence=_evidence_upload(file),
             )
+        except ClaimNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ClaimStorageValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ClaimSubmissionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @router.post(
+        "/{claim_id}/documents/batch",
+        response_model=list[DocumentAcceptedResponse],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def add_claim_documents(
+        claim_id: str,
+        document_types: list[str] = Form(...),
+        requested_action_ids: list[str] = Form(...),
+        idempotency_keys: list[str] = Form(...),
+        files: list[UploadFile] = File(...),
+    ) -> list[DocumentAcceptedResponse]:
+        if not (
+            len(files)
+            == len(document_types)
+            == len(requested_action_ids)
+            == len(idempotency_keys)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Each evidence file must match one requested action.",
+            )
+        try:
+            return [
+                get_service().add_missing_document(
+                    claim_id=claim_id,
+                    document_type=document_type,
+                    requested_action_id=action_id,
+                    idempotency_key=idempotency_key,
+                    evidence=_evidence_upload(file),
+                )
+                for file, document_type, action_id, idempotency_key in zip(
+                    files,
+                    document_types,
+                    requested_action_ids,
+                    idempotency_keys,
+                    strict=True,
+                )
+            ]
         except ClaimNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ClaimStorageValidationError as exc:

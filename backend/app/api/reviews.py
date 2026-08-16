@@ -1,6 +1,7 @@
 from collections.abc import Callable
+from urllib.parse import quote
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, Response, status
 
 from app.models.human_review import (
     ClaimCorrectionAcceptedResponse,
@@ -28,6 +29,24 @@ def create_reviews_router(
     ) -> HumanReviewPublicResponse:
         return _call(lambda: get_service().get_public_review(token))
 
+    @router.get("/reviews/current/documents/{document_id}")
+    def get_supporting_document(
+        document_id: str,
+        token: str = Header(..., alias="X-Review-Token", min_length=16, max_length=256),
+    ) -> Response:
+        content, filename, content_type = _call(
+            lambda: get_service().get_supporting_document(token, document_id)
+        )
+        return Response(
+            content=content,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": (
+                    "inline; filename*=UTF-8''" + quote(filename, safe="")
+                )
+            },
+        )
+
     @router.post(
         "/reviews/current/approve",
         response_model=HumanReviewDecisionResponse,
@@ -49,6 +68,17 @@ def create_reviews_router(
         token: str = Header(..., alias="X-Review-Token", min_length=16, max_length=256),
     ) -> HumanReviewDecisionResponse:
         return _call(lambda: get_service().request_correction(token, request))
+
+    @router.post(
+        "/reviews/current/manual-handling",
+        response_model=HumanReviewDecisionResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def continue_manual_handling(
+        request: HumanReviewDecisionRequest,
+        token: str = Header(..., alias="X-Review-Token", min_length=16, max_length=256),
+    ) -> HumanReviewDecisionResponse:
+        return _call(lambda: get_service().continue_manual_handling(token, request))
 
     @router.post(
         "/claims/{claim_id}/corrections",

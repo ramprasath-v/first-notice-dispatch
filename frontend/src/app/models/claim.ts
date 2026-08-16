@@ -28,6 +28,11 @@ export interface ClaimantEvidenceRequest {
   requested_action_id?: string;
 }
 
+export interface ClaimantActionDisplay {
+  title: string;
+  explanation: string;
+}
+
 export interface InspectionAppointment {
   appointment_id: string;
   inspection_type: 'virtual' | 'physical';
@@ -45,6 +50,8 @@ export interface ClaimSummary {
   missing_documents: MissingDocument[];
   requested_evidence: ClaimantEvidenceRequest[];
   requested_actions?: RequestedAction[];
+  action_display?: ClaimantActionDisplay | null;
+  manual_handling?: boolean;
   inspection?: InspectionAppointment | null;
   updated_at: string;
 }
@@ -63,7 +70,7 @@ export interface UploadDocumentRequestedAction {
   review_id: string;
   document_type: string;
   instruction: string;
-  replaces_document_id: string;
+  replaces_document_id?: string | null;
 }
 
 export type RequestedAction = EnterTextRequestedAction | UploadDocumentRequestedAction;
@@ -71,7 +78,5 @@ export type RequestedAction = EnterTextRequestedAction | UploadDocumentRequested
 export interface ClaimSubmission {
   incidentDescription: string;
   policyNumberHint?: string;
-  damagePhotos: File[];
-  policeReport?: File;
-  audio?: File;
+  evidenceFiles: File[];
 }

@@ -10,6 +10,7 @@ from app.events.claim_events import (
     ClaimEvent,
     ClaimHumanReviewApprovedEvent,
     ClaimHumanReviewCorrectionRequestedEvent,
+    ClaimHumanReviewManualHandlingEvent,
     ClaimInspectionReadyEvent,
     ClaimSubmittedEvent,
     inspection_ready_event_id,
@@ -17,6 +18,9 @@ from app.events.claim_events import (
 from app.events.pubsub_publisher import ClaimEventPublisher
 from app.integrations.google_calendar_service import GoogleCalendarError
 from app.integrations.gmail_service import GmailError
+from app.services.document_extraction_service import (
+    UnsupportedResumeDocumentTypeError,
+)
 from app.tools.firestore_repository import (
     FirestoreClaimRepository,
     FirestoreReadError,
@@ -44,9 +48,12 @@ class NonRetryableEventError(RuntimeError):
 
 
 class ClaimEventProcessingError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool) -> None:
+    def __init__(
+        self, message: str, *, retryable: bool, stage: str = "unknown"
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.stage = stage
 
 
 class ClaimEventHandler:
@@ -84,7 +91,9 @@ class ClaimEventHandler:
             )
         except Exception as exc:
             raise ClaimEventProcessingError(
-                "Could not reserve the event idempotency record.", retryable=True
+                "Could not reserve the event idempotency record.",
+                retryable=True,
+                stage="event_reservation",
             ) from exc
 
         if not should_process:
@@ -95,6 +104,7 @@ class ClaimEventHandler:
                 raise ClaimEventProcessingError(
                     "Could not reconcile a durable workflow boundary.",
                     retryable=True,
+                    stage="boundary_reconciliation",
                 ) from exc
             return EventHandlingResult(
                 event_id=event.event_id,
@@ -106,10 +116,13 @@ class ClaimEventHandler:
             )
 
         try:
+            stage = "business_event_route"
             route_result = await self._route(event)
+            stage = "inspection_dispatch_boundary"
             status, inspection_ready_message_id = (
                 self._ensure_inspection_dispatch_boundary(event)
             )
+            stage = "inspection_decision_boundary"
             review_request = self._ensure_human_review_boundary(event, status)
             if review_request is not None:
                 route_result = {**route_result, "human_review": review_request}
@@ -125,6 +138,7 @@ class ClaimEventHandler:
                 outcome="processed",
                 claim_status=status,
             )
+            stage = "event_completion"
             self._repository.complete_claim_event(
                 event.claim_id,
                 event_id=event.event_id,
@@ -150,10 +164,12 @@ class ClaimEventHandler:
                 raise ClaimEventProcessingError(
                     "Event processing and failure recording both failed.",
                     retryable=True,
+                    stage="failure_recording",
                 ) from persistence_exc
             raise ClaimEventProcessingError(
                 f"Event {event.event_id} failed: {safe_message}",
                 retryable=retryable,
+                stage=stage,
             ) from exc
 
     async def _route(self, event: ClaimEvent) -> dict[str, Any]:
@@ -164,7 +180,9 @@ class ClaimEventHandler:
                     f"Claim {event.claim_id} does not exist."
                 )
             status = str(claim.get("status", ""))
-            if status in {"inspection_pending", "inspection_scheduled"}:
+            if status in {
+                "inspection_ready", "inspection_pending", "inspection_scheduled"
+            }:
                 return {"action": "already_ready_for_inspection", "status": status}
             return await self._coordinator.process_submitted_claim(event.claim_id)
 
@@ -198,6 +216,13 @@ class ClaimEventHandler:
                 event.claim_id, event.payload.review_id, event.correlation_id
             )
 
+        if isinstance(event, ClaimHumanReviewManualHandlingEvent):
+            if self._human_review_resume_workflow is None:
+                raise NonRetryableEventError("Human-review resume is not configured.")
+            return self._human_review_resume_workflow.continue_manual_handling(
+                event.claim_id, event.payload.review_id, event.correlation_id
+            )
+
         if isinstance(event, ClaimCorrectionReceivedEvent):
             if self._human_review_resume_workflow is None:
                 raise NonRetryableEventError("Human-review resume is not configured.")
@@ -213,7 +238,7 @@ class ClaimEventHandler:
     def _ensure_human_review_boundary(
         self, event: ClaimEvent, status: str | None
     ) -> dict[str, str] | None:
-        if status != "human_review_required" or self._human_review_service is None:
+        if status not in {"inspection_ready", "human_review_required"} or self._human_review_service is None:
             return None
         review = self._human_review_service.ensure_review_requested(
             event.claim_id, correlation_id=event.correlation_id
@@ -260,6 +285,7 @@ def _is_retryable(exc: Exception) -> bool:
         UnsupportedCoordinatorState,
         ClaimResumeError,
         ClaimDispatchWorkflowError,
+        UnsupportedResumeDocumentTypeError,
         ValueError,
     )
     if isinstance(exc, non_retryable):

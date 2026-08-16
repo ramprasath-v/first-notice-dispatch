@@ -1,5 +1,10 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { ClaimTimeline, activityFor, normalizedEvents } from './claim-timeline';
+import {
+  ClaimTimeline,
+  activityFor,
+  deduplicatePresentedEvents,
+  normalizedEvents,
+} from './claim-timeline';
 import { ClaimEvent } from '../../models/claim-event';
 
 const event = (
@@ -24,7 +29,7 @@ describe('ClaimTimeline', () => {
     const text = fixture.nativeElement.textContent;
     expect(text).toContain('Evidence analyzed');
     expect(text).toContain('Analyzed the submitted multimodal evidence');
-    expect(text).toContain('Technical trace');
+    expect(text).toContain('View technical activity');
     expect(fixture.nativeElement.querySelector('details').open).toBe(false);
   });
 
@@ -58,7 +63,7 @@ describe('ClaimTimeline', () => {
     ];
     fixture.detectChanges();
     const text = fixture.nativeElement.textContent;
-    expect(text).toContain('Detected conflicting policy information');
+    expect(text).toContain('Could not safely resolve the remaining discrepancy');
     expect(text).toContain('Paused the claim for human review');
     expect(text).toContain('Sent a secure review request through Gmail');
     expect(text).toContain('Human approval received');
@@ -85,6 +90,69 @@ describe('ClaimTimeline', () => {
 
     expect(normalized.map((item) => item.action)).toEqual(['claim_intake_completed', 'human_review_approved']);
     expect(normalized[1].timestamp).toBe('2026-08-07T12:01:00Z');
+  });
+
+  it('collapses duplicate semantic intake-complete milestones', () => {
+    fixture.componentInstance.events = [
+      event('claim_review_completed', 'inspection_ready', '2026-08-07T12:00:00Z', {}, 'review'),
+      event('claim_moved_to_inspection_ready', 'inspection_ready', '2026-08-07T12:00:01Z', {}, 'transition'),
+    ];
+    fixture.detectChanges();
+
+    const titles = Array.from(
+      fixture.nativeElement.querySelectorAll('.timeline strong') as NodeListOf<HTMLElement>,
+    ).map((item) => item.textContent?.trim());
+    expect(titles.filter((title) => title === 'Intake complete')).toHaveLength(1);
+  });
+
+  it('collapses adjacent evidence-verification projections but preserves distinct milestones', () => {
+    fixture.componentInstance.events = [
+      event('claim_submission_received', 'intake_processing', '2026-08-07T12:00:00Z'),
+      event('document_quality_checked', 'awaiting_documents', '2026-08-07T12:00:01Z', {}, 'quality-a'),
+      event('document_quality_checked', 'awaiting_documents', '2026-08-07T12:00:02Z', {}, 'quality-b'),
+      event('missing_requirement_satisfied', 'awaiting_documents', '2026-08-07T12:00:03Z'),
+      event('claim_review_resumed', 'review_processing', '2026-08-07T12:00:04Z'),
+    ];
+    fixture.detectChanges();
+
+    const text = fixture.nativeElement.textContent;
+    const titles = Array.from(
+      fixture.nativeElement.querySelectorAll('.timeline strong') as NodeListOf<HTMLElement>,
+    ).map((item) => item.textContent?.trim());
+    expect(titles.filter((title) => title === 'Evidence verified')).toHaveLength(1);
+    expect(text).toContain('Claim submitted');
+    expect(text).toContain('Requested evidence accepted');
+    expect(text).toContain('Processing resumed');
+  });
+
+  it('keeps the same semantic milestone when separated by a distinct claimant action', () => {
+    const projected = [
+      { key: 'one', title: 'Evidence verified', description: 'First', timestamp: '2026-08-07T12:00:00Z', event: event('one') },
+      { key: 'two', title: 'Requested evidence accepted', description: 'Second', timestamp: '2026-08-07T12:00:01Z', event: event('two') },
+      { key: 'three', title: 'Evidence verified', description: 'Third', timestamp: '2026-08-07T12:00:02Z', event: event('three') },
+    ];
+
+    expect(deduplicatePresentedEvents(projected)).toHaveLength(3);
+  });
+
+  it('hides raw claim transport rows while retaining meaningful agent activity', () => {
+    fixture.componentInstance.events = [
+      event('pubsub_event_received', undefined, '2026-08-07T12:00:00Z', { event_type: 'claim.submitted' }),
+      event('pubsub_event_processed', undefined, '2026-08-07T12:00:01Z', { event_type: 'claim.document.received' }),
+      event('claim_intake_completed', 'review_processing', '2026-08-07T12:00:02Z'),
+      event('claim_review_completed', 'awaiting_documents', '2026-08-07T12:00:03Z'),
+      event('claim_review_resumed', 'review_processing', '2026-08-07T12:00:04Z'),
+      event('human_review_email_sent', 'human_review_required', '2026-08-07T12:00:05Z'),
+    ];
+    fixture.detectChanges();
+
+    const text = fixture.nativeElement.textContent;
+    expect(text).not.toContain('claim.submitted');
+    expect(text).not.toContain('claim.document.received');
+    expect(text).toContain('INTAKE AGENT');
+    expect(text).toContain('REVIEW AGENT');
+    expect(text).toContain('WORKFLOW');
+    expect(text).toContain('ADJUSTER REVIEW');
   });
 
   it('never renders raw internal statuses as claimant milestone text', () => {

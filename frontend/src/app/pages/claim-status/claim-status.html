@@ -2,12 +2,11 @@
   @if (loading()) {
     <section class="loading-card card"><span class="spinner"></span><div><h1>Finding your claim</h1><p>This should only take a moment.</p></div></section>
   } @else if (claim(); as current) {
-    <section class="status-hero card">
+    <section class="status-hero card" [class.status-changed]="clock() < statusChangedUntil()" aria-live="polite">
       <div class="status-copy">
-        <p class="kicker">Claim {{ current.claim_id }}</p>
+        <p class="kicker">Claim status</p>
         <div class="status-line"><span class="status-mark"></span><h1>{{ statusLabel(current.status) }}</h1></div>
-        <p class="status-description">{{ statusDescription(current.status) }}</p>
-        <p>Last updated {{ current.updated_at | date:'MMM d, y · h:mm a' }}</p>
+        <p>Claim {{ current.claim_id }} · Last updated {{ current.updated_at | date:'MMM d, y · h:mm a' }}</p>
       </div>
       @if (current.intake_priority) {
         <div class="priority"><span>Intake priority</span><strong>{{ current.intake_priority.replaceAll('_', ' ') | titlecase }}</strong></div>
@@ -25,10 +24,20 @@
       }
     </nav>
 
-    @if (workflowIndicator(current.status); as indicator) {
-      <section class="workflow-indicator card" [class.active]="indicator.active" aria-live="polite">
-        <span class="indicator-dot" aria-hidden="true"></span>
-        <div><strong>{{ indicator.title }}</strong><small>{{ indicator.detail }}</small></div>
+    @if (workflowHeartbeat(current.status); as heartbeat) {
+      <section class="workflow-heartbeat card" [attr.data-mode]="heartbeat.mode">
+        <div class="heartbeat-heading">
+          <div class="heartbeat-badge"><span class="indicator-dot" aria-hidden="true"></span>{{ heartbeat.badge }}</div>
+          <div class="heartbeat-copy" aria-live="polite"><strong>{{ heartbeat.title }}</strong><p>{{ heartbeat.detail }}</p></div>
+        </div>
+        <div class="poll-row" aria-hidden="true">
+          <span class="poll-icon" [class.spinning]="pollInProgress()">{{ pollInProgress() ? '↻' : pollMessage(current.status) === 'Up to date' ? '✓' : '○' }}</span>
+          <strong>{{ pollMessage(current.status) }}</strong>
+          <small>Last checked: {{ relativeTime(lastSuccessfulPollAt()) }} · Workflow update: {{ relativeTime(lastBusinessUpdateAt()) }}</small>
+        </div>
+        @if (heartbeat.showProgress) {
+          <div class="indeterminate-progress" aria-label="Workflow processing"><span></span></div>
+        }
       </section>
     }
 
@@ -36,17 +45,21 @@
     @if (pollingWarning()) { <div class="alert warning-alert" role="status">{{ pollingWarning() }}</div> }
     @if (error()) { <div class="alert error-alert" role="alert">{{ error() }}</div> }
 
-    @if (current.status === 'awaiting_documents') {
+    @if (current.status === 'awaiting_documents' && !rechecking()) {
       @if (evidenceRequests(current.requested_evidence, current.requested_actions); as requests) {
         @if (requests.length) {
-          <app-missing-documents [requests]="requests" [uploading]="uploading()" [processing]="rechecking()" (uploadDocument)="uploadDocument($event)" />
+          <app-missing-documents [requests]="requests" [displayReason]="current.action_display || null" [uploading]="uploading()" [processing]="rechecking()" (uploadDocuments)="uploadDocuments($event)" />
         }
       }
       @if (textAction(current.requested_actions); as action) {
         <section class="card correction-card">
-          <p class="kicker">More information needed</p>
+          <p class="kicker">Action needed</p>
           <p class="action-count">1 item needed to continue</p>
-          <h2>{{ action.instruction }}</h2>
+          <h2>{{ current.action_display?.title || 'More information needed' }}</h2>
+          @if (current.action_display) {
+            <div class="correction-context"><strong>Why we need this</strong><p>{{ current.action_display.explanation }}</p></div>
+          }
+          <p class="what-to-do"><strong>What to do</strong>{{ action.instruction }}</p>
           <label class="field">
             <span>Your response</span>
             <input [(ngModel)]="correctionValue" maxlength="256" autocomplete="off" />
@@ -61,10 +74,7 @@
 
     @if (current.inspection) { <app-inspection-card [inspection]="current.inspection" /> }
 
-    <div class="status-layout">
-      <app-claim-timeline [events]="events()" />
-      <aside class="card help-card"><p class="kicker">Good to know</p><h2>Your claim stays active</h2><p>You can return to this page using your claim ID. New evidence is attached to this same claim—there is no need to start again.</p><strong>{{ current.claim_id }}</strong></aside>
-    </div>
+    <app-claim-timeline [events]="events()" />
   } @else {
     <section class="card error-state"><h1>Claim unavailable</h1><p>{{ error() }}</p><button class="secondary" (click)="refreshNow()">Try again</button></section>
   }

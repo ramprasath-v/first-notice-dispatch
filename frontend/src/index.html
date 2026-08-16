@@ -1,26 +1,26 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Frontend</title>
-  <base href="/">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="icon" type="image/x-icon" href="favicon.ico">
-  <script src="config.js"></script>
-  <script>
-    // Review capabilities arrive in the URL fragment so Cloud Run never sees
-    // or logs them. Keep the token in this tab and expose only a non-secret
-    // checkpoint path to the Angular router and browser refreshes.
-    if (window.location.hash.startsWith('#/adjuster/review/')) {
-      window.sessionStorage.setItem(
-        'firstnotice.reviewToken',
-        window.location.hash.slice('#/adjuster/review/'.length),
-      );
-      window.history.replaceState(null, '', '/adjuster/review/checkpoint');
-    }
-  </script>
-</head>
-<body>
-  <app-root></app-root>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <title>FirstNotice Dispatch</title>
+    <base href="/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <script src="config.js"></script>
+    <script>
+      // Review capabilities arrive in the URL fragment so Cloud Run never sees
+      // or logs them. Keep the token in this tab and expose only a non-secret
+      // checkpoint path to the Angular router and browser refreshes.
+      if (window.location.hash.startsWith('#/adjuster/review/')) {
+        window.sessionStorage.setItem(
+          'firstnotice.reviewToken',
+          window.location.hash.slice('#/adjuster/review/'.length),
+        );
+        window.history.replaceState(null, '', '/adjuster/review/checkpoint');
+      }
+    </script>
+  </head>
+  <body>
+    <app-root></app-root>
+  </body>
 </html>

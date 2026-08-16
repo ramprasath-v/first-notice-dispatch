@@ -8,17 +8,22 @@ from app.services.intake_extraction_service import evidence_part
 
 
 SUPPORTED_RESUME_DOCUMENT_TYPES = {
-    "license_plate_photo",
-    "police_report_page",
-}
-SUPPORTED_DOCUMENT_EXTRACTION_TYPES = {
-    *SUPPORTED_RESUME_DOCUMENT_TYPES,
     "damage_evidence",
+    "license_plate_photo",
+    "medical_document",
+    "police_report",
+    "police_report_page",
+    "policy_document",
+    "towing_receipt",
 }
 
 
 class DocumentExtractionError(RuntimeError):
     """Raised when new evidence cannot be inspected safely."""
+
+
+class UnsupportedResumeDocumentTypeError(DocumentExtractionError):
+    """Raised when retrying cannot make a document type extractable."""
 
 
 class DocumentExtractor(Protocol):
@@ -38,12 +43,18 @@ class GeminiDocumentExtractor:
         self, document: ClaimDocument, candidate_requirement: str
     ) -> DocumentExtractionResult:
         if not _is_supported_document_type(document.document_type):
-            raise DocumentExtractionError(
+            raise UnsupportedResumeDocumentTypeError(
                 f"Unsupported resume document type: {document.document_type}"
             )
         if not document.storage_path:
             raise DocumentExtractionError(
                 f"Document {document.document_id} has no evidence storage path."
+            )
+        if document.document_type == "medical_document":
+            return DocumentExtractionResult(
+                usable=True,
+                reason="Medical documentation was received for human review.",
+                satisfies_requirement=candidate_requirement,
             )
 
         document_part = evidence_part(
@@ -54,6 +65,7 @@ class GeminiDocumentExtractor:
 Inspect this newly submitted claim document for evidence quality only.
 
 Document type: {document.document_type}
+Source filename: {document.filename}
 Deterministically matched requirement: {candidate_requirement}
 
 Rules:
@@ -69,9 +81,11 @@ Rules:
    damage location or tow condition when present. Do not infer liability.
 6. Report factual conflicts only when visible in this file and comparable with
    the supplied requirement. Do not invent values or sources.
-7. Do not create document requirements or choose workflow state.
-8. Do not decide liability, coverage, fraud, payout, approval, or denial.
-9. Return only DocumentExtractionResult.
+7. Populate evidence_facts only with normalized facts directly supported by this
+   file. Unknown or unsupported fields must remain null.
+8. Do not create document requirements or choose workflow state.
+9. Do not decide liability, coverage, fraud, payout, approval, or denial.
+10. Return only DocumentExtractionResult.
 """.strip()
 
         try:
@@ -117,6 +131,6 @@ Rules:
 
 def _is_supported_document_type(document_type: str) -> bool:
     return (
-        document_type in SUPPORTED_DOCUMENT_EXTRACTION_TYPES
+        document_type in SUPPORTED_RESUME_DOCUMENT_TYPES
         or document_type.startswith("police_report_page_")
     )

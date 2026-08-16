@@ -45,13 +45,27 @@ def _legacy_remediation() -> RecommendedRemediation:
 
 class HumanReviewSourceSummary(BaseModel):
     filename: str
+
+
+class HumanReviewSupportingDocument(BaseModel):
+    document_id: str
+    filename: str
     document_type: str
+    status: str
+
+
+class HumanReviewEvidenceRequest(BaseModel):
+    document_type: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    instruction: str = Field(min_length=1, max_length=500)
+    replaces_document_id: str | None = Field(default=None, max_length=128)
 
 
 class HumanReviewRecord(BaseModel):
     review_id: str
     claim_id: str
-    status: Literal["pending", "approved", "correction_requested", "expired"]
+    status: Literal[
+        "pending", "approved", "correction_requested", "manual_handling", "expired"
+    ]
     reason: str
     briefing: HumanReviewBriefing
     conflict_fields: list[str] = Field(default_factory=list, exclude=True)
@@ -68,8 +82,9 @@ class HumanReviewRecord(BaseModel):
         default_factory=_legacy_remediation
     )
     recommended_target_document_id: str | None = None
-    correction_type: Literal["text", "replace_document"] | None = None
+    correction_type: Literal["text", "upload_document", "replace_document"] | None = None
     target_document_id: str | None = None
+    requested_evidence: list[HumanReviewEvidenceRequest] = Field(default_factory=list)
     token_hash: str = Field(min_length=64, max_length=64, exclude=True)
     created_at: datetime
     expires_at: datetime
@@ -94,29 +109,39 @@ class HumanReviewRecord(BaseModel):
 class HumanReviewPublicResponse(BaseModel):
     review_id: str
     claim_id: str
-    status: Literal["pending", "approved", "correction_requested", "expired"]
+    status: Literal[
+        "pending", "approved", "correction_requested", "manual_handling", "expired"
+    ]
     reason: str
     briefing: HumanReviewBriefing
     source_references: list[HumanReviewSourceSummary] = Field(default_factory=list)
-    generation: int = Field(default=1, ge=1)
-    recommended_remediation: RecommendedRemediation = Field(
-        default_factory=_legacy_remediation
+    supporting_documents: list[HumanReviewSupportingDocument] = Field(
+        default_factory=list
     )
+    generation: int = Field(default=1, ge=1)
+    ai_recommendation: str = "Physical inspection recommended."
+    claim_snapshot: dict[str, str | bool | None] = Field(default_factory=dict)
+    evidence_comparison: list[dict[str, str]] = Field(default_factory=list)
+    resolution_history: list[str] = Field(default_factory=list)
     expires_at: datetime
     decision_at: datetime | None = None
+    checkpoint_status: str | None = None
 
 
 class HumanReviewDecisionRequest(BaseModel):
     decision_note: str | None = Field(default=None, max_length=1000)
     reviewer_label: str | None = Field(default=None, max_length=100)
-    correction_type: Literal["text", "replace_document"] | None = None
+    correction_type: Literal["text", "upload_document", "replace_document"] | None = None
     target_document_id: str | None = Field(default=None, max_length=128)
+    requested_evidence: list[HumanReviewEvidenceRequest] = Field(
+        default_factory=list, max_length=10
+    )
 
 
 class HumanReviewDecisionResponse(BaseModel):
     review_id: str
     claim_id: str
-    status: Literal["approved", "correction_requested"]
+    status: Literal["approved", "correction_requested", "manual_handling"]
     event_id: str
     message: str
     duplicate: bool = False

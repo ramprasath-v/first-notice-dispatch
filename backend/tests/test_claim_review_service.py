@@ -1,7 +1,9 @@
+import json
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+from google.genai import models as genai_models
 from pydantic import ValidationError
 
 from app.domain.claim_status import (
@@ -12,18 +14,31 @@ from app.domain.claim_status import (
 )
 from app.models.claim_document import ClaimDocument, DocumentExtractionResult
 from app.models.intake_result import ImageEvidenceCapabilities, IntakeResult
+from app.models.gemini_review_result import (
+    GeminiRequestedAction,
+    GeminiReviewResult,
+)
+from app.models.requested_action import (
+    EnterTextRequestedAction,
+    UploadDocumentRequestedAction,
+)
 from app.models.review_result import (
     ClaimEvidenceMetadata,
+    ConflictSourceAssertion,
     CurrentEvidenceFinding,
     EvidenceConflict,
     MissingEvidence,
     OperationalIndicators,
     ReviewResult,
+    SourceAwareConflict,
     UnresolvedUncertainty,
     UnusableEvidence,
     UploadedEvidence,
 )
-from app.services.claim_review_service import ClaimReviewService
+from app.services.claim_review_service import (
+    ClaimReviewService,
+    review_generation_config,
+)
 from app.services.document_extraction_service import GeminiDocumentExtractor
 from app.tools.adk_workflow_tools import build_initial_review_metadata
 
@@ -79,6 +94,27 @@ def ai_review(**overrides) -> ReviewResult:
     return ReviewResult(**values)
 
 
+def review_assertions(
+    field: str, assertions: list[tuple[str, str]]
+) -> SourceAwareConflict:
+    return SourceAwareConflict(
+        fingerprint="provider-value-is-not-authoritative",
+        field=field,
+        assertions=[
+            ConflictSourceAssertion(
+                field=field,
+                value=value,
+                source_identity="provider-value-is-not-authoritative",
+                filename=filename,
+                document_id="provider-value-is-not-authoritative",
+                replaceable=False,
+            )
+            for filename, value in assertions
+        ],
+        selected_outlier_document_id="provider-value-is-not-authoritative",
+    )
+
+
 class ClaimReviewServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = MagicMock(name="gemini_client")
@@ -98,18 +134,143 @@ class ClaimReviewServiceTests(unittest.TestCase):
             intake or intake_result(), metadata or complete_metadata()
         )
 
-    def test_complete_intake_routes_to_inspection_pending(self) -> None:
+    def test_complete_intake_routes_to_inspection_ready(self) -> None:
         review = self.run_review()
 
         self.assertTrue(review.intake_complete)
         self.assertEqual(review.intake_priority, "routine")
         self.assertEqual(
-            review_target_status(review), ClaimStatus.INSPECTION_PENDING
+            review_target_status(review), ClaimStatus.INSPECTION_READY
         )
         call = self.client.models.generate_content.call_args
         self.assertEqual(call.kwargs["model"], "configured-model-id")
         self.assertEqual(call.kwargs["config"].temperature, 0.1)
-        self.assertIs(call.kwargs["config"].response_schema, ReviewResult)
+        self.assertIs(call.kwargs["config"].response_schema, GeminiReviewResult)
+
+    def test_production_review_schema_compiles_with_vertex_sdk(self) -> None:
+        config = review_generation_config()
+        api_client = MagicMock(vertexai=True)
+
+        serialized = genai_models._GenerateContentConfig_to_vertex(
+            api_client, config, {}
+        )
+
+        action_schema = serialized["responseSchema"].properties[
+            "requested_actions"
+        ].items
+        schema_text = str(action_schema.model_dump(mode="json", exclude_none=True))
+        self.assertNotIn("one_of", schema_text)
+        self.assertNotIn("discriminator", schema_text)
+        review_schema = serialized["responseSchema"]
+        self.assertIn("review_outcome", review_schema.properties)
+        self.assertIn("ambiguity_reason", review_schema.properties)
+        self.assertIn("recommended_next_step", review_schema.properties)
+        self.assertIn("ambiguity_summary", review_schema.properties)
+
+    def test_review_instrumentation_survives_structured_output_and_rules(self) -> None:
+        review = self.run_review(
+            model_review=ai_review(
+                review_outcome="ambiguous",
+                ambiguity_reason="multiple_plausible_interpretations",
+                recommended_next_step="retry_with_deeper_reasoning",
+                ambiguity_summary="Two current sources support different damage sequences.",
+            )
+        )
+
+        self.assertEqual(review.review_outcome, "ambiguous")
+        self.assertEqual(
+            review.ambiguity_reason, "multiple_plausible_interpretations"
+        )
+        self.assertEqual(review.recommended_next_step, "retry_with_deeper_reasoning")
+        self.assertEqual(
+            review.ambiguity_summary,
+            "Two current sources support different damage sequences.",
+        )
+
+    def test_review_instrumentation_defaults_are_backward_compatible(self) -> None:
+        review = ai_review()
+
+        self.assertEqual(review.review_outcome, "resolved")
+        self.assertIsNone(review.ambiguity_reason)
+        self.assertEqual(review.recommended_next_step, "continue")
+        self.assertIsNone(review.ambiguity_summary)
+
+    def test_gemini_enter_text_action_converts_to_domain_action(self) -> None:
+        gemini_action = GeminiRequestedAction(
+            action_type="enter_text",
+            action_id="ACT-TEXT",
+            review_id="HRV-1",
+            field_name="policy_number",
+            document_type="police_report",
+            replaces_document_id="DOC-IGNORED",
+            instruction="Please confirm your policy number.",
+        )
+        action = gemini_action.to_domain()
+
+        self.assertIsNone(gemini_action.document_type)
+        self.assertIsNone(gemini_action.replaces_document_id)
+        self.assertIsInstance(action, EnterTextRequestedAction)
+        self.assertEqual(action.field_name, "policy_number")
+
+    def test_gemini_upload_action_converts_to_domain_action(self) -> None:
+        gemini_action = GeminiRequestedAction(
+            action_type="upload_document",
+            action_id="ACT-UPLOAD",
+            review_id="HRV-1",
+            document_type="damage_evidence",
+            field_name="incident_summary",
+            instruction="Please upload the correct damage photo.",
+            replaces_document_id="DOC-ORIGINAL",
+        )
+        action = gemini_action.to_domain()
+
+        self.assertIsNone(gemini_action.field_name)
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertIsNone(action.replaces_document_id)
+
+    def test_gemini_action_rejects_missing_relevant_fields(self) -> None:
+        invalid_actions = [
+            {
+                "action_type": "enter_text",
+                "action_id": "ACT-1",
+                "review_id": "HRV-1",
+                "instruction": "Confirm the value.",
+            },
+            {
+                "action_type": "upload_document",
+                "action_id": "ACT-2",
+                "review_id": "HRV-1",
+                "instruction": "Upload evidence.",
+            },
+        ]
+
+        for candidate in invalid_actions:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(ValidationError):
+                    GeminiRequestedAction.model_validate(candidate)
+
+    def test_gemini_action_rejects_unknown_type_and_unknown_fields(self) -> None:
+        invalid_actions = [
+            {
+                "action_type": "delete_document",
+                "action_id": "ACT-1",
+                "review_id": "HRV-1",
+                "instruction": "Delete evidence.",
+            },
+            {
+                "action_type": "enter_text",
+                "action_id": "ACT-2",
+                "review_id": "HRV-1",
+                "field_name": "policy_number",
+                "instruction": "Confirm the value.",
+                "backend_operation": "replace_any_document",
+            },
+        ]
+
+        for candidate in invalid_actions:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(ValidationError):
+                    GeminiRequestedAction.model_validate(candidate)
 
     def test_missing_license_plate_routes_to_awaiting_documents(self) -> None:
         metadata = complete_metadata(
@@ -234,6 +395,41 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertFalse(review.intake_complete)
         self.assertEqual(
             review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
+        )
+
+    def test_single_unusable_replaceable_artifact_requests_replacement(self) -> None:
+        metadata = complete_metadata(
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="unclear.jpg",
+                    document_id="DOC-UNCLEAR",
+                    source_identity="document:DOC-UNCLEAR",
+                    document_type="damage_evidence",
+                    status="unusable",
+                    usable=False,
+                    quality_observations=["The image is too blurry to assess."],
+                ),
+                UploadedEvidence(
+                    evidence_type="vehicle_identity",
+                    filename="identity.jpg",
+                    document_id="DOC-IDENTITY",
+                    source_identity="document:DOC-IDENTITY",
+                    document_type="license_plate_photo",
+                    status="validated",
+                    usable=True,
+                ),
+            ],
+            vehicle_identity_clear=True,
+        )
+
+        review = self.run_review(metadata=metadata)
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        self.assertEqual(len(review.requested_actions), 1)
+        self.assertEqual(
+            review.requested_actions[0].replaces_document_id, "DOC-UNCLEAR"
         )
 
     def test_clear_damage_without_plate_routes_to_awaiting_both_identity_documents(
@@ -368,7 +564,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
             review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
         )
 
-    def test_low_confidence_with_major_conflict_still_requires_human_review(
+    def test_low_confidence_with_resolvable_conflict_requests_claimant(
         self,
     ) -> None:
         uncertain_intake = intake_result().model_copy(
@@ -399,10 +595,11 @@ class ClaimReviewServiceTests(unittest.TestCase):
             model_review=ai_review(confidence=0.1),
         )
 
-        self.assertTrue(review.requires_human_review)
-        self.assertEqual(review.intake_priority, "urgent_human_review")
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.intake_priority, "routine")
+        self.assertEqual(review.requested_actions[0].action_type, "enter_text")
         self.assertEqual(
-            review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
+            review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
         )
 
     def test_vehicle_not_drivable_is_expedited(self) -> None:
@@ -418,9 +615,34 @@ class ClaimReviewServiceTests(unittest.TestCase):
 
         self.assertEqual(review.intake_priority, "urgent_human_review")
         self.assertTrue(review.requires_human_review)
+        self.assertTrue(review.operational_indicators.possible_injury)
         self.assertEqual(
             review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
         )
+
+    def test_positive_provider_injury_survives_summary_omission(self) -> None:
+        review = self.run_review(
+            model_review=ai_review(
+                operational_indicators=OperationalIndicators(
+                    possible_injury=True
+                )
+            )
+        )
+
+        self.assertTrue(review.operational_indicators.possible_injury)
+        self.assertTrue(review.requires_human_review)
+        self.assertEqual(review.intake_priority, "urgent_human_review")
+        self.assertEqual(
+            review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
+        )
+
+    def test_no_injury_signal_keeps_existing_routine_route(self) -> None:
+        review = self.run_review()
+
+        self.assertFalse(review.operational_indicators.possible_injury)
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.intake_priority, "routine")
+        self.assertEqual(review_target_status(review), ClaimStatus.INSPECTION_READY)
 
     def test_injury_indicator_overrides_resolvable_missing_evidence(self) -> None:
         metadata = complete_metadata(
@@ -452,6 +674,195 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertEqual(
             review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
         )
+
+    def test_live_flow_4_safety_outlier_routes_to_claimant_remediation(self) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type="police_report", filename="police-report.pdf",
+                document_id="DOC-REPORT", source_identity="document:DOC-REPORT",
+                document_type="police_report", usable=True,
+                evidence_findings=[
+                    "Rear-end collision with rear bumper and left tail light damage."
+                ],
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="IMG_5418.png",
+                document_id="DOC-ORIGINAL", source_identity="document:DOC-ORIGINAL",
+                document_type="damage_evidence", usable=True,
+                evidence_findings=["Rear bumper and left tail light damage."],
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="IMG_5420.png",
+                document_id="DOC-BAD", source_identity="document:DOC-BAD",
+                document_type="license_plate_photo", usable=True,
+                evidence_findings=[
+                    "A silver SUV has front-end damage.",
+                    "A material vehicle safety concern is visible.",
+                ],
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="IMG_5419.png",
+                document_id="DOC-CORRECT", source_identity="document:DOC-CORRECT",
+                document_type="license_plate_photo", usable=True,
+                evidence_findings=[
+                    "A grey sedan has rear damage and California plate 7ABX123."
+                ],
+            ),
+            UploadedEvidence(
+                evidence_type="vehicle_identity", filename="IMG_5419.png",
+                document_id="DOC-CORRECT", source_identity="document:DOC-CORRECT",
+                document_type="license_plate_photo", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="license_plate_photo", filename="IMG_5419.png",
+                document_id="DOC-CORRECT", source_identity="document:DOC-CORRECT",
+                document_type="license_plate_photo", usable=True,
+            ),
+        ]
+        model_review = ai_review(
+            conflicts=[EvidenceConflict(
+                field="vehicle_identity_and_damage_location",
+                values=["silver SUV/front", "grey sedan/rear"],
+                sources=["IMG_5420.png", "IMG_5419.png"],
+                reason="The vehicle and damage evidence disagree.",
+            )],
+            current_evidence_findings=[
+                CurrentEvidenceFinding(
+                    source=item.filename, finding=finding
+                )
+                for item in uploaded
+                for finding in item.evidence_findings
+            ],
+            unresolved_uncertainties=[UnresolvedUncertainty(
+                uncertainty=(
+                    "The silver front-damage vehicle and grey rear-damage vehicle "
+                    "may not be the same vehicle."
+                ),
+                sources=["IMG_5420.png", "IMG_5419.png"],
+            )],
+            operational_indicators=OperationalIndicators(
+                safety_concern=True,
+                significant_damage=True,
+                high_operational_uncertainty=True,
+            ),
+        )
+
+        review = self.run_review(
+            metadata=complete_metadata(
+                uploaded_evidence=list(reversed(uploaded)),
+                vehicle_identity_clear=True,
+                safety_concern=True,
+            ),
+            model_review=model_review,
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        self.assertEqual(len(review.requested_actions), 1)
+        self.assertEqual(
+            review.requested_actions[0].replaces_document_id, "DOC-BAD"
+        )
+        self.assertEqual(
+            review.source_aware_conflicts[0].selected_outlier_document_id,
+            "DOC-BAD",
+        )
+
+    def test_production_flow_3_identity_request_targets_safe_damage_outlier(self) -> None:
+        metadata = complete_metadata(
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="policy_document",
+                    filename="policy.pdf",
+                    document_id="DOC-POLICY",
+                    source_identity="document:DOC-POLICY",
+                    document_type="policy_document",
+                    usable=True,
+                    evidence_findings=["The insured vehicle is a Toyota Corolla."],
+                ),
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="police-report.pdf",
+                    document_id="DOC-REPORT",
+                    source_identity="document:DOC-REPORT",
+                    document_type="police_report",
+                    usable=True,
+                    evidence_findings=["The involved vehicle is a Toyota Corolla."],
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="vehicle_damage_front.jpg",
+                    document_id="DOC-FRONT",
+                    source_identity="document:DOC-FRONT",
+                    document_type="damage_evidence",
+                    usable=True,
+                    evidence_findings=["The photographed vehicle is a Honda SUV."],
+                ),
+            ],
+            vehicle_identity_clear=False,
+        )
+        model_review = ai_review(
+            conflicts=[
+                EvidenceConflict(
+                    field="vehicle_make",
+                    values=["Toyota", "Toyota", "Honda"],
+                    sources=[
+                        "policy.pdf",
+                        "police-report.pdf",
+                        "vehicle_damage_front.jpg",
+                    ],
+                    reason="The policy and report identify a different vehicle.",
+                ),
+                EvidenceConflict(
+                    field="vehicle_drivability",
+                    values=["drivable", "potentially not drivable"],
+                    sources=["police-report.pdf", "vehicle_damage_front.jpg"],
+                    reason="The report and questionable photo disagree.",
+                ),
+                EvidenceConflict(
+                    field="damage_location",
+                    values=["rear", "front"],
+                    sources=["police-report.pdf", "vehicle_damage_front.jpg"],
+                    reason="The photo damage differs from the report.",
+                ),
+            ],
+            current_evidence_findings=[
+                CurrentEvidenceFinding(
+                    source="police-report.pdf",
+                    finding="Rear damage is reported and the vehicle is drivable.",
+                ),
+                CurrentEvidenceFinding(
+                    source="vehicle_damage_front.jpg",
+                    finding="Front damage and steam from the radiator are visible.",
+                ),
+            ],
+            unresolved_uncertainties=[
+                UnresolvedUncertainty(
+                    uncertainty="Vehicle identity cannot be verified.",
+                    sources=["vehicle_damage_front.jpg"],
+                )
+            ],
+            operational_indicators=OperationalIndicators(
+                safety_concern=True,
+                significant_damage=True,
+                high_operational_uncertainty=True,
+            ),
+        )
+
+        review = self.run_review(metadata=metadata, model_review=model_review)
+
+        self.assertEqual(
+            {item.type for item in review.missing_documents},
+            {"vehicle_identity", "license_plate_photo"},
+        )
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(
+            review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
+        )
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertEqual(action.replaces_document_id, "DOC-FRONT")
+        self.assertIn("readable license plate", action.instruction)
 
     def test_consequential_uncertainty_after_complete_evidence_requires_human_review(
         self,
@@ -487,7 +898,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertTrue(review.requires_human_review)
         self.assertEqual(
             review.human_review_reason,
-            "High uncertainty affects the next operational routing step.",
+            "FirstNotice could not formulate a safe claimant remediation.",
         )
 
     def test_historical_uncertainty_count_alone_does_not_trigger_human_review(
@@ -595,6 +1006,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
             },
         )
         self.assertTrue(review.requires_human_review)
+        self.assertEqual(review.requested_actions, [])
         self.assertEqual(review.intake_priority, "urgent_human_review")
 
     def test_approved_fingerprint_suppresses_only_unchanged_current_issue(self) -> None:
@@ -725,12 +1137,72 @@ class ClaimReviewServiceTests(unittest.TestCase):
             model_review=model,
         )
 
-        self.assertTrue(review.requires_human_review)
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.requested_actions[0].action_type, "upload_document")
         self.assertEqual(review.conflicts, [])
         self.assertEqual(
             review.source_aware_uncertainties[0].selected_outlier_document_id,
             "DOC-FRONT",
         )
+
+    def test_one_vs_one_report_and_wrong_photo_requires_human_review(self) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type="police_report", filename="police-report.pdf",
+                document_id="DOC-REPORT", source_identity="document:DOC-REPORT",
+                document_type="police_report", usable=True,
+            ),
+            UploadedEvidence(
+                evidence_type="damage_evidence", filename="front.jpg",
+                document_id="DOC-FRONT", source_identity="document:DOC-FRONT",
+                document_type="damage_evidence", usable=True,
+            ),
+        ]
+        conflict = EvidenceConflict(
+            field="damage_location", values=["rear", "front"],
+            sources=["police-report.pdf", "front.jpg"],
+            reason="The photo damage location differs from the report.",
+        )
+
+        model_review = ai_review(
+            conflicts=[conflict],
+            current_evidence_findings=[
+                CurrentEvidenceFinding(
+                    source="police-report.pdf", finding="Rear-end damage."
+                ),
+                CurrentEvidenceFinding(
+                    source="front.jpg", finding="Front-end damage."
+                ),
+            ],
+        )
+        response_payload = model_review.model_dump(mode="json")
+        response_payload["requested_actions"] = [
+            {
+                "action_type": "upload_document",
+                "action_id": "ACT-GEMINI",
+                "review_id": "HRV-GEMINI",
+                "field_name": "incident_summary",
+                "document_type": "damage_evidence",
+                "instruction": "Please upload the correct damage photo.",
+                "replaces_document_id": "DOC-GEMINI-CANNOT-AUTHORIZE",
+            }
+        ]
+        self.client.models.generate_content.return_value.text = json.dumps(
+            response_payload
+        )
+
+        review = self.service.review(
+            intake_result(),
+            complete_metadata(
+                uploaded_evidence=uploaded, vehicle_identity_clear=True
+            ),
+        )
+
+        self.assertTrue(review.requires_human_review)
+        self.assertEqual(
+            review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
+        )
+        self.assertEqual(review.requested_actions, [])
 
     def test_changed_evidence_set_produces_new_review_fingerprint(self) -> None:
         base = [
@@ -798,7 +1270,8 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertNotEqual(
             changed.source_aware_conflicts[0].fingerprint, approved_fingerprint
         )
-        self.assertTrue(changed.requires_human_review)
+        self.assertFalse(changed.requires_human_review)
+        self.assertEqual(len(changed.requested_actions), 1)
 
     def test_two_image_uncertainty_preserves_both_grounded_sources(self) -> None:
         metadata = complete_metadata(
@@ -937,7 +1410,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertEqual(review.intake_priority, "routine")
         self.assertFalse(review.requires_human_review)
 
-    def test_minor_conflict_does_not_block_operational_completeness(self) -> None:
+    def test_unresolved_minor_conflict_blocks_operational_completeness(self) -> None:
         model_review = ai_review(
             intake_complete=False,
             conflicts=[
@@ -952,10 +1425,10 @@ class ClaimReviewServiceTests(unittest.TestCase):
 
         review = self.run_review(model_review=model_review)
 
-        self.assertTrue(review.intake_complete)
-        self.assertFalse(review.requires_human_review)
+        self.assertFalse(review.intake_complete)
+        self.assertTrue(review.requires_human_review)
 
-    def test_major_conflicting_evidence_requires_human_review(self) -> None:
+    def test_structured_conflict_requests_claimant_correction(self) -> None:
         model_review = ai_review(
             intake_complete=False,
             conflicts=[
@@ -970,11 +1443,570 @@ class ClaimReviewServiceTests(unittest.TestCase):
 
         review = self.run_review(model_review=model_review)
 
-        self.assertEqual(review.intake_priority, "urgent_human_review")
+        self.assertEqual(review.intake_priority, "routine")
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.requested_actions[0].action_type, "enter_text")
+        self.assertEqual(
+            review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
+        )
+
+    def test_missing_policy_and_corroborated_mismatch_preserve_replacement_target(
+        self,
+    ) -> None:
+        metadata = complete_metadata(
+            vehicle_identity_clear=True,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="policy_document",
+                    filename="policy.pdf",
+                    document_id="DOC-POLICY",
+                    source_identity="document:DOC-POLICY",
+                    document_type="policy_document",
+                    usable=True,
+                    evidence_findings=["The insured vehicle is a Honda Civic."],
+                ),
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="report.pdf",
+                    document_id="DOC-REPORT",
+                    source_identity="document:DOC-REPORT",
+                    document_type="police_report",
+                    usable=True,
+                    evidence_findings=["The involved vehicle is a Toyota Camry."],
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="vehicle.jpg",
+                    document_id="DOC-PHOTO",
+                    source_identity="document:DOC-PHOTO",
+                    document_type="damage_evidence",
+                    usable=True,
+                    evidence_findings=["The photographed vehicle is a Toyota Camry."],
+                ),
+                UploadedEvidence(
+                    evidence_type="vehicle_identity",
+                    filename="vehicle.jpg",
+                    document_id="DOC-PHOTO",
+                    source_identity="document:DOC-PHOTO",
+                    document_type="damage_evidence",
+                    usable=True,
+                ),
+            ],
+        )
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Honda Civic", "Toyota Camry", "Toyota Camry"],
+            sources=["policy.pdf", "report.pdf", "vehicle.jpg"],
+            reason="The policy vehicle differs from corroborating current evidence.",
+        )
+
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                intake_complete=False,
+                missing_documents=[
+                    MissingEvidence(
+                        type="policy_document",
+                        reason="The current policy evidence conflicts with the claim.",
+                        source_requirement="policy_document",
+                    )
+                ],
+                conflicts=[conflict],
+                review_outcome="claimant_remediable",
+                recommended_next_step="request_claimant_evidence",
+            ),
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.review_outcome, "claimant_remediable")
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertEqual(action.document_type, "policy_document")
+        self.assertEqual(action.replaces_document_id, "DOC-POLICY")
+
+    def test_persisted_facts_override_provider_human_review_recommendation(
+        self,
+    ) -> None:
+        metadata = complete_metadata(
+            vehicle_identity_clear=True,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="policy_document",
+                    filename="policy.pdf",
+                    document_id="DOC-POLICY",
+                    source_identity="document:DOC-POLICY",
+                    document_type="policy_document",
+                    status="received",
+                    evidence_findings=[
+                        "vehicle_identity: 2022 Honda Accord",
+                        "vehicle_make: Honda",
+                        "vehicle_model: Accord",
+                        "vehicle_year: 2022",
+                    ],
+                ),
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="report.pdf",
+                    document_id="DOC-REPORT",
+                    source_identity="document:DOC-REPORT",
+                    document_type="police_report",
+                    status="received",
+                    evidence_findings=[
+                        "vehicle_identity: 2014 Toyota Corolla",
+                        "vehicle_make: Toyota",
+                        "vehicle_model: Corolla",
+                        "vehicle_year: 2014",
+                    ],
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="vehicle.png",
+                    document_id="DOC-PHOTO",
+                    source_identity="document:DOC-PHOTO",
+                    document_type="damage_evidence",
+                    status="received",
+                    evidence_findings=[
+                        "vehicle_identity: Toyota Corolla",
+                        "vehicle_make: Toyota",
+                        "vehicle_model: Corolla",
+                    ],
+                ),
+            ],
+        )
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["2022 Honda Accord", "2014 Toyota Corolla"],
+            sources=["policy.pdf", "report.pdf", "vehicle.png"],
+            reason="The policy vehicle differs from the incident evidence.",
+        )
+
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                intake_complete=False,
+                conflicts=[conflict],
+                source_aware_conflicts=[],
+                review_outcome="requires_human_judgment",
+                ambiguity_reason="policy_or_business_judgment",
+                recommended_next_step="human_review",
+            ),
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertEqual(action.document_type, "policy_document")
+        self.assertEqual(action.replaces_document_id, "DOC-POLICY")
+
+    def test_received_unusable_policy_and_safe_outlier_preserve_replacement_target(
+        self,
+    ) -> None:
+        metadata = complete_metadata(
+            vehicle_identity_clear=True,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="policy_document",
+                    filename="policy.pdf",
+                    document_id="DOC-POLICY",
+                    source_identity="document:DOC-POLICY",
+                    document_type="policy_document",
+                    status="received",
+                    evidence_findings=["The insured vehicle is a Honda Civic."],
+                ),
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="report.pdf",
+                    document_id="DOC-REPORT",
+                    source_identity="document:DOC-REPORT",
+                    document_type="police_report",
+                    usable=True,
+                    evidence_findings=["The involved vehicle is a Toyota Camry."],
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="vehicle.jpg",
+                    document_id="DOC-PHOTO",
+                    source_identity="document:DOC-PHOTO",
+                    document_type="damage_evidence",
+                    usable=True,
+                    evidence_findings=["The photographed vehicle is a Toyota Camry."],
+                ),
+            ],
+        )
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Honda Civic", "Toyota Camry", "Toyota Camry"],
+            sources=["policy.pdf", "report.pdf", "vehicle.jpg"],
+            reason="The policy vehicle differs from corroborating current evidence.",
+        )
+
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                intake_complete=False,
+                unusable_evidence=[
+                    UnusableEvidence(
+                        evidence_type="policy_document",
+                        reason="The policy vehicle conflicts with current evidence.",
+                        suggested_action="Upload the correct policy document.",
+                    )
+                ],
+                conflicts=[conflict],
+                review_outcome="claimant_remediable",
+                recommended_next_step="request_claimant_evidence",
+            ),
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertEqual(action.document_type, "policy_document")
+        self.assertEqual(action.replaces_document_id, "DOC-POLICY")
+
+    def test_source_aligned_two_vs_one_selects_replaceable_outlier(self) -> None:
+        metadata = complete_metadata(
+            vehicle_identity_clear=True,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="source-a.pdf",
+                    document_id="DOC-A",
+                    source_identity="document:DOC-A",
+                    document_type="police_report",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="source-b.jpg",
+                    document_id="DOC-B",
+                    source_identity="document:DOC-B",
+                    document_type="damage_evidence",
+                    usable=True,
+                    evidence_findings=["The artifact states value one."],
+                ),
+                UploadedEvidence(
+                    evidence_type="vehicle_identity",
+                    filename="source-b.jpg",
+                    document_id="DOC-B",
+                    source_identity="document:DOC-B",
+                    document_type="damage_evidence",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="source-c.jpg",
+                    document_id="DOC-C",
+                    source_identity="document:DOC-C",
+                    document_type="damage_evidence",
+                    usable=True,
+                ),
+            ],
+        )
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["value one", "value two"],
+            sources=["source-a.pdf", "source-c.jpg"],
+            reason="The submitted sources disagree.",
+        )
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                intake_complete=False,
+                conflicts=[conflict],
+                source_aware_conflicts=[review_assertions(
+                    "vehicle_identity",
+                    [
+                        ("source-a.pdf", "value one"),
+                        ("source-c.jpg", "value two"),
+                    ],
+                )],
+            ),
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review.requested_actions[0].replaces_document_id, "DOC-C")
+        self.assertEqual(
+            review.source_aware_conflicts[0].selected_outlier_document_id,
+            "DOC-C",
+        )
+
+    def test_all_active_reconstruction_one_vs_one_does_not_guess(self) -> None:
+        metadata = complete_metadata(
+            vehicle_identity_clear=True,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="source-a.pdf",
+                    document_id="DOC-A",
+                    source_identity="document:DOC-A",
+                    document_type="police_report",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="source-b.jpg",
+                    document_id="DOC-B",
+                    source_identity="document:DOC-B",
+                    document_type="damage_evidence",
+                    usable=True,
+                ),
+            ],
+        )
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["value one", "value two"],
+            sources=["source-a.pdf", "source-b.jpg"],
+            reason="The two sources disagree.",
+        )
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                intake_complete=False,
+                conflicts=[conflict],
+                source_aware_conflicts=[review_assertions(
+                    "vehicle_identity",
+                    [
+                        ("source-a.pdf", "value one"),
+                        ("source-b.jpg", "value two"),
+                    ],
+                )],
+            ),
+        )
+
+        self.assertIsNone(
+            review.source_aware_conflicts[0].selected_outlier_document_id
+        )
+        self.assertEqual(review.requested_actions, [])
+        self.assertTrue(review.requires_human_review)
+
+    def test_partial_atomic_vehicle_facts_create_targeted_composite_replacement(
+        self,
+    ) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type=document_type,
+                filename=filename,
+                document_id=document_id,
+                source_identity=f"document:{document_id}",
+                document_type=document_type,
+                status=status,
+                usable=usable,
+                evidence_findings=findings,
+            )
+            for document_type, filename, document_id, status, usable, findings in (
+                (
+                    "policy_document", "insurance2.pdf", "DOC-POLICY",
+                    "received", None,
+                    [
+                        "vehicle_identity: 2014 Toyota Corolla (Dark Grey)",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "vehicle_year: 2014", "license_plate: 7ABX123",
+                    ],
+                ),
+                (
+                    "police_report", "policeReport2.pdf", "DOC-REPORT",
+                    "received", None,
+                    [
+                        "vehicle_identity: 2014 Toyota Corolla (Dark Grey)",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "vehicle_year: 2014", "license_plate: 7ABX123",
+                    ],
+                ),
+                (
+                    "license_plate_photo", "image3.jpg", "DOC-WRONG",
+                    "unusable", False,
+                    ["vehicle_identity: Honda SUV", "vehicle_make: Honda"],
+                ),
+                (
+                    "license_plate_photo", "imageL2.png", "DOC-CORRECT",
+                    "validated", True,
+                    [
+                        "vehicle_identity: Toyota Corolla",
+                        "vehicle_make: Toyota", "vehicle_model: Corolla",
+                        "license_plate: 7ABX123",
+                    ],
+                ),
+            )
+        ]
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Honda SUV", "2014 Toyota Corolla (Dark Grey)"],
+            sources=["image3.jpg", "insurance2.pdf"],
+            reason="The submitted sources identify different vehicles.",
+        )
+
+        review = self.run_review(
+            metadata=complete_metadata(
+                uploaded_evidence=uploaded,
+                vehicle_identity_clear=True,
+            ),
+            model_review=ai_review(
+                intake_complete=False,
+                conflicts=[conflict],
+                review_outcome="requires_human_judgment",
+                ambiguity_reason="multiple_plausible_interpretations",
+                recommended_next_step="human_review",
+                ambiguity_summary="The submitted images appear inconsistent.",
+            ),
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertEqual(action.replaces_document_id, "DOC-WRONG")
+        self.assertEqual(
+            review.source_aware_conflicts[0].selected_outlier_document_id,
+            "DOC-WRONG",
+        )
+
+    def test_source_aligned_three_way_conflict_does_not_guess(self) -> None:
+        metadata = complete_metadata(
+            vehicle_identity_clear=True,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type=document_type,
+                    filename=filename,
+                    document_id=document_id,
+                    source_identity=f"document:{document_id}",
+                    document_type=document_type,
+                    usable=True,
+                )
+                for document_type, filename, document_id in (
+                    ("police_report", "source-a.pdf", "DOC-A"),
+                    ("damage_evidence", "source-b.jpg", "DOC-B"),
+                    ("damage_evidence", "source-c.jpg", "DOC-C"),
+                )
+            ],
+        )
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["unmapped", "values"],
+            sources=["source-a.pdf", "source-b.jpg", "source-c.jpg"],
+            reason="The sources disagree.",
+        )
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                intake_complete=False,
+                conflicts=[conflict],
+                source_aware_conflicts=[review_assertions(
+                    "vehicle_identity",
+                    [
+                        ("source-a.pdf", "value one"),
+                        ("source-b.jpg", "value two"),
+                        ("source-c.jpg", "value three"),
+                    ],
+                )],
+            ),
+        )
+
+        self.assertEqual(review.requested_actions, [])
+        self.assertTrue(review.requires_human_review)
+
+    def test_incomplete_source_assertions_do_not_select_outlier(self) -> None:
+        metadata = complete_metadata(
+            vehicle_identity_clear=True,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type=document_type,
+                    filename=filename,
+                    document_id=document_id,
+                    source_identity=f"document:{document_id}",
+                    document_type=document_type,
+                    usable=True,
+                )
+                for document_type, filename, document_id in (
+                    ("police_report", "source-a.pdf", "DOC-A"),
+                    ("damage_evidence", "source-b.jpg", "DOC-B"),
+                    ("damage_evidence", "source-c.jpg", "DOC-C"),
+                )
+            ],
+        )
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["unmapped", "values"],
+            sources=["source-a.pdf", "source-b.jpg", "source-c.jpg"],
+            reason="The sources disagree.",
+        )
+        review = self.run_review(
+            metadata=metadata,
+            model_review=ai_review(
+                intake_complete=False,
+                conflicts=[conflict],
+                source_aware_conflicts=[review_assertions(
+                    "vehicle_identity",
+                    [
+                        ("source-a.pdf", "value one"),
+                        ("source-c.jpg", "value two"),
+                    ],
+                )],
+            ),
+        )
+
+        self.assertIsNone(
+            review.source_aware_conflicts[0].selected_outlier_document_id
+        )
+        self.assertEqual(review.requested_actions, [])
+        self.assertTrue(review.requires_human_review)
+
+    def test_three_way_vehicle_conflict_requires_human_review(self) -> None:
+        uploaded = [
+            UploadedEvidence(
+                evidence_type=document_type,
+                filename=filename,
+                document_id=document_id,
+                source_identity=f"document:{document_id}",
+                document_type=document_type,
+                usable=True,
+            )
+            for document_type, filename, document_id in (
+                ("policy_document", "policy.pdf", "DOC-POLICY"),
+                ("police_report", "report.pdf", "DOC-REPORT"),
+                ("damage_evidence", "vehicle.jpg", "DOC-PHOTO"),
+            )
+        ]
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Honda", "Toyota", "Nissan"],
+            sources=["policy.pdf", "report.pdf", "vehicle.jpg"],
+            reason="Each source identifies a different vehicle.",
+        )
+
+        review = self.run_review(
+            metadata=complete_metadata(
+                uploaded_evidence=uploaded,
+                vehicle_identity_clear=True,
+            ),
+            model_review=ai_review(intake_complete=False, conflicts=[conflict]),
+        )
+
+        self.assertEqual(review.requested_actions, [])
         self.assertTrue(review.requires_human_review)
         self.assertEqual(
             review_target_status(review), ClaimStatus.HUMAN_REVIEW_REQUIRED
         )
+
+    def test_missing_policy_number_requests_policy_document(self) -> None:
+        review = self.run_review(
+            intake=intake_result().model_copy(update={"policy_number": None})
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        self.assertEqual(review.requested_actions[0].document_type, "policy_document")
+
+    def test_missing_required_police_report_requests_report(self) -> None:
+        review = self.run_review(
+            metadata=complete_metadata(police_attended=True)
+        )
+
+        self.assertFalse(review.requires_human_review)
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        self.assertEqual(review.requested_actions[0].document_type, "police_report")
 
     def test_missing_referenced_police_report_page_is_retained(self) -> None:
         metadata = complete_metadata(

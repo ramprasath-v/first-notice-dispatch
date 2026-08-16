@@ -10,6 +10,7 @@ from app.events.claim_events import (
     ClaimCorrectionReceivedEvent,
     ClaimHumanReviewApprovedEvent,
     ClaimHumanReviewCorrectionRequestedEvent,
+    ClaimHumanReviewManualHandlingEvent,
     CorrectionReceivedPayload,
     HumanReviewPayload,
     human_review_event_id,
@@ -36,6 +37,8 @@ from app.models.requested_action import (
     EvidenceSourceReference,
     UploadDocumentRequestedAction,
 )
+from app.services.document_extraction_service import SUPPORTED_RESUME_DOCUMENT_TYPES
+from app.services.claim_storage_service import ClaimStorageService
 from app.tools.firestore_repository import FirestoreClaimRepository
 
 
@@ -92,6 +95,7 @@ class HumanReviewService:
         publisher: ClaimEventPublisher,
         settings: HumanReviewSettings,
         gmail_sender: GmailSender | None = None,
+        storage_service: ClaimStorageService | None = None,
         recipient: str = "",
         sender: str = "",
     ) -> None:
@@ -99,6 +103,7 @@ class HumanReviewService:
         self._publisher = publisher
         self._settings = settings
         self._gmail_sender = gmail_sender
+        self._storage_service = storage_service
         self._recipient = recipient
         self._sender = sender
 
@@ -106,9 +111,13 @@ class HumanReviewService:
         self, claim_id: str, *, correlation_id: str
     ) -> HumanReviewRecord:
         claim = self._repository.get_claim(claim_id)
-        if claim is None or claim.get("status") != ClaimStatus.HUMAN_REVIEW_REQUIRED:
+        status = claim.get("status") if claim else None
+        if status not in {
+            ClaimStatus.INSPECTION_READY,
+            ClaimStatus.HUMAN_REVIEW_REQUIRED,
+        }:
             raise HumanReviewConflictError(
-                "A human review can only be requested for human_review_required."
+                "An inspection decision can only be requested for inspection_ready."
             )
         generation, generation_key, review_id = self._current_review_generation(
             claim_id, claim
@@ -128,7 +137,14 @@ class HumanReviewService:
                 review_id=review_id,
                 claim_id=claim_id,
                 status="pending",
-                reason=str(claim.get("human_review_reason") or "Human verification is required."),
+                reason=(
+                    "Autonomous intake is complete and ready for an inspection decision."
+                    if status == ClaimStatus.INSPECTION_READY
+                    else str(
+                        claim.get("human_review_reason")
+                        or "Human verification is required."
+                    )
+                ),
                 briefing=_briefing_from_claim(claim),
                 conflict_fields=[
                     str(item.get("field"))
@@ -202,7 +218,11 @@ class HumanReviewService:
             claim_id=claim_id,
             recipient=self._recipient,
             sender=self._sender,
-            subject=f"Human Review Required - {claim_id}",
+            subject=(
+                f"Inspection Decision Ready - {claim_id}"
+                if status == ClaimStatus.INSPECTION_READY
+                else f"Human Review Required - {claim_id}"
+            ),
             reason=review.reason,
             summary=review.briefing.summary,
             conflicts=review.briefing.conflicts,
@@ -287,59 +307,155 @@ class HumanReviewService:
 
     def get_public_review(self, token: str) -> HumanReviewPublicResponse:
         review = self._review_for_token(token)
-        return HumanReviewPublicResponse.model_validate(review.model_dump())
+        claim = self._repository.get_claim(review.claim_id) or {}
+        documents = [
+            item
+            for item in self._repository.get_documents(review.claim_id)
+            if item.status != "superseded"
+        ]
+        active_document_ids = {item.document_id for item in documents}
+        return HumanReviewPublicResponse.model_validate({
+            **review.model_dump(),
+            "source_references": [
+                item.model_dump(mode="python")
+                for item in review.source_references
+                if item.document_id in active_document_ids
+            ],
+            "supporting_documents": [
+                {
+                    "document_id": item.document_id,
+                    "filename": item.filename,
+                    "document_type": item.document_type,
+                    "status": item.status,
+                }
+                for item in documents
+                if item.document_type == "medical_document"
+                and item.status != "superseded"
+            ],
+            "checkpoint_status": claim.get("status"),
+            "ai_recommendation": _inspection_recommendation(claim),
+            "claim_snapshot": _inspection_claim_snapshot(claim, documents),
+            "evidence_comparison": [
+                {
+                    "source": str(item.get("source")),
+                    "finding": str(item.get("finding")),
+                }
+                for item in claim.get("current_evidence_findings", [])
+                if isinstance(item, dict)
+                and item.get("source")
+                and item.get("finding")
+            ],
+            "resolution_history": _resolution_history(
+                self._repository.get_claim_events(review.claim_id)
+            ),
+        })
+
+    def get_supporting_document(
+        self, token: str, document_id: str
+    ) -> tuple[bytes, str, str]:
+        review = self._review_for_token(token)
+        document = self._repository.get_document(review.claim_id, document_id)
+        if (
+            document is None
+            or document.status == "superseded"
+            or document.document_type != "medical_document"
+            or not document.object_name
+            or self._storage_service is None
+        ):
+            raise HumanReviewNotFoundError("Supporting document is unavailable.")
+        return (
+            self._storage_service.download_claim_document(document.object_name),
+            document.filename,
+            document.content_type or "application/octet-stream",
+        )
 
     def approve(
         self, token: str, request: HumanReviewDecisionRequest
     ) -> HumanReviewDecisionResponse:
+        candidate = self._repository.get_human_review_by_token_hash(
+            hash_review_token(token)
+        )
+        if isinstance(candidate, HumanReviewRecord):
+            self._ensure_current_decision(candidate)
         return self._decide(token, "approved", request)
 
     def request_correction(
         self, token: str, request: HumanReviewDecisionRequest
     ) -> HumanReviewDecisionResponse:
         review = self._review_for_token(token)
-        remediation = review.recommended_remediation
-        if not remediation.can_request:
-            raise HumanReviewConflictError(
-                "FirstNotice cannot safely select one remediation target for this review."
-            )
-        if remediation.type == "upload_document":
-            target_id = review.recommended_target_document_id
-            target = next(
-                (
-                    item
-                    for item in review.source_references
-                    if item.document_id == target_id and item.replacement_eligible
-                ),
-                None,
-            )
-            if target is None:
+        self._ensure_current_decision(review)
+        claim = self._repository.get_claim(review.claim_id)
+        if request.requested_evidence:
+            unsupported = [
+                item.document_type
+                for item in request.requested_evidence
+                if item.document_type not in SUPPORTED_RESUME_DOCUMENT_TYPES
+                and not item.document_type.startswith("police_report_page_")
+            ]
+            if unsupported:
                 raise HumanReviewConflictError(
-                    "The recommended replacement target is no longer available."
+                    f"Unsupported requested evidence type: {unsupported[0]}"
                 )
-            document = self._repository.get_document(
-                review.claim_id, target.document_id
-            )
-            if (
-                document is None
-                or document.claim_id != review.claim_id
-                or document.status == "superseded"
-                or document.document_type != target.document_type
-            ):
-                raise HumanReviewConflictError(
-                    "The recommended replacement target is no longer active."
+            for item in request.requested_evidence:
+                if not item.replaces_document_id:
+                    continue
+                target = self._repository.get_document(
+                    review.claim_id, item.replaces_document_id
                 )
+                if (
+                    target is None
+                    or target.claim_id != review.claim_id
+                    or target.status == "superseded"
+                    or target.document_type != item.document_type
+                ):
+                    raise HumanReviewConflictError(
+                        "A requested replacement target is not an active matching "
+                        "document for this claim."
+                    )
             authoritative = request.model_copy(
                 update={
-                    "correction_type": "replace_document",
-                    "target_document_id": target.document_id,
+                    "correction_type": "upload_document",
+                    "target_document_id": None,
+                    "decision_note": request.decision_note
+                    or "The adjuster requested additional evidence.",
                 }
             )
-        else:
-            authoritative = request.model_copy(
-                update={"correction_type": "text", "target_document_id": None}
-            )
+            return self._decide(token, "correction_requested", authoritative)
+        instruction = (request.decision_note or "").strip()
+        action_type, _ = _interpret_adjuster_instruction(instruction)
+        authoritative = request.model_copy(
+            update={"correction_type": action_type, "target_document_id": None}
+        )
         return self._decide(token, "correction_requested", authoritative)
+
+    def continue_manual_handling(
+        self, token: str, request: HumanReviewDecisionRequest
+    ) -> HumanReviewDecisionResponse:
+        review = self._review_for_token(token)
+        self._ensure_current_decision(review)
+        claim = self._repository.get_claim(review.claim_id)
+        if claim is None or claim.get("status") != ClaimStatus.HUMAN_REVIEW_REQUIRED:
+            raise HumanReviewConflictError(
+                "Manual handling is available only for a claim requiring human review."
+            )
+        return self._decide(token, "manual_handling", request)
+
+    def _ensure_current_decision(self, review: HumanReviewRecord) -> None:
+        claim = self._repository.get_claim(review.claim_id)
+        if (
+            claim is None
+            or claim.get("status") not in {
+                ClaimStatus.INSPECTION_READY,
+                ClaimStatus.HUMAN_REVIEW_REQUIRED,
+            }
+            or (
+                claim.get("current_human_review_id")
+                and claim.get("current_human_review_id") != review.review_id
+            )
+        ):
+            raise HumanReviewConflictError(
+                "This inspection decision link is no longer current."
+            )
 
     def _decide(
         self,
@@ -355,13 +471,18 @@ class HumanReviewService:
             reviewer_label=request.reviewer_label,
             correction_type=(request.correction_type or "text"),
             target_document_id=request.target_document_id,
+            requested_evidence=[
+                item.model_dump(mode="python") for item in request.requested_evidence
+            ],
             now=datetime.now(timezone.utc),
         )
         if review is None:
             raise HumanReviewNotFoundError("Review link is invalid.")
         if review.status == "expired":
             raise HumanReviewExpiredError("This review link has expired.")
-        if duplicate and review.status not in {"approved", "correction_requested"}:
+        if duplicate and review.status not in {
+            "approved", "correction_requested", "manual_handling"
+        }:
             raise HumanReviewConflictError("This review cannot accept a decision.")
         if duplicate and review.status != decision:
             return _decision_response(review, duplicate=True)
@@ -374,6 +495,8 @@ class HumanReviewService:
                 ClaimHumanReviewApprovedEvent
                 if decision == "approved"
                 else ClaimHumanReviewCorrectionRequestedEvent
+                if decision == "correction_requested"
+                else ClaimHumanReviewManualHandlingEvent
             )
             event = event_cls(
                 event_id=event_id,
@@ -389,10 +512,12 @@ class HumanReviewService:
                     "human_review_approved"
                     if decision == "approved"
                     else "human_review_correction_requested"
+                    if decision == "correction_requested"
+                    else "human_review_manual_handling_selected"
                 ),
                 actor="adjuster",
-                from_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
-                to_status=ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
+                from_status=str((self._repository.get_claim(review.claim_id) or {}).get("status")),
+                to_status=str((self._repository.get_claim(review.claim_id) or {}).get("status")),
                 details={
                     "review_id": review.review_id,
                     "review_generation": review.generation,
@@ -507,7 +632,9 @@ class HumanReviewResumeWorkflow:
         missing = list(claim.get("missing_documents", []))
         unusable = list(claim.get("unusable_evidence", []))
         target = (
-            ClaimStatus.AWAITING_DOCUMENTS
+            ClaimStatus.INSPECTION_PENDING
+            if claim.get("status") == ClaimStatus.INSPECTION_READY
+            else ClaimStatus.AWAITING_DOCUMENTS
             if missing or unusable
             else ClaimStatus.INSPECTION_PENDING
         )
@@ -529,7 +656,35 @@ class HumanReviewResumeWorkflow:
 
     def request_correction(self, claim_id: str, review_id: str, correlation_id: str) -> dict[str, str]:
         claim, review = self._validated(claim_id, review_id, "correction_requested")
-        if review.correction_type == "replace_document":
+        if review.requested_evidence:
+            actions = [
+                UploadDocumentRequestedAction(
+                    action_id=_requested_action_id(
+                        review_id,
+                        "upload_document",
+                        f"{index}:{item.document_type}:{item.instruction}",
+                    ),
+                    review_id=review_id,
+                    document_type=item.document_type,
+                    instruction=item.instruction,
+                    replaces_document_id=item.replaces_document_id,
+                )
+                for index, item in enumerate(review.requested_evidence)
+            ]
+            requested_actions = [item.model_dump(mode="python") for item in actions]
+        elif review.correction_type == "upload_document":
+            instruction = (review.decision_note or "").strip()
+            _, document_type = _interpret_adjuster_instruction(instruction)
+            action = UploadDocumentRequestedAction(
+                action_id=_requested_action_id(
+                    review_id, "upload_document", document_type
+                ),
+                review_id=review_id,
+                document_type=document_type,
+                instruction=instruction,
+            )
+            requested_actions = [action.model_dump(mode="python")]
+        elif review.correction_type == "replace_document":
             target = _validated_replacement_target(
                 self._repository, claim_id, review
             )
@@ -550,17 +705,41 @@ class HumanReviewResumeWorkflow:
             requested_actions = [
                 _text_requested_action(review).model_dump(mode="python")
             ]
+        requested_missing = [
+            {
+                "type": action["document_type"],
+                "reason": action["instruction"],
+                "source_requirement": "adjuster_request",
+            }
+            for action in requested_actions
+            if action.get("action_type") == "upload_document"
+        ]
         self._repository.complete_human_review_resume(
             claim_id=claim_id,
             review_id=review_id,
             target_status=ClaimStatus.AWAITING_DOCUMENTS,
             conflicts=list(claim.get("conflicts", [])),
-            missing_documents=list(claim.get("missing_documents", [])),
+            missing_documents=requested_missing
+            or list(claim.get("missing_documents", [])),
             unusable_evidence=list(claim.get("unusable_evidence", [])),
             requested_actions=requested_actions,
             correlation_id=correlation_id,
         )
         return {"action": "claimant_correction_requested", "final_status": "awaiting_documents"}
+
+    def continue_manual_handling(
+        self, claim_id: str, review_id: str, correlation_id: str
+    ) -> dict[str, str]:
+        self._validated(claim_id, review_id, "manual_handling")
+        self._repository.complete_manual_human_review(
+            claim_id=claim_id,
+            review_id=review_id,
+            correlation_id=correlation_id,
+        )
+        return {
+            "action": "human_review_manual_handling",
+            "final_status": ClaimStatus.HUMAN_REVIEW_REQUIRED.value,
+        }
 
     def resume_correction(
         self, claim_id: str, review_id: str, field_name: str, correlation_id: str
@@ -583,7 +762,17 @@ class HumanReviewResumeWorkflow:
     def _validated(self, claim_id: str, review_id: str, expected: str):
         claim = self._repository.get_claim(claim_id)
         review = self._repository.get_human_review(claim_id, review_id)
-        if claim is None or claim.get("status") != ClaimStatus.HUMAN_REVIEW_REQUIRED:
+        if (
+            claim is None
+            or claim.get("status") not in {
+                ClaimStatus.INSPECTION_READY,
+                ClaimStatus.HUMAN_REVIEW_REQUIRED,
+            }
+            or (
+                claim.get("current_human_review_id")
+                and claim.get("current_human_review_id") != review_id
+            )
+        ):
             raise HumanReviewConflictError("Claim is not at the human review checkpoint.")
         if review is None or review.status != expected:
             raise HumanReviewConflictError("The required human review decision is absent.")
@@ -593,6 +782,49 @@ class HumanReviewResumeWorkflow:
 def _requested_action_id(review_id: str, action_type: str, target: str) -> str:
     value = f"{review_id}:{action_type}:{target}".encode("utf-8")
     return f"ACT-{hashlib.sha256(value).hexdigest()[:16].upper()}"
+
+
+def _interpret_adjuster_instruction(instruction: str) -> tuple[str, str]:
+    """Map untrusted prose into one allowlisted claimant action."""
+    normalized = " ".join(instruction.casefold().split())
+    if not normalized:
+        raise HumanReviewConflictError(
+            "Describe the additional information needed from the claimant."
+        )
+    text_verbs = ("provide", "confirm", "correct", "enter", "update")
+    if "policy number" in normalized and any(word in normalized for word in text_verbs):
+        return "text", "policy_number"
+    if "incident date" in normalized and any(word in normalized for word in text_verbs):
+        return "text", "incident_date"
+    if "upload" not in normalized:
+        raise HumanReviewConflictError(
+            "Request a specific supported document, vehicle photo, policy number, "
+            "or incident date."
+        )
+    medical_terms = (
+        "medical documentation",
+        "medical document",
+        "medical record",
+        "injury documentation",
+        "documentation related to the reported injury",
+    )
+    if any(term in normalized for term in medical_terms):
+        return "upload_document", "medical_document"
+    if "policy" in normalized and "document" in normalized:
+        return "upload_document", "policy_document"
+    if "police" in normalized and "report" in normalized:
+        return "upload_document", "police_report"
+    if "towing" in normalized and "receipt" in normalized:
+        return "upload_document", "towing_receipt"
+    if any(word in normalized for word in ("photo", "image")):
+        if any(word in normalized for word in ("plate", "license", "vin", "identity")):
+            return "upload_document", "license_plate_photo"
+        if any(word in normalized for word in ("vehicle", "damage")):
+            return "upload_document", "damage_evidence"
+    raise HumanReviewConflictError(
+        "Request a specific supported document, vehicle photo, policy number, "
+        "or incident date."
+    )
 
 
 def _recommended_remediation(
@@ -723,30 +955,93 @@ def _recommended_remediation(
 
 
 def _text_requested_action(review: HumanReviewRecord) -> EnterTextRequestedAction:
-    remediation = review.recommended_remediation
-    field_name = remediation.field_name or "incident_summary"
-    if field_name == "incident_summary":
-        field_name = next(
-            (
-                field
-                for field in review.conflict_fields
-                if field in {"policy_number", "incident_date"}
-            ),
-            field_name,
-        )
-    instruction = (
-        "Please confirm your policy number."
-        if field_name == "policy_number"
-        else "Please confirm the incident date."
-        if field_name == "incident_date"
-        else remediation.instruction
-    )
+    instruction = (review.decision_note or "").strip()
+    if instruction:
+        action_type, field_name = _interpret_adjuster_instruction(instruction)
+        if action_type != "text":
+            raise HumanReviewConflictError("The recorded correction is not a text request.")
+    else:
+        field_name = review.recommended_remediation.field_name or "incident_summary"
+        if field_name == "incident_summary":
+            field_name = next(
+                (
+                    field
+                    for field in review.conflict_fields
+                    if field in {"policy_number", "incident_date"}
+                ),
+                field_name,
+            )
+        instruction = review.recommended_remediation.instruction
     return EnterTextRequestedAction(
         action_id=_requested_action_id(review.review_id, "enter_text", field_name),
         review_id=review.review_id,
         field_name=field_name,
         instruction=instruction,
     )
+
+
+def _inspection_recommendation(claim: dict[str, object]) -> str:
+    damage = str(claim.get("damage_type") or "").strip()
+    identity_clear = not any(
+        isinstance(item, dict)
+        and item.get("type") in {"vehicle_identity", "license_plate_photo"}
+        for item in claim.get("missing_documents", [])
+    )
+    details: list[str] = []
+    if damage:
+        details.append(f"Current evidence supports {damage.lower()}.")
+    if identity_clear:
+        details.append("Vehicle identity requirements are satisfied.")
+    return "Physical inspection recommended. " + " ".join(details)
+
+
+def _inspection_claim_snapshot(
+    claim: dict[str, object], documents: list[ClaimDocument]
+) -> dict[str, str | bool | None]:
+    def status_for(types: set[str]) -> str:
+        matching = [item for item in documents if item.document_type in types]
+        if not matching:
+            return "Not provided"
+        return (
+            "Validated"
+            if any(item.status == "validated" for item in matching)
+            else "Received"
+        )
+
+    return {
+        "incident": str(claim.get("incident_summary") or "") or None,
+        "vehicle": str(claim.get("claim_type") or "") or None,
+        "policy_number": str(claim.get("policy_number") or "") or None,
+        "drivable": (
+            claim.get("vehicle_drivable")
+            if isinstance(claim.get("vehicle_drivable"), bool)
+            else None
+        ),
+        "police_report_status": status_for({"police_report"}),
+        "damage_evidence_status": status_for(
+            {"damage_evidence", "license_plate_photo"}
+        ),
+    }
+
+
+def _resolution_history(events: object) -> list[str]:
+    if not isinstance(events, list):
+        return []
+    labels = {
+        "document_received": "Claimant supplied additional evidence.",
+        "missing_requirement_satisfied": "FirstNotice validated requested evidence.",
+        "missing_requirement_still_unresolved": "FirstNotice requested another evidence attempt.",
+        "claim_review_resumed": "FirstNotice re-analyzed the current evidence package.",
+        "claim_moved_to_inspection_ready": "Current evidence package is ready for an inspection decision.",
+    }
+    result: list[str] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        label = labels.get(str(event.get("action") or ""))
+        if label and label not in result:
+            result.append(label)
+    return result
 
 
 def _conflict_source_references(
@@ -923,7 +1218,12 @@ def _briefing_from_claim(claim: dict[str, object]) -> HumanReviewBriefing:
     )
     if not current_findings and claim.get("incident_summary"):
         known.append(str(claim["incident_summary"]).strip())
-    reason = str(claim.get("human_review_reason") or "Human verification is required.")
+    inspection_decision = claim.get("status") == ClaimStatus.INSPECTION_READY
+    reason = (
+        "Autonomous intake is complete and ready for an inspection decision."
+        if inspection_decision
+        else str(claim.get("human_review_reason") or "Human verification is required.")
+    )
     questions = [
         _conflict_review_question(item)
         for item in claim.get("conflicts", [])
@@ -935,10 +1235,16 @@ def _briefing_from_claim(claim: dict[str, object]) -> HumanReviewBriefing:
         if isinstance(item, dict) and item.get("uncertainty")
     )
     if not questions:
-        questions = ["Verify the current evidence before operational routing continues."]
+        questions = [
+            "Review the current evidence package before authorizing inspection."
+        ]
     return HumanReviewBriefing(
         reason=reason,
-        summary=f"FirstNotice paused automated routing because {reason.lower()}",
+        summary=(
+            "FirstNotice completed autonomous intake and resolved outstanding evidence requirements."
+            if inspection_decision
+            else f"FirstNotice paused automated routing because {reason.lower()}"
+        ),
         known_facts=known,
         conflicts=conflicts,
         unresolved_questions=questions,
@@ -971,8 +1277,10 @@ def _decision_response(review: HumanReviewRecord, *, duplicate: bool) -> HumanRe
             review.claim_id, review.review_id, review.status
         ),
         message=(
-            "Review approved. FirstNotice has resumed processing the claim."
+            "Inspection authorized. FirstNotice has started inspection dispatch."
             if approved
+            else "Manual handling recorded. No claimant action was requested."
+            if review.status == "manual_handling"
             else "Correction requested. The claimant workflow will update automatically."
         ),
         duplicate=duplicate,
