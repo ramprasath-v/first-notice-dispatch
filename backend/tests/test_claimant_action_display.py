@@ -106,6 +106,23 @@ class ClaimantActionDisplayTests(unittest.TestCase):
         )
         self.assertIn("conflicts with the vehicle identity", display.explanation)
 
+    def test_initial_selected_damage_image_keeps_generic_identity_copy(self) -> None:
+        display = build_claimant_action_display(
+            {"source_aware_conflicts": [{
+                "field": "vehicle_identity",
+                "selected_outlier_document_id": "DOC-BAD",
+                "assertions": [
+                    assertion("policy.pdf", "DOC-POLICY", "policy_document", replaceable=False),
+                    assertion("report.pdf", "DOC-REPORT", "police_report", replaceable=False),
+                    assertion("initial.jpg", "DOC-BAD", "damage_evidence", replaceable=True),
+                ],
+            }]},
+            [upload_action()],
+        )
+
+        self.assertEqual(display.title, "Vehicle identity not verified")
+        self.assertNotIn("doesn't match", display.title)
+
     def test_identity_without_selected_outlier_keeps_generic_copy(self) -> None:
         display = build_claimant_action_display(
             {"source_aware_conflicts": [{

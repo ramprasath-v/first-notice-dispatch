@@ -155,7 +155,7 @@ def build_claimant_action_display(
             )
 
         if has_identity:
-            if has_selected_target:
+            if has_selected_target and is_followup_artifact:
                 return ClaimantActionDisplay(
                     title="This evidence doesn't match the vehicle in the claim.",
                     explanation=(

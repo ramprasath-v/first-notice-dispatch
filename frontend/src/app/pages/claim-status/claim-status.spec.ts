@@ -263,6 +263,33 @@ describe('ClaimStatusPage', () => {
     expect(fixture.nativeElement.querySelector('input[type=file]')).not.toBeNull();
   });
 
+  it('keeps initial Flow 4 identity remediation generic', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      action_display: {
+        title: 'Vehicle identity not verified',
+        explanation: 'The submitted damage photo does not show a readable license plate.',
+      },
+      requested_actions: [{
+        action_type: 'upload_document',
+        action_id: 'ACT-INITIAL-FLOW-4',
+        review_id: 'AUTONOMOUS-INITIAL-FLOW-4',
+        document_type: 'license_plate_photo',
+        instruction: 'Please upload a clear vehicle photo with a readable license plate.',
+        replaces_document_id: 'DOC-INITIAL',
+      }],
+    })));
+
+    const fixture = await create();
+
+    expect(fixture.nativeElement.textContent).toContain('Vehicle identity not verified');
+    expect(fixture.nativeElement.textContent).toContain(
+      'Please upload a clear vehicle photo with a readable license plate.',
+    );
+    expect(fixture.nativeElement.textContent).not.toContain(
+      "This evidence doesn't match the vehicle in the claim.",
+    );
+  });
+
   it('prioritizes a human-review action over ordinary missing evidence', async () => {
     api.getClaim.mockReturnValue(
       of(
