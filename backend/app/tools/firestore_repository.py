@@ -1427,7 +1427,11 @@ class FirestoreClaimRepository:
             for item in claim.get("conflicts", [])
             if not isinstance(item, dict) or item.get("field") != field_name
         ]
-        missing = list(claim.get("missing_documents", []))
+        missing = [
+            item
+            for item in claim.get("missing_documents", [])
+            if not isinstance(item, dict) or item.get("type") != field_name
+        ]
         unusable = list(claim.get("unusable_evidence", []))
         target = (
             ClaimStatus.AWAITING_DOCUMENTS
@@ -1463,6 +1467,7 @@ class FirestoreClaimRepository:
                     field_name: value,
                     "pending_corrections": {},
                     "requested_actions": [],
+                    "missing_documents": missing,
                     "conflicts": remaining_conflicts,
                     "conflict_count": len(remaining_conflicts),
                     "requires_human_review": False,

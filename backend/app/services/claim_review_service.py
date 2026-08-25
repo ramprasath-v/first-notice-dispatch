@@ -499,11 +499,22 @@ def _reconcile_evidence_action(
     """Reconcile current evidence into at most one safe claimant action."""
     for field_name, instruction in (
         ("policy_number", "Please confirm your policy number."),
-        ("incident_date", "Please confirm the incident date."),
+        ("incident_date", "Please provide the incident date to continue."),
     ):
         conflict = next((item for item in conflicts if item.field == field_name), None)
-        if conflict is not None:
-            fingerprint = _action_fingerprint(field_name, conflict.sources)
+        missing_field = next(
+            (
+                item
+                for item in missing_documents
+                if field_name == "incident_date" and item.type == field_name
+            ),
+            None,
+        )
+        if conflict is not None or missing_field is not None:
+            fingerprint = _action_fingerprint(
+                field_name,
+                conflict.sources if conflict is not None else ["missing"],
+            )
             return [EnterTextRequestedAction(
                 action_id=f"ACT-{fingerprint}",
                 review_id=f"AUTONOMOUS-{fingerprint}",

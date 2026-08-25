@@ -143,6 +143,77 @@ describe('ClaimStatusPage', () => {
     expect(fixture.nativeElement.textContent).toContain('What to do');
   });
 
+  it('renders a missing incident date as a date picker without an uploader', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      missing_documents: [{ type: 'incident_date' }],
+      requested_actions: [{
+        action_type: 'enter_text',
+        action_id: 'ACT-DATE',
+        review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date',
+        instruction: 'Please provide the incident date to continue.',
+      }],
+    })));
+
+    const fixture = await create();
+
+    expect(fixture.nativeElement.textContent).toContain(
+      "We couldn't determine when the collision occurred.",
+    );
+    expect(fixture.nativeElement.textContent).toContain(
+      'Please provide the incident date to continue.',
+    );
+    expect(fixture.nativeElement.querySelector('input[type=date]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('input[type=file]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('incident_date');
+  });
+
+  it('submits a valid incident date through the correction API', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+    })));
+    const fixture = await create();
+    fixture.componentInstance.correctionValue = '2026-08-07';
+
+    fixture.componentInstance.submitCorrection('incident_date');
+
+    expect(api.submitCorrection).toHaveBeenCalledWith(
+      'CLM-ABC12345', 'incident_date', '2026-08-07',
+    );
+    expect(api.uploadDocument).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid or empty incident date without calling the API', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+    })));
+    const fixture = await create();
+
+    fixture.componentInstance.submitCorrection('incident_date');
+    expect(api.submitCorrection).not.toHaveBeenCalled();
+    expect(fixture.componentInstance.error()).toContain('select the incident date');
+
+    fixture.componentInstance.correctionValue = 'invalid';
+    fixture.componentInstance.submitCorrection('incident_date');
+    expect(api.submitCorrection).not.toHaveBeenCalled();
+    expect(fixture.componentInstance.error()).toContain('valid incident date');
+  });
+
+  it('does not render a date picker when incident date was already extracted', async () => {
+    api.getClaim.mockReturnValue(of(claim('inspection_ready')));
+
+    const fixture = await create();
+
+    expect(fixture.nativeElement.querySelector('input[type=date]')).toBeNull();
+  });
+
   it('renders upload_document as one file picker without a correction text box', async () => {
     api.getClaim.mockReturnValue(
       of(

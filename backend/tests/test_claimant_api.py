@@ -616,6 +616,34 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
         )
         self.assertIn("readable license plate", response.action_display.explanation)
 
+    def test_get_claim_exposes_missing_date_as_text_action_not_upload(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+            "intake_priority": "routine",
+            "missing_documents": [{
+                "type": "incident_date",
+                "reason": "An incident date is required for intake routing.",
+                "source_requirement": "always_required",
+            }],
+            "unusable_evidence": [],
+            "requested_actions": [{
+                "action_type": "enter_text",
+                "action_id": "ACT-DATE",
+                "review_id": "AUTONOMOUS-DATE",
+                "field_name": "incident_date",
+                "instruction": "Please provide the incident date to continue.",
+            }],
+            "updated_at": NOW,
+        }
+        self.repository.get_scheduled_appointment.return_value = None
+
+        response = self.service.get_claim(CLAIM_ID)
+
+        self.assertEqual(response.requested_evidence, [])
+        self.assertEqual(response.requested_actions[0].action_type, "enter_text")
+        self.assertEqual(response.requested_actions[0].field_name, "incident_date")
+
     def test_get_claim_exposes_durable_manual_handling_state(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,

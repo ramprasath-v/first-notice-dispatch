@@ -69,7 +69,11 @@ def build_claimant_evidence_requests(
     handled = LICENSE_PLATE_ARTIFACT.satisfies_requirements
     seen: set[str] = set()
     for requirement, reason, replacement in unresolved:
-        if requirement in handled or requirement in seen:
+        if (
+            requirement == "incident_date"
+            or requirement in handled
+            or requirement in seen
+        ):
             continue
         seen.add(requirement)
         requests.append(

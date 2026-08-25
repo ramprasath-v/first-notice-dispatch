@@ -2,7 +2,7 @@ import hashlib
 import os
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
 from app.domain.claim_status import ClaimStatus
@@ -549,6 +549,20 @@ class HumanReviewService:
         action = next((item for item in actions if item.get("field_name") == field_name), None)
         if claim.get("status") != ClaimStatus.AWAITING_DOCUMENTS or action is None:
             raise HumanReviewConflictError("This correction is not currently requested.")
+        value = value.strip()
+        if field_name == "incident_date":
+            try:
+                parsed_date = date.fromisoformat(value)
+            except ValueError as exc:
+                raise HumanReviewConflictError(
+                    "Please provide a valid incident date in YYYY-MM-DD format."
+                ) from exc
+            if parsed_date.isoformat() != value or parsed_date > datetime.now(
+                timezone.utc
+            ).date():
+                raise HumanReviewConflictError(
+                    "Please provide a valid incident date that is not in the future."
+                )
         review_id = str(action["review_id"])
         event = ClaimCorrectionReceivedEvent(
             event_type="claim.correction.received",

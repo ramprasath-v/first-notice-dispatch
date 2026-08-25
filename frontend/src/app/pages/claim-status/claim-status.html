@@ -55,17 +55,21 @@
         <section class="card correction-card">
           <p class="kicker">Action needed</p>
           <p class="action-count">1 item needed to continue</p>
-          <h2>{{ current.action_display?.title || 'More information needed' }}</h2>
-          @if (current.action_display) {
+          <h2>{{ action.field_name === 'incident_date' ? "We couldn't determine when the collision occurred." : current.action_display?.title || 'More information needed' }}</h2>
+          @if (action.field_name === 'incident_date') {
+            <p>Please provide the incident date to continue.</p>
+          } @else if (current.action_display) {
             <div class="correction-context"><strong>Why we need this</strong><p>{{ current.action_display.explanation }}</p></div>
           }
-          <p class="what-to-do"><strong>What to do</strong>{{ action.instruction }}</p>
+          @if (action.field_name !== 'incident_date') {
+            <p class="what-to-do"><strong>What to do</strong>{{ action.instruction }}</p>
+          }
           <label class="field">
-            <span>Your response</span>
-            <input [(ngModel)]="correctionValue" maxlength="256" autocomplete="off" />
+            <span>{{ action.field_name === 'incident_date' ? 'Incident date' : 'Your response' }}</span>
+            <input [type]="action.field_name === 'incident_date' ? 'date' : 'text'" [(ngModel)]="correctionValue" maxlength="256" autocomplete="off" />
           </label>
-          <button class="primary" type="button" [disabled]="uploading() || !correctionValue.trim()" (click)="submitCorrection(action.field_name)">
-            {{ uploading() ? 'Submitting…' : 'Submit correction' }}
+          <button class="primary" type="button" [disabled]="correctionSubmitDisabled(action)" (click)="submitCorrection(action.field_name)">
+            {{ uploading() ? 'Submitting…' : action.field_name === 'incident_date' ? 'Continue' : 'Submit correction' }}
           </button>
           <p class="supporting-copy">FirstNotice will automatically continue processing when this item is received.</p>
         </section>

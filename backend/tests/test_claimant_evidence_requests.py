@@ -59,6 +59,11 @@ class ClaimantEvidenceRequestTests(unittest.TestCase):
             {"police_report", "license_plate_photo"},
         )
 
+    def test_incident_date_is_never_projected_as_uploadable_evidence(self) -> None:
+        requests = build_claimant_evidence_requests([missing("incident_date")])
+
+        self.assertEqual(requests, [])
+
 
 if __name__ == "__main__":
     unittest.main()

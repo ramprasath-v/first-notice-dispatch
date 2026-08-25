@@ -110,6 +110,51 @@ class HumanReviewServiceTests(unittest.TestCase):
             sender="sender@gmail.com",
         )
 
+    def test_valid_requested_incident_date_is_saved_and_published(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+            "requested_actions": [{
+                "action_type": "enter_text",
+                "action_id": "ACT-DATE",
+                "review_id": "AUTONOMOUS-DATE",
+                "field_name": "incident_date",
+                "instruction": "Please provide the incident date to continue.",
+            }],
+        }
+
+        self.service.submit_correction(
+            CLAIM_ID, field_name="incident_date", value="2026-08-07"
+        )
+
+        self.repository.save_claim_correction.assert_called_once()
+        self.assertEqual(
+            self.repository.save_claim_correction.call_args.kwargs["value"],
+            "2026-08-07",
+        )
+        self.publisher.publish.assert_called_once()
+
+    def test_invalid_requested_incident_date_is_not_saved_or_published(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+            "requested_actions": [{
+                "action_type": "enter_text",
+                "action_id": "ACT-DATE",
+                "review_id": "AUTONOMOUS-DATE",
+                "field_name": "incident_date",
+                "instruction": "Please provide the incident date to continue.",
+            }],
+        }
+
+        with self.assertRaises(HumanReviewConflictError):
+            self.service.submit_correction(
+                CLAIM_ID, field_name="incident_date", value="not-a-date"
+            )
+
+        self.repository.save_claim_correction.assert_not_called()
+        self.publisher.publish.assert_not_called()
+
     def test_human_review_required_creates_one_secure_review_and_email(self) -> None:
         review = self.service.ensure_review_requested(CLAIM_ID, correlation_id="corr-review")
 

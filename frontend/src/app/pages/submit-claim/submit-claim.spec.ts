@@ -38,6 +38,16 @@ describe('SubmitClaim', () => {
     expect(fixture.nativeElement.querySelector('#policy')).toBeNull();
   });
 
+  it('explains the evidence-first intake model without an incident-date field', () => {
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('Upload evidence, don’t fill out forms.');
+    expect(fixture.nativeElement.textContent).toContain(
+      'We only ask you for information when it can’t be determined reliably.',
+    );
+    expect(fixture.nativeElement.querySelector('input[type=date]')).toBeNull();
+  });
+
   it('rejects submission without evidence', () => {
     component.submit();
     fixture.detectChanges();

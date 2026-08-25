@@ -1450,6 +1450,31 @@ class ClaimReviewServiceTests(unittest.TestCase):
             review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
         )
 
+    def test_missing_incident_date_requests_structured_text_correction(self) -> None:
+        missing_date = intake_result().model_copy(update={"incident_date": None})
+
+        review = self.run_review(intake=missing_date)
+
+        self.assertEqual(review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS)
+        self.assertEqual([item.type for item in review.missing_documents], ["incident_date"])
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, EnterTextRequestedAction)
+        self.assertEqual(action.field_name, "incident_date")
+        self.assertEqual(action.instruction, "Please provide the incident date to continue.")
+
+    def test_extracted_incident_date_does_not_request_manual_date(self) -> None:
+        review = self.run_review()
+
+        self.assertNotIn("incident_date", [item.type for item in review.missing_documents])
+        self.assertFalse(
+            any(
+                isinstance(action, EnterTextRequestedAction)
+                and action.field_name == "incident_date"
+                for action in review.requested_actions
+            )
+        )
+
     def test_missing_policy_and_corroborated_mismatch_preserve_replacement_target(
         self,
     ) -> None:

@@ -95,6 +95,42 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         )
         self.assertNotIn("evidence_findings", mapped)
 
+    def test_complete_date_correction_persists_fact_and_clears_missing_item(self) -> None:
+        self.repository.get_claim = MagicMock(return_value={
+            "claim_id": "CLM-A1B2C3D4",
+            "status": "awaiting_documents",
+            "missing_documents": [{
+                "type": "incident_date",
+                "reason": "Incident date is required.",
+            }],
+            "unusable_evidence": [],
+            "conflicts": [],
+            "intake_priority": "routine",
+        })
+        self.repository.reserve_human_review_generation = MagicMock(
+            return_value=HumanReviewGeneration(
+                generation=1,
+                generation_key="date-correction",
+                review_id="HRV-DATE",
+                created=True,
+            )
+        )
+
+        target = self.repository.complete_claim_correction(
+            claim_id="CLM-A1B2C3D4",
+            review_id="AUTONOMOUS-DATE",
+            field_name="incident_date",
+            value="2026-08-07",
+            correlation_id="corr-date",
+        )
+
+        self.assertEqual(target, ClaimStatus.INSPECTION_READY)
+        claim_update = self.batch.update.call_args_list[0].args[1]
+        self.assertEqual(claim_update["incident_date"], "2026-08-07")
+        self.assertEqual(claim_update["missing_documents"], [])
+        self.assertEqual(claim_update["status"], "inspection_ready")
+        self.batch.commit.assert_called_once_with()
+
     def test_completed_intake_writes_claim_and_event_in_one_batch(self) -> None:
         claim_id = self.repository.save_completed_intake(
             self.result,

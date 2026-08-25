@@ -444,7 +444,19 @@ export class ClaimStatusPage {
 
   submitCorrection(fieldName: string): void {
     const value = this.correctionValue.trim();
-    if (!value || this.uploading() || this.rechecking()) return;
+    if (this.uploading() || this.rechecking()) return;
+    if (!value) {
+      this.error.set(
+        fieldName === 'incident_date'
+          ? 'Please select the incident date.'
+          : 'Please enter the requested information.',
+      );
+      return;
+    }
+    if (fieldName === 'incident_date' && !this.isValidIncidentDate(value)) {
+      this.error.set('Please select a valid incident date that is not in the future.');
+      return;
+    }
     this.uploading.set(true);
     this.error.set('');
     this.api.submitCorrection(this.claimId, fieldName, value).subscribe({
@@ -469,6 +481,19 @@ export class ClaimStatusPage {
         this.error.set('We could not submit that correction. Please try again.');
       },
     });
+  }
+
+  correctionSubmitDisabled(action: EnterTextRequestedAction): boolean {
+    return this.uploading() || this.rechecking()
+      || (action.field_name !== 'incident_date' && !this.correctionValue.trim());
+  }
+
+  private isValidIncidentDate(value: string): boolean {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime())
+      && parsed.toISOString().slice(0, 10) === value
+      && value <= new Date().toISOString().slice(0, 10);
   }
 
   private shouldPoll(): boolean {
