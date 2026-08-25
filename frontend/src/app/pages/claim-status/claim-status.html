@@ -55,9 +55,9 @@
         <section class="card correction-card">
           <p class="kicker">Action needed</p>
           <p class="action-count">1 item needed to continue</p>
-          <h2>{{ action.field_name === 'incident_date' ? "We couldn't determine when the collision occurred." : current.action_display?.title || 'More information needed' }}</h2>
+          <h2>{{ action.field_name === 'incident_date' ? "We couldn't determine the collision date." : current.action_display?.title || 'More information needed' }}</h2>
           @if (action.field_name === 'incident_date') {
-            <p>Please provide the incident date to continue.</p>
+            <p>Please confirm the incident date to continue.</p>
           } @else if (current.action_display) {
             <div class="correction-context"><strong>Why we need this</strong><p>{{ current.action_display.explanation }}</p></div>
           }

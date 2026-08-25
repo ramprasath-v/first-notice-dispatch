@@ -114,6 +114,11 @@ def build_claimant_action_display(
         }
 
         is_followup_artifact = "license_plate_photo" in target_types
+        has_selected_target = any(
+            item.get("selected_outlier_document_id")
+            == current_action.replaces_document_id
+            for item in related
+        )
 
         if has_damage and has_identity:
             return ClaimantActionDisplay(
@@ -150,6 +155,14 @@ def build_claimant_action_display(
             )
 
         if has_identity:
+            if has_selected_target:
+                return ClaimantActionDisplay(
+                    title="This evidence doesn't match the vehicle in the claim.",
+                    explanation=(
+                        "The submitted photo conflicts with the vehicle identity "
+                        "established by the other claim evidence."
+                    ),
+                )
             return ClaimantActionDisplay(
                 title="Vehicle identity not verified",
                 explanation=(

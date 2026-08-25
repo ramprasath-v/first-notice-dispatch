@@ -158,10 +158,10 @@ describe('ClaimStatusPage', () => {
     const fixture = await create();
 
     expect(fixture.nativeElement.textContent).toContain(
-      "We couldn't determine when the collision occurred.",
+      "We couldn't determine the collision date.",
     );
     expect(fixture.nativeElement.textContent).toContain(
-      'Please provide the incident date to continue.',
+      'Please confirm the incident date to continue.',
     );
     expect(fixture.nativeElement.querySelector('input[type=date]')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('input[type=file]')).toBeNull();
@@ -234,6 +234,33 @@ describe('ClaimStatusPage', () => {
     const fixture = await create();
     expect(fixture.nativeElement.querySelectorAll('input[type=file]')).toHaveLength(1);
     expect(fixture.nativeElement.querySelector('.correction-card input')).toBeNull();
+  });
+
+  it('renders mismatch-specific Flow 4 copy from the grounded backend display', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      action_display: {
+        title: "This evidence doesn't match the vehicle in the claim.",
+        explanation: 'The submitted photo conflicts with the vehicle identity established by the other claim evidence.',
+      },
+      requested_actions: [{
+        action_type: 'upload_document',
+        action_id: 'ACT-FLOW-4',
+        review_id: 'AUTONOMOUS-FLOW-4',
+        document_type: 'license_plate_photo',
+        instruction: 'Please upload a clear rear or license-plate photo of the involved vehicle.',
+        replaces_document_id: 'DOC-WRONG',
+      }],
+    })));
+
+    const fixture = await create();
+
+    expect(fixture.nativeElement.textContent).toContain(
+      "This evidence doesn't match the vehicle in the claim.",
+    );
+    expect(fixture.nativeElement.textContent).toContain(
+      'Please upload a clear rear or license-plate photo of the involved vehicle.',
+    );
+    expect(fixture.nativeElement.querySelector('input[type=file]')).not.toBeNull();
   });
 
   it('prioritizes a human-review action over ordinary missing evidence', async () => {

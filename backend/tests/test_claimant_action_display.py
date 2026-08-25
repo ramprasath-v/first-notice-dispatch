@@ -87,6 +87,39 @@ class ClaimantActionDisplayTests(unittest.TestCase):
         self.assertNotIn("ACT-", serialized)
         self.assertNotIn("HRV-", serialized)
 
+    def test_identity_only_selected_outlier_uses_mismatch_copy(self) -> None:
+        display = build_claimant_action_display(
+            {"source_aware_conflicts": [{
+                "field": "vehicle_identity",
+                "selected_outlier_document_id": "DOC-BAD",
+                "assertions": [
+                    assertion("policy.pdf", "DOC-POLICY", "policy_document", replaceable=False),
+                    assertion("report.pdf", "DOC-REPORT", "police_report", replaceable=False),
+                    assertion("wrong.jpg", "DOC-BAD", "license_plate_photo", replaceable=True),
+                ],
+            }]},
+            [upload_action()],
+        )
+
+        self.assertEqual(
+            display.title, "This evidence doesn't match the vehicle in the claim."
+        )
+        self.assertIn("conflicts with the vehicle identity", display.explanation)
+
+    def test_identity_without_selected_outlier_keeps_generic_copy(self) -> None:
+        display = build_claimant_action_display(
+            {"source_aware_conflicts": [{
+                "field": "vehicle_identity",
+                "selected_outlier_document_id": None,
+                "assertions": [
+                    assertion("unknown.jpg", "DOC-BAD", "license_plate_photo", replaceable=True),
+                ],
+            }]},
+            [upload_action()],
+        )
+
+        self.assertEqual(display.title, "Vehicle identity not verified")
+
     def test_enter_text_reason_requires_grounded_matching_conflict(self) -> None:
         action = EnterTextRequestedAction(
             action_id="ACT-TEXT",

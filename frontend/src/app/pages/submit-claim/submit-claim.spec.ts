@@ -43,6 +43,12 @@ describe('SubmitClaim', () => {
 
     expect(fixture.nativeElement.textContent).toContain('Upload evidence, don’t fill out forms.');
     expect(fixture.nativeElement.textContent).toContain(
+      'FirstNotice extracts claim details from your documents and photos automatically.',
+    );
+    expect(fixture.nativeElement.textContent).not.toContain(
+      'Upload your claim evidence. FirstNotice will sort it automatically.',
+    );
+    expect(fixture.nativeElement.textContent).not.toContain(
       'We only ask you for information when it can’t be determined reliably.',
     );
     expect(fixture.nativeElement.querySelector('input[type=date]')).toBeNull();
