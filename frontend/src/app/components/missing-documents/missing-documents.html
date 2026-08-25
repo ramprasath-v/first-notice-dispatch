@@ -9,9 +9,16 @@
     @for (request of requests; track key(request)) {
       <article class="missing-item">
         <div><small>What to do</small><strong>{{ request.instruction }}</strong></div>
-        <label class="secondary file-button" [class.disabled]="uploading || processing">
+        <label
+          class="secondary file-button"
+          [class.disabled]="uploading || processing"
+          [class.drag-active]="dragActiveKey() === key(request)"
+          (dragover)="dragOver(request, $event)"
+          (dragleave)="dragLeave($event)"
+          (drop)="drop(request, $event)"
+        >
           <input type="file" accept="image/jpeg,image/png,application/pdf" (change)="choose(request, $event)" />
-          {{ selected()[key(request)]?.file?.name || 'Choose file' }}
+          {{ selected()[key(request)]?.file?.name || 'Drop file here or Choose file' }}
         </label>
         @if (selected()[key(request)]) {
           <button class="secondary compact" type="button" [disabled]="uploading || processing" (click)="remove(request)">Remove</button>

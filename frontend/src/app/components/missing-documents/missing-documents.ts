@@ -20,6 +20,7 @@ export class MissingDocuments {
   @Input() displayReason: ClaimantActionDisplay | null = null;
   @Output() uploadDocuments = new EventEmitter<DocumentUploadRequest[]>();
   readonly selected = signal<Record<string, { file: File; idempotencyKey: string }>>({});
+  readonly dragActiveKey = signal<string | null>(null);
 
   key(request: ClaimantEvidenceRequest): string {
     return request.requested_action_id || request.document_type;
@@ -27,7 +28,31 @@ export class MissingDocuments {
 
   choose(request: ClaimantEvidenceRequest, event: Event): void {
     const file = (event.target as HTMLInputElement).files?.[0];
-    if (file) this.selected.update((files) => ({
+    if (file) this.select(request, file);
+  }
+
+  dragOver(request: ClaimantEvidenceRequest, event: DragEvent): void {
+    event.preventDefault();
+    if (this.uploading || this.processing) return;
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    this.dragActiveKey.set(this.key(request));
+  }
+
+  dragLeave(event: DragEvent): void {
+    event.preventDefault();
+    this.dragActiveKey.set(null);
+  }
+
+  drop(request: ClaimantEvidenceRequest, event: DragEvent): void {
+    event.preventDefault();
+    this.dragActiveKey.set(null);
+    if (this.uploading || this.processing) return;
+    const file = event.dataTransfer?.files?.[0];
+    if (file) this.select(request, file);
+  }
+
+  private select(request: ClaimantEvidenceRequest, file: File): void {
+    this.selected.update((files) => ({
       ...files,
       [this.key(request)]: { file, idempotencyKey: crypto.randomUUID() },
     }));

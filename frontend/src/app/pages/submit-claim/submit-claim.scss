@@ -13,6 +13,7 @@
 .evidence-heading p { margin: 0 0 .85rem; color: #607873; line-height: 1.5; }
 .upload-tile { border: 1px dashed #9fb9b2; border-radius: 14px; padding: 1rem 1.1rem; display: grid; gap: .35rem; cursor: pointer; background: #f8fbfa; }
 .upload-tile:hover { border-color: #16826f; background: #f1f8f6; }
+.upload-tile.drag-active { border-color: #16826f; background: #e7f5f1; box-shadow: 0 0 0 3px rgb(22 130 111 / 12%); }
 .upload-tile input { position: absolute; opacity: 0; pointer-events: none; }
 .upload-tile small { color: #6d837e; }
 .file-name { margin-top: .35rem; color: #155e52; font-size: .82rem; font-weight: 700; word-break: break-word; }

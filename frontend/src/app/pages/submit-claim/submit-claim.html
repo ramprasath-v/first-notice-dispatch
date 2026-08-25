@@ -31,9 +31,15 @@
           <h2>Upload claim evidence</h2>
           <p>Add your police report, policy documents, and vehicle photos.</p>
         </div>
-        <label class="upload-tile">
-          <strong>Choose evidence files</strong>
-          <small>PDF, JPG, JPEG, or PNG · multiple files allowed</small>
+        <label
+          class="upload-tile"
+          [class.drag-active]="evidenceDragActive()"
+          (dragover)="dragEvidenceOver($event)"
+          (dragleave)="dragEvidenceLeave($event)"
+          (drop)="dropEvidence($event)"
+        >
+          <strong>Drop claim evidence here</strong>
+          <small>PDF, JPG, PNG · multiple files allowed</small>
           <input
             type="file"
             accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
@@ -41,7 +47,7 @@
             (change)="chooseEvidence($event)"
           />
           <span class="file-name">
-            {{ evidenceFiles().length ? evidenceFiles().length + ' selected' : 'Browse files' }}
+            {{ evidenceFiles().length ? evidenceFiles().length + ' selected' : 'or Browse files' }}
           </span>
         </label>
         @if (evidenceFiles().length) {

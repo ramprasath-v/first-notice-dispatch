@@ -10,5 +10,6 @@
 .missing-item small { color: #887341; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
 .file-button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .file-button input { position: absolute; opacity: 0; pointer-events: none; }
+.file-button.drag-active { border-color: #9c751d; background: #fff4d3; box-shadow: 0 0 0 3px rgb(156 117 29 / 12%); }
 .file-button.disabled { opacity: .55; pointer-events: none; }
 @media (max-width: 720px) { .missing-item { grid-template-columns: 1fr; } .file-button { max-width: 100%; } }

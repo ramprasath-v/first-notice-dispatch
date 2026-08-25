@@ -25,10 +25,34 @@ export class SubmitClaim {
   readonly errors = signal<Record<string, string>>({});
   readonly submitting = signal(false);
   readonly requestError = signal('');
+  readonly evidenceDragActive = signal(false);
 
   chooseEvidence(event: Event): void {
     const input = event.target as HTMLInputElement;
-    const files = Array.from(input.files ?? []);
+    this.selectEvidenceFiles(Array.from(input.files ?? []));
+    input.value = '';
+  }
+
+  dragEvidenceOver(event: DragEvent): void {
+    event.preventDefault();
+    if (this.submitting()) return;
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    this.evidenceDragActive.set(true);
+  }
+
+  dragEvidenceLeave(event: DragEvent): void {
+    event.preventDefault();
+    this.evidenceDragActive.set(false);
+  }
+
+  dropEvidence(event: DragEvent): void {
+    event.preventDefault();
+    this.evidenceDragActive.set(false);
+    if (this.submitting()) return;
+    this.selectEvidenceFiles(Array.from(event.dataTransfer?.files ?? []));
+  }
+
+  private selectEvidenceFiles(files: File[]): void {
     const unsupported = files.some((file) => !EVIDENCE_TYPES.has(file.type));
     if (unsupported) {
       this.setFileError('evidence', 'Use PDF, JPG, JPEG, or PNG files only.');
@@ -47,7 +71,6 @@ export class SubmitClaim {
       });
       this.setFileError('evidence', '');
     }
-    input.value = '';
   }
 
   removeEvidence(fileToRemove: File): void {

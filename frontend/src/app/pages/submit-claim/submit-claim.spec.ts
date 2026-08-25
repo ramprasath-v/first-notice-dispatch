@@ -69,6 +69,45 @@ describe('SubmitClaim', () => {
     expect(fixture.nativeElement.textContent).toContain('Use PDF, JPG, JPEG, or PNG files only');
   });
 
+  it('uses the existing selection behavior for multiple dropped files', () => {
+    const report = new File(['report'], 'report.pdf', { type: 'application/pdf' });
+    const photo = new File(['photo'], 'vehicle.jpg', { type: 'image/jpeg' });
+
+    component.dropEvidence({
+      preventDefault: vi.fn(),
+      dataTransfer: { files: [report, photo] },
+    } as unknown as DragEvent);
+
+    expect(component.evidenceFiles()).toEqual([report, photo]);
+    expect(component.errors()['evidence']).toBe('');
+  });
+
+  it('applies existing validation to unsupported dropped files', () => {
+    component.dropEvidence({
+      preventDefault: vi.fn(),
+      dataTransfer: { files: [new File(['x'], 'notes.txt', { type: 'text/plain' })] },
+    } as unknown as DragEvent);
+
+    expect(component.evidenceFiles()).toEqual([]);
+    expect(component.errors()['evidence']).toContain('PDF, JPG, JPEG, or PNG');
+  });
+
+  it('sets and clears the initial drag-over state', () => {
+    const preventDefault = vi.fn();
+    component.dragEvidenceOver({
+      preventDefault,
+      dataTransfer: { dropEffect: 'none' },
+    } as unknown as DragEvent);
+    fixture.detectChanges();
+
+    expect(component.evidenceDragActive()).toBe(true);
+    expect(fixture.nativeElement.querySelector('.upload-tile.drag-active')).not.toBeNull();
+
+    component.dragEvidenceLeave({ preventDefault } as unknown as DragEvent);
+    fixture.detectChanges();
+    expect(component.evidenceDragActive()).toBe(false);
+  });
+
   it('uses one multi-file control and lists selected filenames', () => {
     setValidSubmission();
     fixture.detectChanges();
