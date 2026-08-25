@@ -384,17 +384,21 @@ class MockNotificationToolTests(unittest.TestCase):
             action_requested="Review the packet.",
         )
 
-        notification = tool.send_adjuster_notification(
-            claim_id="CLM-A1B2C3D4",
-            notification_id="NTF-A1B2C3D4",
-            draft=draft,
-            idempotency_key=dispatch_idempotency_key("CLM-A1B2C3D4"),
-            now=NOW,
-        )
+        with self.assertLogs("app.tools.notification_tools", level="INFO") as logs:
+            notification = tool.send_adjuster_notification(
+                claim_id="CLM-A1B2C3D4",
+                notification_id="NTF-A1B2C3D4",
+                draft=draft,
+                idempotency_key=dispatch_idempotency_key("CLM-A1B2C3D4"),
+                now=NOW,
+            )
 
         repository.create_notification.assert_called_once_with(notification)
         self.assertEqual(notification.recipient, "demo-adjuster")
         self.assertEqual(notification.status, "sent")
+        self.assertIn("Mock adjuster notification persisted", logs.output[0])
+        self.assertNotIn(draft.subject, logs.output[0])
+        self.assertNotIn(draft.message, logs.output[0])
 
 
 if __name__ == "__main__":

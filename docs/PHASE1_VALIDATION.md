@@ -6,15 +6,15 @@ Phase 1 validates FirstNotice's event-driven intake boundary, not insurance adju
 
 ## Automated workflow matrix
 
-The frozen regression matrix in `backend/tests/test_workflow_regression_matrix.py` covers the five standard automated paths:
+The frozen regression matrix in `backend/tests/test_workflow_regression_matrix.py` contains the named Flow 1–4 end-to-end workflow regressions:
 
 1. Complete, consistent evidence proceeds to the inspection-decision boundary.
 2. Missing routine evidence pauses at `awaiting_documents`, accepts the requested artifact, and resumes the same claim.
 3. A uniquely corroborated, replaceable image outlier triggers targeted claimant remediation; a validated replacement supersedes the old artifact.
 4. Unusable requested evidence remains outstanding without prematurely invoking Review; a later valid artifact resumes processing.
-5. A uniquely corroborated, replaceable document outlier triggers targeted document replacement and excludes the superseded artifact from current reasoning.
+It also exercises Flow 4 variants, retry/idempotency behavior, unusable uploads, request-more-information handling, and order independence. It does not contain a separately named Flow 5 test.
 
-Additional focused suites cover human review, durable injury signals, medical documents as human-review-only attachments, Pub/Sub redelivery, Firestore idempotency, Calendar idempotency, and Gmail notification behavior.
+Focused review and evidence-reasoning suites cover uniquely corroborated, replaceable document outliers, including targeted document replacement and exclusion of superseded artifacts from current reasoning. Additional focused suites cover human review, durable injury signals, medical documents as human-review-only attachments, Pub/Sub redelivery, Firestore idempotency, Calendar idempotency, and Gmail notification behavior.
 
 ## Commands
 

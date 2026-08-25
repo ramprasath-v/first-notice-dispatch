@@ -1841,7 +1841,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
                     ],
                 ),
                 (
-                    "license_plate_photo", "image3.jpg", "DOC-WRONG",
+                    "license_plate_photo", "image3.png", "DOC-WRONG",
                     "unusable", False,
                     ["vehicle_identity: Honda SUV", "vehicle_make: Honda"],
                 ),
@@ -1859,7 +1859,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
         conflict = EvidenceConflict(
             field="vehicle_identity",
             values=["Honda SUV", "2014 Toyota Corolla (Dark Grey)"],
-            sources=["image3.jpg", "insurance2.pdf"],
+            sources=["image3.png", "insurance2.pdf"],
             reason="The submitted sources identify different vehicles.",
         )
 

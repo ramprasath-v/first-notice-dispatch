@@ -2,6 +2,8 @@
 
 An event-driven insurance intake coordinator that reasons over multimodal evidence, pauses for missing information or human review, and automatically resumes to schedule inspections and hand the claim to an adjuster.
 
+**Upload evidence, don’t fill out forms.** FirstNotice extracts claim details from submitted evidence and asks for manual input only when required information cannot be determined reliably.
+
 > Designed for the Taskmaster track. FirstNotice coordinates first-mile intake and routing; it does not adjudicate insurance claims.
 
 ## The problem
@@ -51,7 +53,7 @@ The stable Phase 1 behavior and reproducible checks are summarized in
 
 ![FirstNotice architecture](docs/architecture/firstnotice-architecture.png)
 
-The [architecture source](docs/architecture/firstnotice-architecture.md) distinguishes
+The [architecture diagram documentation](docs/architecture/firstnotice-architecture.md) distinguishes
 Gemini reasoning from application validation and deterministic routing authority.
 
 For detailed sequences, state transitions, persistence, safety authority, and trust
@@ -71,6 +73,12 @@ boundaries, see [Architecture](docs/ARCHITECTURE.md).
 | Gmail API | Sends secure review requests and final adjuster handoffs | Demonstrates real asynchronous human coordination and external communication |
 | Cloud Build + Artifact Registry | Builds and stores the Angular/nginx container | Provides a repeatable Cloud Run frontend build without local Docker dependency |
 | Secret Manager | Supplies Gmail OAuth client ID, client secret, and refresh token to private dispatch | Keeps OAuth credentials out of source, Angular, and the public API |
+
+## Third-party and pre-existing components
+
+FirstNotice-specific application and workflow code in this repository was developed for this project. It builds on third-party frameworks, SDKs, and managed services including Angular, FastAPI, Pydantic, Google ADK, the Google Gen AI SDK, and Google Cloud services. Those components remain subject to their respective licenses and service terms.
+
+No repository-wide software license has been selected, and no `LICENSE` file is currently provided. That absence should not be interpreted as granting rights beyond those supplied by applicable third-party licenses or an explicit agreement with the repository owner.
 
 ## Agent and workflow responsibilities
 

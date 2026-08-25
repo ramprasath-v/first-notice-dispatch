@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -11,6 +12,9 @@ from app.models.adjuster_packet import AdjusterPacket
 from app.models.inspection_appointment import InspectionAppointment
 from app.models.notification import AdjusterNotification
 from app.tools.firestore_repository import FirestoreClaimRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 class AdjusterNotificationTool(Protocol):
@@ -28,7 +32,7 @@ class AdjusterNotificationTool(Protocol):
 
 
 class MockAdjusterNotificationTool:
-    """Persists and prints a deterministic local adjuster notification."""
+    """Persists a deterministic local adjuster notification."""
 
     def __init__(self, repository: FirestoreClaimRepository) -> None:
         self._repository = repository
@@ -60,10 +64,10 @@ class MockAdjusterNotificationTool:
             idempotency_key=idempotency_key,
         )
         self._repository.create_notification(notification)
-        print("\nMock adjuster notification")
-        print(f"to: {notification.recipient}")
-        print(f"subject: {notification.subject}")
-        print(notification.message)
+        logger.info(
+            "Mock adjuster notification persisted",
+            extra={"claim_id": claim_id},
+        )
         return notification
 
 

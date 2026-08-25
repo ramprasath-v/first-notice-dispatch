@@ -111,7 +111,7 @@ class EvidenceReasoningTests(unittest.TestCase):
                     ],
                 ),
                 (
-                    "license_plate_photo", "image3.jpg", "DOC-WRONG",
+                    "license_plate_photo", "image3.png", "DOC-WRONG",
                     ["vehicle_identity: Honda SUV", "vehicle_make: Honda"],
                 ),
                 (
@@ -127,7 +127,7 @@ class EvidenceReasoningTests(unittest.TestCase):
         conflict = EvidenceConflict(
             field="vehicle_identity",
             values=["Honda SUV", "2014 Toyota Corolla (Dark Grey)"],
-            sources=["image3.jpg", "insurance2.pdf"],
+            sources=["image3.png", "insurance2.pdf"],
             reason="The submitted sources identify different vehicles.",
         )
 
@@ -140,7 +140,7 @@ class EvidenceReasoningTests(unittest.TestCase):
         )
         self.assertEqual(
             {item.filename for item in assessment.assertions},
-            {"insurance2.pdf", "policeReport2.pdf", "image3.jpg"},
+            {"insurance2.pdf", "policeReport2.pdf", "image3.png"},
         )
 
     def test_complete_atomic_vehicle_disagreement_remains_authoritative(
@@ -200,7 +200,7 @@ class EvidenceReasoningTests(unittest.TestCase):
             ),
             UploadedEvidence(
                 evidence_type="license_plate_photo",
-                filename="image.jpg",
+                filename="image.png",
                 document_id="DOC-IMAGE",
                 source_identity="document:DOC-IMAGE",
                 document_type="license_plate_photo",
@@ -212,7 +212,7 @@ class EvidenceReasoningTests(unittest.TestCase):
         conflict = EvidenceConflict(
             field="vehicle_identity",
             values=["Toyota Corolla", "Honda SUV"],
-            sources=["report.pdf", "image.jpg"],
+            sources=["report.pdf", "image.png"],
             reason="The two submitted sources identify different vehicles.",
         )
 
