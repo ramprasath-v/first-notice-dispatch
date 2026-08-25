@@ -66,10 +66,10 @@ class ClaimantActionDisplayTests(unittest.TestCase):
             {
                 "source_aware_conflicts": [{
                     "field": "vehicle_identity_and_damage_location",
-                    "selected_outlier_document_id": "DOC-BAD",
-                    "assertions": [
-                        assertion("IMG_5420.png", "DOC-BAD", "license_plate_photo", replaceable=True),
-                        assertion("IMG_5419.png", "DOC-GOOD", "license_plate_photo", replaceable=True),
+                "selected_outlier_document_id": "DOC-BAD",
+                "assertions": [
+                    assertion("IMG_5420.png", "DOC-BAD", "damage_evidence", replaceable=True),
+                    assertion("IMG_5419.png", "DOC-GOOD", "damage_evidence", replaceable=True),
                     ],
                 }],
                 "current_evidence_findings": [{
@@ -78,6 +78,7 @@ class ClaimantActionDisplayTests(unittest.TestCase):
                 }],
             },
             [upload_action()],
+            frozenset({"DOC-BAD"}),
         )
 
         self.assertEqual(display.title, "New evidence doesn't match")
@@ -95,10 +96,11 @@ class ClaimantActionDisplayTests(unittest.TestCase):
                 "assertions": [
                     assertion("policy.pdf", "DOC-POLICY", "policy_document", replaceable=False),
                     assertion("report.pdf", "DOC-REPORT", "police_report", replaceable=False),
-                    assertion("wrong.jpg", "DOC-BAD", "license_plate_photo", replaceable=True),
+                    assertion("wrong.jpg", "DOC-BAD", "damage_evidence", replaceable=True),
                 ],
             }]},
             [upload_action()],
+            frozenset({"DOC-BAD"}),
         )
 
         self.assertEqual(
@@ -133,6 +135,7 @@ class ClaimantActionDisplayTests(unittest.TestCase):
                 ],
             }]},
             [upload_action()],
+            frozenset({"DOC-BAD"}),
         )
 
         self.assertEqual(display.title, "Vehicle identity not verified")

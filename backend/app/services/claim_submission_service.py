@@ -332,6 +332,18 @@ class ClaimSubmissionService:
         requested_actions = parse_requested_actions(
             claim.get("requested_actions", [])
         )
+        remediation_document_ids = frozenset(
+            document.document_id
+            for document in (
+                self._repository.get_documents(claim_id)
+                if any(
+                    isinstance(action, UploadDocumentRequestedAction)
+                    for action in requested_actions
+                )
+                else []
+            )
+            if document.requested_action_id
+        )
         requested_evidence = build_claimant_evidence_requests(
             claim.get("missing_documents", []),
             claim.get("unusable_evidence", []),
@@ -348,7 +360,11 @@ class ClaimSubmissionService:
             missing_documents=list(claim.get("missing_documents", [])),
             requested_evidence=requested_evidence,
             requested_actions=requested_actions,
-            action_display=build_claimant_action_display(claim, requested_actions),
+            action_display=build_claimant_action_display(
+                claim,
+                requested_actions,
+                remediation_document_ids,
+            ),
             manual_handling=bool(claim.get("manual_handling")),
             inspection=(
                 appointment.model_dump(mode="python") if appointment else None

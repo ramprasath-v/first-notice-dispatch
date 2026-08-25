@@ -18,6 +18,7 @@ from app.models.claim_api import (
     ClaimTimelineEvent,
     DocumentAcceptedResponse,
 )
+from app.models.claim_document import ClaimDocument
 from app.models.adk_orchestration import ClaimStateResult, EvidenceInput
 from app.models.intake_result import IntakeResult
 from app.services.claim_storage_service import (
@@ -734,6 +735,73 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
         self.assertNotIn("DOC-", display_json)
         self.assertNotIn("ACT-", display_json)
         self.assertNotIn("AUTONOMOUS-", display_json)
+
+    def test_get_claim_uses_document_request_provenance_for_flow_4_mismatch(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+            "intake_priority": "routine",
+            "missing_documents": [{
+                "type": "vehicle_identity",
+                "reason": "Vehicle identity is required.",
+                "source_requirement": "always_required",
+            }],
+            "unusable_evidence": [],
+            "requested_actions": [{
+                "action_type": "upload_document",
+                "action_id": "ACT-RETRY",
+                "review_id": "AUTONOMOUS-RETRY",
+                "document_type": "damage_evidence",
+                "instruction": "Please upload a clear vehicle photo with a readable plate.",
+                "replaces_document_id": "DOC-WRONG-FOLLOWUP",
+            }],
+            "source_aware_conflicts": [{
+                "fingerprint": "CFP-IDENTITY",
+                "field": "vehicle_identity",
+                "selected_outlier_document_id": "DOC-WRONG-FOLLOWUP",
+                "assertions": [
+                    {
+                        "field": "vehicle_identity",
+                        "value": "expected vehicle",
+                        "source_identity": "document:DOC-REPORT",
+                        "filename": "report.pdf",
+                        "document_id": "DOC-REPORT",
+                        "document_type": "police_report",
+                        "replaceable": False,
+                    },
+                    {
+                        "field": "vehicle_identity",
+                        "value": "different vehicle",
+                        "source_identity": "document:DOC-WRONG-FOLLOWUP",
+                        "filename": "wrong.jpg",
+                        "document_id": "DOC-WRONG-FOLLOWUP",
+                        "document_type": "damage_evidence",
+                        "replaceable": True,
+                    },
+                ],
+            }],
+            "updated_at": NOW,
+        }
+        self.repository.get_documents.return_value = [
+            ClaimDocument(
+                document_id="DOC-WRONG-FOLLOWUP",
+                claim_id=CLAIM_ID,
+                document_type="damage_evidence",
+                filename="wrong.jpg",
+                requested_action_id="ACT-INITIAL",
+                status="validated",
+                received_at=NOW,
+            )
+        ]
+        self.repository.get_scheduled_appointment.return_value = None
+
+        response = self.service.get_claim(CLAIM_ID)
+
+        self.assertEqual(
+            response.action_display.title,
+            "This evidence doesn't match the vehicle in the claim.",
+        )
+        self.repository.get_documents.assert_called_once_with(CLAIM_ID)
 
 
 class ClaimantApiEndpointTests(unittest.TestCase):

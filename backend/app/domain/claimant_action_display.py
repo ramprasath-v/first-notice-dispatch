@@ -17,6 +17,7 @@ class ClaimantActionDisplay(BaseModel):
 def build_claimant_action_display(
     claim: dict[str, Any],
     requested_actions: list[RequestedAction],
+    remediation_document_ids: frozenset[str] = frozenset(),
 ) -> ClaimantActionDisplay | None:
     """Return concise claimant copy only for grounded persisted issue facts."""
 
@@ -106,31 +107,26 @@ def build_claimant_action_display(
             for item in claim.get("current_evidence_findings", [])
         )
 
-        target_types = {
-            str(assertion.get("document_type") or "")
-            for assertion in assertions
-            if assertion.get("document_id")
-            == current_action.replaces_document_id
-        }
-
-        is_followup_artifact = "license_plate_photo" in target_types
         has_selected_target = any(
             item.get("selected_outlier_document_id")
             == current_action.replaces_document_id
             for item in related
+        )
+        is_remediation_target = (
+            current_action.replaces_document_id in remediation_document_ids
         )
 
         if has_damage and has_identity:
             return ClaimantActionDisplay(
                 title=(
                     "New evidence doesn't match"
-                    if is_followup_artifact
+                    if is_remediation_target
                     else "Evidence doesn't match"
                 ),
                 explanation=(
                     "The new photo appears to show a different vehicle and damage "
                     "that does not match the collision described in the police report."
-                    if is_followup_artifact and report_grounded
+                    if is_remediation_target and report_grounded
                     else (
                         "The police report and submitted photo describe different "
                         "damage locations, and the vehicle identity could not be verified."
@@ -155,7 +151,7 @@ def build_claimant_action_display(
             )
 
         if has_identity:
-            if has_selected_target and is_followup_artifact:
+            if has_selected_target and is_remediation_target:
                 return ClaimantActionDisplay(
                     title="This evidence doesn't match the vehicle in the claim.",
                     explanation=(
