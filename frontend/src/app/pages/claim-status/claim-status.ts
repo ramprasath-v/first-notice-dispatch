@@ -499,7 +499,7 @@ export class ClaimStatusPage {
       typeof MediaRecorder === 'undefined'
     ) {
       this.error.set(
-        'Voice recording is not supported in this browser. Please enter the date manually.',
+        'Voice recording is not supported in this browser. Please use a supported browser.',
       );
       return;
     }
@@ -523,7 +523,7 @@ export class ClaimStatusPage {
       this.releaseMicrophone();
       this.voiceRecordingState.set('idle');
       this.error.set(
-        'Microphone access was not available. Allow microphone access or enter the date manually.',
+        'Microphone access was not available. Allow microphone access and try again.',
       );
     }
   }
@@ -574,7 +574,7 @@ export class ClaimStatusPage {
       error: () => {
         this.uploading.set(false);
         this.error.set(
-          'We could not use that recording. Re-record or enter the date manually.',
+          'We could not use that recording. Please re-record your answer.',
         );
       },
     });
