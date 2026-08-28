@@ -169,6 +169,21 @@ class HumanReviewServiceTests(unittest.TestCase):
         self.assertEqual(created.generation, 1)
         self.assertEqual(created.review_id, human_review_id(CLAIM_ID, 1))
 
+    def test_review_link_uses_configured_canonical_web_origin(self) -> None:
+        self.service._settings = HumanReviewSettings(
+            "https://firstnotice-web-905025655505.us-central1.run.app", 60
+        )
+
+        self.service.ensure_review_requested(CLAIM_ID, correlation_id="corr-review")
+
+        request = self.gmail.send_human_review_email.call_args.args[0]
+        self.assertTrue(
+            request.review_url.startswith(
+                "https://firstnotice-web-905025655505.us-central1.run.app/"
+                "#/adjuster/review/"
+            )
+        )
+
     def test_inspection_ready_creates_one_secure_decision_email(self) -> None:
         self.repository.get_claim.return_value.update({
             "status": "inspection_ready",

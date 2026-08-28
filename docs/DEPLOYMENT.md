@@ -173,7 +173,7 @@ Start from [`backend/.env.example`](../backend/.env.example). The application re
 | `PUBSUB_CLAIM_EVENTS_TOPIC` | Yes for API/dispatch | Claim lifecycle topic | `<topic-name>` |
 | `GCS_CLAIM_BUCKET` | Yes for evidence upload/read | Private raw-evidence bucket | `<bucket-name>` |
 | `ALLOWED_ORIGINS` | Claimant API | Comma-separated explicit web origins; `*` is rejected | `https://<web-service-host>` |
-| `FIRSTNOTICE_WEB_BASE_URL` | Human review | Public web origin used to create review links | `https://<web-service-host>` |
+| `FIRSTNOTICE_WEB_BASE_URL` | Human review | Public web origin used to create review links | `https://firstnotice-web-905025655505.us-central1.run.app` for the current production service |
 | `HUMAN_REVIEW_TOKEN_TTL_MINUTES` | Optional | Review capability lifetime; allowed range 5–1440 | `60` |
 | `GOOGLE_CALENDAR_ENABLED` | Optional | Enables real Calendar event creation | `false` |
 | `GOOGLE_CALENDAR_ID` | Required when Calendar enabled | Shared secondary Calendar ID | `<secondary-calendar-id>` |
