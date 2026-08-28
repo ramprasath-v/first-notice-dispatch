@@ -30,6 +30,10 @@ class CorrectionReceivedPayload(BaseModel):
 
     review_id: str = Field(min_length=1, max_length=128)
     field_name: str = Field(min_length=1, max_length=64)
+    source_type: Literal["claimant_manual", "claimant_voice"] = "claimant_manual"
+    source_document_id: str | None = Field(default=None, max_length=128)
+    injury_mentioned: bool = False
+    injury_description: str | None = Field(default=None, max_length=500)
 
 
 class ClaimEventBase(BaseModel):

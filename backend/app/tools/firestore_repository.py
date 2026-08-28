@@ -108,7 +108,7 @@ def generate_document_id() -> str:
 
 def intake_result_to_claim_fields(intake_result: IntakeResult) -> dict[str, Any]:
     """Map validated intake data to the approved claim document fields."""
-    return {
+    fields = {
         "claim_type": intake_result.claim_type,
         "damage_type": intake_result.damage_type,
         "parts_affected": list(intake_result.parts_affected),
@@ -126,6 +126,30 @@ def intake_result_to_claim_fields(intake_result: IntakeResult) -> dict[str, Any]
         ],
         "uncertainties": list(intake_result.uncertainties),
     }
+    if intake_result.incident_date:
+        classifications = {
+            item.source: item.document_type
+            for item in intake_result.evidence_artifact_classifications
+        }
+        supporting_sources = [
+            item.source
+            for item in intake_result.evidence_artifact_facts
+            if item.incident_date == intake_result.incident_date
+        ]
+        police_source = next(
+            (
+                source
+                for source in supporting_sources
+                if classifications.get(source) == "police_report"
+            ),
+            None,
+        )
+        if police_source:
+            fields["incident_date_provenance"] = {
+                "source_type": "police_report",
+                "source": police_source,
+            }
+    return fields
 
 
 class FirestoreClaimRepository:
@@ -830,6 +854,25 @@ class FirestoreClaimRepository:
             "mark claim document validated",
         )
 
+    def record_claimant_voice_injury_signal(
+        self,
+        *,
+        claim_id: str,
+        document_id: str,
+        injury_description: str | None,
+    ) -> None:
+        fields: dict[str, Any] = {
+            "operational_indicators.possible_injury": True,
+            "voice_injury_source_document_id": document_id,
+            "updated_at": utc_now(),
+        }
+        if injury_description:
+            fields["voice_injury_description"] = injury_description
+        try:
+            self._client.collection("claims").document(claim_id).update(fields)
+        except Exception as exc:
+            self._raise_write_error("record claimant voice injury signal", exc)
+
     def mark_document_superseded(
         self, claim_id: str, document_id: str, replacement_document_id: str
     ) -> None:
@@ -1415,6 +1458,10 @@ class FirestoreClaimRepository:
         field_name: str,
         value: str,
         correlation_id: str,
+        source_type: str = "claimant_manual",
+        source_document_id: str | None = None,
+        injury_mentioned: bool = False,
+        injury_description: str | None = None,
     ) -> ClaimStatus:
         claim = self.get_claim(claim_id)
         if claim is None:
@@ -1433,8 +1480,13 @@ class FirestoreClaimRepository:
             if not isinstance(item, dict) or item.get("type") != field_name
         ]
         unusable = list(claim.get("unusable_evidence", []))
+        indicators = dict(claim.get("operational_indicators") or {})
+        possible_injury = bool(indicators.get("possible_injury")) or injury_mentioned
+        indicators["possible_injury"] = possible_injury
         target = (
-            ClaimStatus.AWAITING_DOCUMENTS
+            ClaimStatus.HUMAN_REVIEW_REQUIRED
+            if possible_injury
+            else ClaimStatus.AWAITING_DOCUMENTS
             if missing or unusable
             else ClaimStatus.INSPECTION_READY
         )
@@ -1450,7 +1502,10 @@ class FirestoreClaimRepository:
                 ),
                 make_current=True,
             )
-            if target == ClaimStatus.INSPECTION_READY
+            if target in {
+                ClaimStatus.INSPECTION_READY,
+                ClaimStatus.HUMAN_REVIEW_REQUIRED,
+            }
             else None
         )
         now = utc_now()
@@ -1465,16 +1520,36 @@ class FirestoreClaimRepository:
                 {
                     "status": target.value,
                     field_name: value,
+                    f"{field_name}_provenance": {
+                        "source_type": source_type,
+                        **(
+                            {"document_id": source_document_id}
+                            if source_document_id
+                            else {}
+                        ),
+                    },
                     "pending_corrections": {},
                     "requested_actions": [],
                     "missing_documents": missing,
                     "conflicts": remaining_conflicts,
                     "conflict_count": len(remaining_conflicts),
-                    "requires_human_review": False,
-                    "human_review_reason": None,
+                    "requires_human_review": possible_injury,
+                    "human_review_reason": (
+                        "Possible injury requires adjuster review."
+                        if possible_injury
+                        else None
+                    ),
+                    "operational_indicators": indicators,
+                    **(
+                        {"voice_injury_description": injury_description}
+                        if injury_description
+                        else {}
+                    ),
                     "intake_complete": not missing and not unusable,
                     "intake_priority": (
-                        "expedited"
+                        "urgent_human_review"
+                        if possible_injury
+                        else "expedited"
                         if claim.get("intake_priority") == "expedited"
                         else "routine"
                     ),
@@ -1498,7 +1573,16 @@ class FirestoreClaimRepository:
                     actor="firstnoticeai",
                     from_status=ClaimStatus.AWAITING_DOCUMENTS.value,
                     to_status=target.value,
-                    details={"review_id": review_id, "corrected_field": field_name},
+                    details={
+                        "review_id": review_id,
+                        "corrected_field": field_name,
+                        "source_type": source_type,
+                        **(
+                            {"source_document_id": source_document_id}
+                            if source_document_id
+                            else {}
+                        ),
+                    },
                     correlation_id=correlation_id,
                 ),
             )

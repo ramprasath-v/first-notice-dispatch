@@ -8,6 +8,8 @@ from app.integrations.gmail_service import GmailService, GmailSettings
 from app.services.human_review_service import HumanReviewService, HumanReviewSettings
 from app.services.claim_storage_service import ClaimStorageService, GcsSettings
 from app.services.claim_submission_service import ClaimSubmissionService
+from app.services.voice_incident_extraction_service import GeminiVoiceIncidentExtractor
+from app.tools.gemini_client import create_gemini_client
 from app.tools.firestore_repository import FirestoreClaimRepository
 
 
@@ -25,6 +27,7 @@ def build_api_dependencies() -> ApiDependencies:
         settings.firestore_database,
     )
     storage_service = ClaimStorageService(GcsSettings.from_env())
+    gemini_client = create_gemini_client(settings)
     publisher = ClaimEventPublisher(PubSubSettings.from_env())
     gmail_settings = GmailSettings.from_env()
     human_review_service = HumanReviewService(
@@ -32,6 +35,9 @@ def build_api_dependencies() -> ApiDependencies:
         publisher=publisher,
         settings=HumanReviewSettings.from_env(),
         storage_service=storage_service,
+        voice_incident_extractor=GeminiVoiceIncidentExtractor(
+            gemini_client, settings.gemini_model
+        ),
         gmail_sender=(
             GmailService.from_oauth_settings(gmail_settings)
             if gmail_settings.enabled

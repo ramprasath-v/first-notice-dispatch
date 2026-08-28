@@ -231,6 +231,10 @@ class ClaimEventHandler:
                 event.payload.review_id,
                 event.payload.field_name,
                 event.correlation_id,
+                source_type=event.payload.source_type,
+                source_document_id=event.payload.source_document_id,
+                injury_mentioned=event.payload.injury_mentioned,
+                injury_description=event.payload.injury_description,
             )
 
         raise NonRetryableEventError(f"Unsupported event type: {event.event_type}")

@@ -16,6 +16,7 @@ class ClaimDocument(BaseModel):
     document_id: str
     claim_id: str
     document_type: str
+    source_type: str | None = None
     filename: str
     storage_path: str | None = Field(
         default=None,
