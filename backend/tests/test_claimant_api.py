@@ -21,6 +21,7 @@ from app.models.claim_api import (
 from app.models.claim_document import ClaimDocument
 from app.models.adk_orchestration import ClaimStateResult, EvidenceInput
 from app.models.intake_result import IntakeResult
+from app.models.human_review import ClaimCorrectionAcceptedResponse
 from app.services.claim_storage_service import (
     ClaimStorageError,
     ClaimStorageService,
@@ -840,6 +841,36 @@ class ClaimantApiEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
         self.service.submit_claim.assert_not_called()
+
+    def test_voice_correction_endpoint_preserves_requested_action_association(self) -> None:
+        human_review_service = MagicMock()
+        human_review_service.submit_voice_incident_correction.return_value = (
+            ClaimCorrectionAcceptedResponse(
+                claim_id=CLAIM_ID,
+                event_id="voice-event",
+            )
+        )
+        client = TestClient(
+            create_app(
+                MagicMock(),
+                self.service,
+                human_review_service=human_review_service,
+            )
+        )
+
+        response = client.post(
+            f"/claims/{CLAIM_ID}/corrections/voice",
+            headers={"X-Idempotency-Key": "voice-request-123"},
+            data={"requested_action_id": "ACT-DATE"},
+            files={"file": ("incident.webm", b"voice", "audio/webm")},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        call = human_review_service.submit_voice_incident_correction.call_args
+        self.assertEqual(call.args[0], CLAIM_ID)
+        self.assertEqual(call.kwargs["requested_action_id"], "ACT-DATE")
+        self.assertEqual(call.kwargs["idempotency_key"], "voice-request-123")
+        self.assertEqual(call.kwargs["content_type"], "audio/webm")
 
     def test_cors_allows_configured_frontend_origin(self) -> None:
         client = TestClient(

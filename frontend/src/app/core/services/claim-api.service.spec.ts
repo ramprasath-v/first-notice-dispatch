@@ -97,6 +97,25 @@ describe('ClaimApiService', () => {
     upload.flush([]);
   });
 
+  it('submits an incident voice note with its requested action and idempotency key', () => {
+    const voice = new File(['voice'], 'incident.webm', { type: 'audio/webm' });
+    service.submitVoiceIncidentCorrection(
+      'CLM-1', 'ACT-DATE', voice, 'voice-request-key',
+    ).subscribe();
+
+    const request = http.expectOne(
+      'http://localhost:8080/claims/CLM-1/corrections/voice',
+    );
+    const body = request.request.body as FormData;
+    expect(request.request.method).toBe('POST');
+    expect(request.request.headers.get('X-Idempotency-Key')).toBe('voice-request-key');
+    expect(body.get('requested_action_id')).toBe('ACT-DATE');
+    expect(body.get('file')).toBeInstanceOf(File);
+    expect((body.get('file') as File).name).toBe('incident.webm');
+    expect((body.get('file') as File).type).toBe('audio/webm');
+    request.flush({ claim_id: 'CLM-1', event_id: 'voice-evt', status: 'received' });
+  });
+
   it('uses token-scoped review endpoints', () => {
     service.getHumanReview('token/value').subscribe();
     const load = http.expectOne('http://localhost:8080/reviews/current');

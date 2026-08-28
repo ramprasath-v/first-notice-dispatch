@@ -1222,6 +1222,33 @@ class HumanReviewResumeWorkflowTests(unittest.TestCase):
             ClaimStatus.INSPECTION_PENDING,
         )
 
+    def test_voice_correction_passes_injury_signal_to_deterministic_completion(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "review_processing",
+            "pending_corrections": {"incident_date": "2026-08-24"},
+        }
+        self.repository.complete_claim_correction.return_value = (
+            ClaimStatus.HUMAN_REVIEW_REQUIRED
+        )
+
+        result = self.workflow.resume_correction(
+            CLAIM_ID,
+            "AUTONOMOUS-DATE",
+            "incident_date",
+            "voice-correlation",
+            source_type="claimant_voice",
+            source_document_id="DOC-VOICE",
+            injury_mentioned=True,
+            injury_description="neck pain later that evening",
+        )
+
+        self.assertEqual(result["final_status"], "human_review_required")
+        call = self.repository.complete_claim_correction.call_args.kwargs
+        self.assertEqual(call["source_type"], "claimant_voice")
+        self.assertEqual(call["source_document_id"], "DOC-VOICE")
+        self.assertTrue(call["injury_mentioned"])
+
     def test_adjuster_prose_creates_non_replacement_upload_action(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,

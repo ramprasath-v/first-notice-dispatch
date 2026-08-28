@@ -371,7 +371,14 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         await self.handler.handle(event)
 
         self.human_resume.resume_correction.assert_called_once_with(
-            CLAIM_ID, "HRV-123", "policy_number", "corr-correction"
+            CLAIM_ID,
+            "HRV-123",
+            "policy_number",
+            "corr-correction",
+            source_type="claimant_manual",
+            source_document_id=None,
+            injury_mentioned=False,
+            injury_description=None,
         )
         ready = self.publisher.publish.call_args.args[0]
         self.assertEqual(ready.event_id, inspection_ready_event_id(CLAIM_ID))
