@@ -46,6 +46,25 @@
         </section>
       }
 
+      @if ((item.claimant_voice_updates ?? []).length) {
+        <section aria-labelledby="claimant-voice-title">
+          <p class="kicker" id="claimant-voice-title">Claimant voice update</p>
+          <div class="evidence-grid">
+            @for (update of item.claimant_voice_updates ?? []; track $index) {
+              <article class="evidence-card voice-update-card">
+                <strong>{{ update.source_label }}</strong>
+                <dl>
+                  @if (update.incident_date) { <div><dt>Incident date</dt><dd>{{ update.incident_date }}</dd></div> }
+                  @if (update.incident_time) { <div><dt>Incident time</dt><dd>{{ update.incident_time }}</dd></div> }
+                  @if (update.injury_mentioned) { <div><dt>Injury mentioned</dt><dd>Yes</dd></div> }
+                  @if (update.injury_description) { <div><dt>Injury description</dt><dd>{{ update.injury_description }}</dd></div> }
+                </dl>
+              </article>
+            }
+          </div>
+        </section>
+      }
+
       @if ((item.resolution_history ?? []).length) {
         <section><p class="kicker">Autonomous resolution history</p><ul class="resolution-list">
           @for (entry of item.resolution_history ?? []; track entry) { <li>✓ {{ entry }}</li> }
@@ -79,11 +98,14 @@
           }
           <h3>Decision context</h3>
           <ul>@for (question of item.briefing.unresolved_questions; track question) { <li>{{ question }}</li> }</ul>
-          @if ((item.source_references ?? []).length) {
+          @if ((item.source_references ?? []).length || hasContributingVoiceUpdate()) {
             <h3>Evidence sources</h3>
             <ul>
               @for (source of item.source_references ?? []; track source.filename) {
                 <li>{{ source.filename }}</li>
+              }
+              @if (hasContributingVoiceUpdate()) {
+                <li>Claimant voice response</li>
               }
             </ul>
           }

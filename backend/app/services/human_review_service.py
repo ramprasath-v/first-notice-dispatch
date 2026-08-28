@@ -338,6 +338,11 @@ class HumanReviewService:
             if item.status != "superseded"
         ]
         active_document_ids = {item.document_id for item in documents}
+        document_types_by_source: dict[str, set[str]] = {}
+        for document in documents:
+            document_types_by_source.setdefault(
+                document.filename.strip().casefold(), set()
+            ).add(document.document_type)
         return HumanReviewPublicResponse.model_validate({
             **review.model_dump(),
             "source_references": [
@@ -356,6 +361,11 @@ class HumanReviewService:
                 if item.document_type == "medical_document"
                 and item.status != "superseded"
             ],
+            "claimant_voice_updates": [
+                _claimant_voice_update(item, claim, review)
+                for item in documents
+                if item.source_type == "claimant_voice"
+            ],
             "checkpoint_status": claim.get("status"),
             "ai_recommendation": _inspection_recommendation(claim),
             "claim_snapshot": _inspection_claim_snapshot(claim, documents),
@@ -363,6 +373,9 @@ class HumanReviewService:
                 {
                     "source": str(item.get("source")),
                     "finding": str(item.get("finding")),
+                    **_comparison_document_type(
+                        str(item.get("source")), document_types_by_source
+                    ),
                 }
                 for item in claim.get("current_evidence_findings", [])
                 if isinstance(item, dict)
@@ -1268,6 +1281,51 @@ def _resolution_history(events: object) -> list[str]:
         if label and label not in result:
             result.append(label)
     return result
+
+
+def _comparison_document_type(
+    source: str, document_types_by_source: dict[str, set[str]]
+) -> dict[str, str]:
+    document_types = document_types_by_source.get(source.strip().casefold(), set())
+    return (
+        {"document_type": next(iter(document_types))}
+        if len(document_types) == 1
+        else {}
+    )
+
+
+def _claimant_voice_update(
+    document: ClaimDocument,
+    claim: dict[str, object],
+    review: HumanReviewRecord,
+) -> dict[str, object]:
+    facts = document.evidence_facts
+    provenance = claim.get("incident_date_provenance")
+    incident_date_document_id = (
+        str(provenance.get("document_id"))
+        if isinstance(provenance, dict) and provenance.get("document_id")
+        else None
+    )
+    contributing_document_ids = {
+        reference.document_id for reference in review.source_references
+    }
+    if incident_date_document_id:
+        contributing_document_ids.add(incident_date_document_id)
+    injury_source_document_id = str(
+        claim.get("voice_injury_source_document_id") or ""
+    )
+    if injury_source_document_id:
+        contributing_document_ids.add(injury_source_document_id)
+    return {
+        "source_label": "Claimant voice response",
+        "incident_date": facts.get("incident_date"),
+        "incident_time": facts.get("incident_time"),
+        "injury_mentioned": str(facts.get("injury_mentioned", "")).casefold()
+        == "true",
+        "injury_description": facts.get("injury_description"),
+        "contributed_to_decision": document.document_id
+        in contributing_document_ids,
+    }
 
 
 def _conflict_source_references(

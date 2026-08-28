@@ -12,6 +12,8 @@ export interface EvidenceGroup {
   findings: string[];
 }
 
+type EvidenceFact = { source: string; finding: string; document_type?: string };
+
 @Component({
   selector: 'app-adjuster-review-page',
   imports: [FormsModule],
@@ -93,7 +95,7 @@ export class AdjusterReviewPage {
     });
   }
 
-  comparisonFacts(): Array<{ source: string; finding: string }> {
+  comparisonFacts(): EvidenceFact[] {
     const persisted = this.review()?.evidence_comparison ?? [];
     if (persisted.length) return persisted;
     return (this.review()?.briefing.known_facts ?? []).flatMap((fact) => {
@@ -115,6 +117,12 @@ export class AdjusterReviewPage {
 
   groupedEvidence(): EvidenceGroup[] {
     return groupEvidenceBySource(this.comparisonFacts());
+  }
+
+  hasContributingVoiceUpdate(): boolean {
+    return (this.review()?.claimant_voice_updates ?? []).some(
+      (update) => update.contributed_to_decision,
+    );
   }
 
   snapshotEntries(): Array<{ label: string; value: string }> {
@@ -166,7 +174,7 @@ export class AdjusterReviewPage {
   }
 }
 
-export function groupEvidenceBySource(facts: Array<{ source: string; finding: string }>): EvidenceGroup[] {
+export function groupEvidenceBySource(facts: EvidenceFact[]): EvidenceGroup[] {
   const groups = new Map<string, EvidenceGroup & { seen: Set<string> }>();
   for (const fact of facts) {
     const source = fact.source.trim() || 'Current evidence';
@@ -175,7 +183,7 @@ export function groupEvidenceBySource(facts: Array<{ source: string; finding: st
     const key = source.toLocaleLowerCase();
     const existing = groups.get(key) ?? {
       source,
-      label: evidenceLabel(source),
+      label: evidenceLabel(source, fact.document_type),
       findings: [],
       seen: new Set<string>(),
     };
@@ -189,9 +197,16 @@ export function groupEvidenceBySource(facts: Array<{ source: string; finding: st
   return [...groups.values()].map(({ seen: _seen, ...group }) => group);
 }
 
-function evidenceLabel(source: string): string {
+function evidenceLabel(source: string, documentType?: string): string {
+  if (documentType === 'police_report') return 'Police report';
+  if (documentType === 'policy_document') return 'Policy document';
+  if (documentType === 'medical_document') return 'Medical documentation';
+  if (documentType === 'voice_note') return 'Claimant voice response';
+  if (documentType === 'damage_evidence' || documentType === 'license_plate_photo') {
+    return 'Current damage photo';
+  }
   const normalized = source.toLocaleLowerCase();
-  if (normalized.includes('police') || normalized.endsWith('.pdf')) return 'Police report';
+  if (normalized.includes('police')) return 'Police report';
   if (/\.(jpe?g|png|webp|heic)$/.test(normalized)) return 'Current damage photo';
   return 'Current evidence';
 }

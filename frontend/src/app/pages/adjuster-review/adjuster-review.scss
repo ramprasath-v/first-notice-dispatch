@@ -22,6 +22,10 @@ h3 { font-size: .9rem; margin: 1.25rem 0 .4rem; color: #35645c; }
 .evidence-card ul { list-style: none; padding: 0; margin: 0; }
 .evidence-card li { display: flex; gap: .45rem; margin: .35rem 0; line-height: 1.4; }
 .evidence-card li b { color: #16826f; }
+.voice-update-card dl { display: grid; gap: .55rem; margin: .85rem 0 0; }
+.voice-update-card dl div { display: grid; grid-template-columns: minmax(110px, .45fr) 1fr; gap: .75rem; }
+.voice-update-card dt { color: #58756f; font-weight: 700; }
+.voice-update-card dd { margin: 0; }
 .recommendation { margin-top: 1.5rem; padding: 1.2rem; border-left: 4px solid #28766a; border-radius: 10px; background: #edf7f4; }
 .recommendation h2 { margin: .25rem 0 .4rem; }
 .recommendation p:last-child { margin-bottom: 0; }

@@ -54,6 +54,15 @@ class HumanReviewSupportingDocument(BaseModel):
     status: str
 
 
+class HumanReviewVoiceUpdate(BaseModel):
+    source_label: Literal["Claimant voice response"] = "Claimant voice response"
+    incident_date: str | None = None
+    incident_time: str | None = None
+    injury_mentioned: bool = False
+    injury_description: str | None = None
+    contributed_to_decision: bool = False
+
+
 class HumanReviewEvidenceRequest(BaseModel):
     document_type: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
     instruction: str = Field(min_length=1, max_length=500)
@@ -116,6 +125,9 @@ class HumanReviewPublicResponse(BaseModel):
     briefing: HumanReviewBriefing
     source_references: list[HumanReviewSourceSummary] = Field(default_factory=list)
     supporting_documents: list[HumanReviewSupportingDocument] = Field(
+        default_factory=list
+    )
+    claimant_voice_updates: list[HumanReviewVoiceUpdate] = Field(
         default_factory=list
     )
     generation: int = Field(default=1, ge=1)

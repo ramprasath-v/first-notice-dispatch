@@ -925,6 +925,65 @@ class HumanReviewServiceTests(unittest.TestCase):
             public.supporting_documents[0].document_type, "medical_document"
         )
 
+    def test_public_review_exposes_only_grounded_claimant_voice_facts(self) -> None:
+        self.repository.get_human_review_by_token_hash.return_value = record()
+        self.repository.get_claim.return_value.update({
+            "voice_injury_source_document_id": "DOC-VOICE",
+        })
+        self.repository.get_documents.return_value = [
+            ClaimDocument(
+                document_id="DOC-VOICE",
+                claim_id=CLAIM_ID,
+                document_type="voice_note",
+                source_type="claimant_voice",
+                filename="incident.webm",
+                status="validated",
+                evidence_facts={
+                    "incident_date": "2026-08-24",
+                    "incident_time": "18:00",
+                    "injury_mentioned": "true",
+                    "injury_description": "neck pain later that evening",
+                    "vehicle_identity": "must not be exposed here",
+                },
+                received_at=NOW,
+            )
+        ]
+
+        public = self.service.get_public_review("secure-token")
+
+        self.assertEqual(len(public.claimant_voice_updates), 1)
+        update = public.claimant_voice_updates[0]
+        self.assertEqual(update.source_label, "Claimant voice response")
+        self.assertEqual(update.incident_date, "2026-08-24")
+        self.assertEqual(update.incident_time, "18:00")
+        self.assertTrue(update.injury_mentioned)
+        self.assertEqual(update.injury_description, "neck pain later that evening")
+        self.assertTrue(update.contributed_to_decision)
+        self.assertNotIn("vehicle_identity", update.model_dump_json())
+
+    def test_public_review_projects_actual_document_type_for_evidence(self) -> None:
+        self.repository.get_human_review_by_token_hash.return_value = record()
+        self.repository.get_claim.return_value["current_evidence_findings"] = [{
+            "source": "insurance.pdf",
+            "finding": "Policy evidence was validated.",
+        }]
+        self.repository.get_documents.return_value = [
+            ClaimDocument(
+                document_id="DOC-POLICY",
+                claim_id=CLAIM_ID,
+                document_type="policy_document",
+                filename="insurance.pdf",
+                status="validated",
+                received_at=NOW,
+            )
+        ]
+
+        public = self.service.get_public_review("secure-token")
+
+        self.assertEqual(
+            public.evidence_comparison[0]["document_type"], "policy_document"
+        )
+
     def test_medical_attachment_download_is_scoped_to_review_claim(self) -> None:
         self.repository.get_human_review_by_token_hash.return_value = record()
         self.repository.get_document.return_value = ClaimDocument(

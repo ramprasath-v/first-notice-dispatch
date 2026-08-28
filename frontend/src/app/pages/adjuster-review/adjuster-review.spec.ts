@@ -284,6 +284,84 @@ describe('AdjusterReviewPage', () => {
     expect(fixture.nativeElement.textContent).toContain('Received');
   });
 
+  it('shows grounded claimant voice facts and evidence-source provenance', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      claimant_voice_updates: [{
+        source_label: 'Claimant voice response',
+        incident_date: '2026-08-24',
+        incident_time: '18:00',
+        injury_mentioned: true,
+        injury_description: 'neck pain later that evening',
+        contributed_to_decision: true,
+      }],
+    }));
+
+    const fixture = await create();
+    const voiceSection = fixture.nativeElement.querySelector(
+      '[aria-labelledby="claimant-voice-title"]',
+    ) as HTMLElement;
+
+    expect(voiceSection.textContent).toContain('Claimant voice update');
+    expect(voiceSection.textContent).toContain('Claimant voice response');
+    expect(voiceSection.textContent).toContain('2026-08-24');
+    expect(voiceSection.textContent).toContain('18:00');
+    expect(voiceSection.textContent).toContain('Injury mentioned');
+    expect(voiceSection.textContent).toContain('Yes');
+    expect(voiceSection.textContent).toContain('neck pain later that evening');
+    expect(fixture.nativeElement.querySelector('.analysis-details').textContent)
+      .toContain('Claimant voice response');
+  });
+
+  it('does not show a claimant voice section without voice evidence', async () => {
+    const fixture = await create();
+
+    expect(fixture.nativeElement.querySelector(
+      '[aria-labelledby="claimant-voice-title"]',
+    )).toBeNull();
+  });
+
+  it('renders only the claimant voice facts that are present', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      claimant_voice_updates: [{
+        source_label: 'Claimant voice response',
+        incident_date: null,
+        incident_time: '13:00',
+        injury_mentioned: true,
+        injury_description: null,
+        contributed_to_decision: true,
+      }],
+    }));
+
+    const fixture = await create();
+    const voiceSection = fixture.nativeElement.querySelector(
+      '[aria-labelledby="claimant-voice-title"]',
+    ) as HTMLElement;
+
+    expect(voiceSection.textContent).toContain('Incident time');
+    expect(voiceSection.textContent).toContain('13:00');
+    expect(voiceSection.textContent).not.toContain('Incident date');
+    expect(voiceSection.textContent).not.toContain('Injury description');
+  });
+
+  it('labels insurance evidence from its document type instead of its PDF extension', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      evidence_comparison: [{
+        source: 'insurance.pdf',
+        finding: 'Policy evidence was validated.',
+        document_type: 'policy_document',
+      }],
+    }));
+
+    const fixture = await create();
+    const evidenceCard = fixture.nativeElement.querySelector('.evidence-card') as HTMLElement;
+
+    expect(evidenceCard.textContent).toContain('Policy document');
+    expect(evidenceCard.textContent).not.toContain('Police report');
+  });
+
   it('builds one group per source using case-insensitive finding deduplication', () => {
     expect(groupEvidenceBySource([
       { source: 'rear.jpg', finding: 'Plate readable' },

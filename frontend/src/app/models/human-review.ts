@@ -16,15 +16,29 @@ export interface HumanReview {
   briefing: HumanReviewBriefing;
   source_references?: EvidenceSourceReference[];
   supporting_documents?: SupportingDocument[];
+  claimant_voice_updates?: ClaimantVoiceUpdate[];
   generation?: number;
   recommended_remediation?: RecommendedRemediation;
   ai_recommendation?: string;
   claim_snapshot?: Record<string, string | boolean | null>;
-  evidence_comparison?: Array<{ source: string; finding: string }>;
+  evidence_comparison?: Array<{
+    source: string;
+    finding: string;
+    document_type?: string;
+  }>;
   resolution_history?: string[];
   expires_at: string;
   decision_at?: string | null;
   checkpoint_status?: string | null;
+}
+
+export interface ClaimantVoiceUpdate {
+  source_label: 'Claimant voice response';
+  incident_date?: string | null;
+  incident_time?: string | null;
+  injury_mentioned: boolean;
+  injury_description?: string | null;
+  contributed_to_decision: boolean;
 }
 
 export interface SupportingDocument {
