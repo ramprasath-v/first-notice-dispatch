@@ -138,4 +138,20 @@ export class ClaimApiService {
       { field_name: fieldName, value },
     );
   }
+
+  submitVoiceIncidentCorrection(
+    claimId: string,
+    requestedActionId: string,
+    file: File,
+    idempotencyKey: string,
+  ): Observable<{ claim_id: string; event_id: string; status: string }> {
+    const body = new FormData();
+    body.append('requested_action_id', requestedActionId);
+    body.append('file', file, file.name);
+    return this.http.post<{ claim_id: string; event_id: string; status: string }>(
+      `${this.baseUrl}/claims/${claimId}/corrections/voice`,
+      body,
+      { headers: { 'X-Idempotency-Key': idempotencyKey } },
+    );
+  }
 }

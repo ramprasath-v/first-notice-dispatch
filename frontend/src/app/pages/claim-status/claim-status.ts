@@ -1,4 +1,4 @@
-import { DatePipe, TitleCasePipe } from '@angular/common';
+import { DatePipe, DecimalPipe, TitleCasePipe } from '@angular/common';
 import { Component, DestroyRef, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -81,6 +81,7 @@ export interface WorkflowHeartbeat {
 }
 
 type RecheckKind = 'document' | 'correction';
+type VoiceRecordingState = 'idle' | 'requesting' | 'recording' | 'recorded';
 
 export function workflowSteps(status: string, rechecking = false): WorkflowStep[] {
   const analyzedActive = [
@@ -165,7 +166,7 @@ export function shouldPollStatus(status: string | undefined, resumePolling: bool
 
 @Component({
   selector: 'app-claim-status-page',
-  imports: [DatePipe, TitleCasePipe, FormsModule, MissingDocuments, InspectionCard, ClaimTimeline],
+  imports: [DatePipe, DecimalPipe, TitleCasePipe, FormsModule, MissingDocuments, InspectionCard, ClaimTimeline],
   templateUrl: './claim-status.html',
   styleUrl: './claim-status.scss',
 })
@@ -188,15 +189,23 @@ export class ClaimStatusPage {
   readonly lastBusinessUpdateAt = signal<number | null>(null);
   readonly clock = signal(Date.now());
   readonly statusChangedUntil = signal(0);
+  readonly voiceRecordingState = signal<VoiceRecordingState>('idle');
+  readonly recordedVoice = signal<File | null>(null);
   private readonly refreshRequests = new Subject<void>();
   private refreshPending = false;
   private documentSubmittedAt: number | null = null;
   private statusAtUpload: string | null = null;
   private updatedAtAtUpload: string | null = null;
   private actionIdAtSubmission: string | null = null;
+  private mediaRecorder: MediaRecorder | null = null;
+  private microphoneStream: MediaStream | null = null;
+  private voiceChunks: Blob[] = [];
+  private discardRecordingOnStop = false;
+  private voiceIdempotencyKey: string | null = null;
   correctionValue = '';
 
   constructor() {
+    this.destroyRef.onDestroy(() => this.releaseMicrophone());
     timer(0, 1000)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => this.clock.set(Date.now()));
@@ -483,6 +492,94 @@ export class ClaimStatusPage {
     });
   }
 
+  async startVoiceRecording(): Promise<void> {
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof MediaRecorder === 'undefined'
+    ) {
+      this.error.set(
+        'Voice recording is not supported in this browser. Please enter the date manually.',
+      );
+      return;
+    }
+    this.discardVoiceRecording();
+    this.error.set('');
+    this.voiceRecordingState.set('requesting');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.microphoneStream = stream;
+      const mimeType = this.preferredVoiceMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      this.mediaRecorder = recorder;
+      this.voiceChunks = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) this.voiceChunks.push(event.data);
+      };
+      recorder.onstop = () => this.finishVoiceRecording(recorder.mimeType || mimeType);
+      recorder.start();
+      this.voiceRecordingState.set('recording');
+    } catch {
+      this.releaseMicrophone();
+      this.voiceRecordingState.set('idle');
+      this.error.set(
+        'Microphone access was not available. Allow microphone access or enter the date manually.',
+      );
+    }
+  }
+
+  stopVoiceRecording(): void {
+    if (this.mediaRecorder?.state === 'recording') this.mediaRecorder.stop();
+  }
+
+  discardVoiceRecording(): void {
+    this.discardRecordingOnStop = true;
+    if (this.mediaRecorder?.state === 'recording') {
+      this.mediaRecorder.stop();
+    } else {
+      this.releaseMicrophone();
+      this.resetVoiceRecording();
+    }
+  }
+
+  submitVoiceCorrection(action: EnterTextRequestedAction): void {
+    const file = this.recordedVoice();
+    if (!file || this.uploading() || this.rechecking()) {
+      if (!file) this.error.set('Please record a voice response before submitting.');
+      return;
+    }
+    this.uploading.set(true);
+    this.error.set('');
+    const idempotencyKey = this.voiceIdempotencyKey ?? crypto.randomUUID();
+    this.voiceIdempotencyKey = idempotencyKey;
+    this.api.submitVoiceIncidentCorrection(
+      this.claimId,
+      action.action_id,
+      file,
+      idempotencyKey,
+    ).subscribe({
+      next: () => {
+        this.uploading.set(false);
+        this.resetVoiceRecording();
+        this.documentNotice.set('Voice response received. Rechecking your claim…');
+        this.rechecking.set(true);
+        this.recheckKind.set('correction');
+        this.statusAtUpload = this.claim()?.status ?? 'awaiting_documents';
+        this.updatedAtAtUpload = this.claim()?.updated_at ?? null;
+        this.actionIdAtSubmission = action.action_id;
+        this.documentSubmittedAt = Date.now();
+        this.refreshTimeline();
+        this.refreshNow();
+      },
+      error: () => {
+        this.uploading.set(false);
+        this.error.set(
+          'We could not use that recording. Re-record or enter the date manually.',
+        );
+      },
+    });
+  }
+
   correctionSubmitDisabled(action: EnterTextRequestedAction): boolean {
     return this.uploading() || this.rechecking()
       || (action.field_name !== 'incident_date' && !this.correctionValue.trim());
@@ -494,6 +591,49 @@ export class ClaimStatusPage {
     return !Number.isNaN(parsed.getTime())
       && parsed.toISOString().slice(0, 10) === value
       && value <= new Date().toISOString().slice(0, 10);
+  }
+
+  private preferredVoiceMimeType(): string {
+    return ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find(
+      (type) => MediaRecorder.isTypeSupported?.(type),
+    ) ?? '';
+  }
+
+  private finishVoiceRecording(mimeType: string): void {
+    this.releaseMicrophone();
+    if (this.discardRecordingOnStop) {
+      this.resetVoiceRecording();
+      return;
+    }
+    const blob = new Blob(this.voiceChunks, { type: mimeType || 'audio/webm' });
+    this.voiceChunks = [];
+    this.mediaRecorder = null;
+    if (!blob.size) {
+      this.voiceRecordingState.set('idle');
+      this.error.set('No audio was captured. Please try recording again.');
+      return;
+    }
+    const extension = blob.type.includes('mp4') ? 'm4a' : 'webm';
+    this.recordedVoice.set(
+      new File([blob], `incident-voice-${Date.now()}.${extension}`, { type: blob.type }),
+    );
+    this.voiceIdempotencyKey = crypto.randomUUID();
+    this.voiceRecordingState.set('recorded');
+  }
+
+  private releaseMicrophone(): void {
+    this.microphoneStream?.getTracks().forEach((track) => track.stop());
+    this.microphoneStream = null;
+  }
+
+  private resetVoiceRecording(): void {
+    this.releaseMicrophone();
+    this.mediaRecorder = null;
+    this.voiceChunks = [];
+    this.recordedVoice.set(null);
+    this.voiceIdempotencyKey = null;
+    this.discardRecordingOnStop = false;
+    this.voiceRecordingState.set('idle');
   }
 
   private shouldPoll(): boolean {

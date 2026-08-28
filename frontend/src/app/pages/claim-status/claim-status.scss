@@ -27,4 +27,14 @@
 .correction-context p, .what-to-do { color: #667b76; line-height: 1.45; }
 .action-count, .supporting-copy { color: #667b76; }
 .supporting-copy { margin: 1rem 0 0; font-size: .88rem; }
+.voice-correction { display: grid; gap: .75rem; margin: 1.1rem 0; padding: 1rem; border: 1px solid #cfe2dc; border-radius: 12px; background: #f6fbf9; }
+.voice-correction > strong { color: #294f46; }
+.voice-correction p { display: flex; align-items: center; gap: .5rem; margin: 0; color: #526d66; }
+.voice-actions { display: flex; flex-wrap: wrap; gap: .65rem; }
+.recording-state span { width: .7rem; height: .7rem; border-radius: 50%; background: #c63e3e; box-shadow: 0 0 0 .3rem #f6dede; animation: recording-pulse 1.4s ease-in-out infinite; }
+.small-spinner { width: 18px; height: 18px; display: inline-block; }
+.manual-divider { display: flex; align-items: center; gap: .8rem; margin: 1.1rem 0; color: #71837e; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+.manual-divider::before, .manual-divider::after { content: ''; height: 1px; flex: 1; background: #dce7e4; }
+@keyframes recording-pulse { 50% { opacity: .45; transform: scale(.88); } }
+@media (prefers-reduced-motion: reduce) { .recording-state span { animation: none; } }
 @media (max-width: 760px) { .status-hero { align-items: stretch; flex-direction: column; } .heartbeat-heading { grid-template-columns: 1fr; gap: .45rem; } .poll-row { flex-wrap: wrap; } .poll-row small { width: 100%; margin-left: 1.45rem; } .stepper { padding-inline: .7rem; } .stepper small { width: 76px; font-size: .68rem; } .stepper small em { white-space: normal; font-size: .58rem; } }
