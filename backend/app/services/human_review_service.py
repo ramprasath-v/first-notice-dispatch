@@ -1516,7 +1516,9 @@ def _briefing_from_claim(claim: dict[str, object]) -> HumanReviewBriefing:
     questions.extend(
         f"Resolve whether this remains consequential: {item.get('uncertainty')}"
         for item in claim.get("unresolved_uncertainties", [])
-        if isinstance(item, dict) and item.get("uncertainty")
+        if isinstance(item, dict)
+        and item.get("uncertainty")
+        and not _resolved_by_authoritative_claim_state(item, claim)
     )
     if not questions:
         questions = [
@@ -1534,6 +1536,41 @@ def _briefing_from_claim(claim: dict[str, object]) -> HumanReviewBriefing:
         unresolved_questions=questions,
         recommended_next_action=questions[0],
         confidence=float(claim["review_confidence"]) if claim.get("review_confidence") is not None else None,
+    )
+
+
+def _resolved_by_authoritative_claim_state(
+    uncertainty: dict[str, object], claim: dict[str, object]
+) -> bool:
+    if not claim.get("incident_date"):
+        return False
+    text = str(uncertainty.get("uncertainty") or "").strip().casefold()
+    mentions_incident_timing = (
+        "incident date" in text
+        or "incident time" in text
+        or ("date" in text and "incident" in text)
+        or ("time" in text and "incident" in text)
+    )
+    describes_missing_value = any(
+        phrase in text
+        for phrase in (
+            "not specified",
+            "not provided",
+            "missing",
+            "unknown",
+            "could not determine",
+            "cannot determine",
+            "unclear when",
+        )
+    )
+    describes_conflict = any(
+        phrase in text
+        for phrase in ("conflict", "differ", "inconsistent", "contradict")
+    )
+    return (
+        mentions_incident_timing
+        and describes_missing_value
+        and not describes_conflict
     )
 
 

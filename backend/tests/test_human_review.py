@@ -506,6 +506,111 @@ class HumanReviewServiceTests(unittest.TestCase):
             "Verify whether initial-damage.jpg belongs to this claim.",
         )
 
+    def test_voice_date_with_injury_removes_resolved_missing_date_context(self) -> None:
+        stale = (
+            "The exact date and time of the incident are not specified in the "
+            "provided evidence."
+        )
+        optional_time = "The incident time remains unknown."
+        self.repository.get_claim.return_value.update({
+            "conflicts": [],
+            "incident_date": "2026-08-24",
+            "incident_date_provenance": {
+                "source_type": "claimant_voice",
+                "document_id": "DOC-VOICE",
+            },
+            "human_review_reason": "Possible injury requires adjuster review.",
+            "operational_indicators": {"possible_injury": True},
+            "unresolved_uncertainties": [
+                {"uncertainty": stale},
+                {"uncertainty": optional_time},
+            ],
+        })
+
+        review = self.service.ensure_review_requested(
+            CLAIM_ID, correlation_id="corr-voice-injury"
+        )
+
+        self.assertEqual(
+            review.briefing.summary,
+            "FirstNotice paused automated routing because possible injury requires "
+            "adjuster review.",
+        )
+        self.assertNotIn(stale, review.briefing.unresolved_questions)
+        self.assertNotIn(optional_time, review.briefing.unresolved_questions)
+        email = self.gmail.send_human_review_email.call_args.args[0]
+        self.assertNotIn(stale, email.unresolved_questions)
+        self.assertNotIn(optional_time, email.unresolved_questions)
+
+    def test_voice_date_and_time_with_injury_remove_resolved_date_context(self) -> None:
+        stale = (
+            "The exact date and time of the incident are not specified in the "
+            "provided evidence."
+        )
+        self.repository.get_claim.return_value.update({
+            "conflicts": [],
+            "incident_date": "2026-08-24",
+            "incident_time": "18:00",
+            "incident_date_provenance": {
+                "source_type": "claimant_voice",
+                "document_id": "DOC-VOICE",
+            },
+            "human_review_reason": "Possible injury requires adjuster review.",
+            "operational_indicators": {"possible_injury": True},
+            "unresolved_uncertainties": [{"uncertainty": stale}],
+        })
+
+        review = self.service.ensure_review_requested(
+            CLAIM_ID, correlation_id="corr-voice-date-time-injury"
+        )
+
+        self.assertNotIn(stale, review.briefing.unresolved_questions)
+        self.assertEqual(review.status, "pending")
+
+    def test_genuinely_missing_incident_date_context_remains(self) -> None:
+        unresolved = (
+            "The exact date and time of the incident are not specified in the "
+            "provided evidence."
+        )
+        self.repository.get_claim.return_value.update({
+            "conflicts": [],
+            "incident_date": None,
+            "unresolved_uncertainties": [{"uncertainty": unresolved}],
+        })
+
+        review = self.service.ensure_review_requested(
+            CLAIM_ID, correlation_id="corr-date-unresolved"
+        )
+
+        self.assertIn(
+            f"Resolve whether this remains consequential: {unresolved}",
+            review.briefing.unresolved_questions,
+        )
+
+    def test_unrelated_drivability_context_remains_after_voice_date_resolution(self) -> None:
+        stale_date = "The incident date was not provided."
+        drivability = "Vehicle drivability remains unknown."
+        self.repository.get_claim.return_value.update({
+            "conflicts": [],
+            "incident_date": "2026-08-24",
+            "incident_date_provenance": {
+                "source_type": "claimant_voice",
+                "document_id": "DOC-VOICE",
+            },
+            "unresolved_uncertainties": [
+                {"uncertainty": stale_date},
+                {"uncertainty": drivability},
+            ],
+        })
+
+        review = self.service.ensure_review_requested(
+            CLAIM_ID, correlation_id="corr-drivability"
+        )
+
+        context = "\n".join(review.briefing.unresolved_questions)
+        self.assertNotIn(stale_date, context)
+        self.assertIn(drivability, context)
+
     def test_checkpoint_carries_exact_conflicting_source_document_id(self) -> None:
         self.repository.get_claim.return_value["conflicts"] = [
             {
