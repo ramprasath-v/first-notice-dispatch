@@ -55,22 +55,46 @@
         <section class="card correction-card">
           <p class="kicker">Action needed</p>
           <p class="action-count">1 item needed to continue</p>
-          <h2>{{ action.field_name === 'incident_date' ? "We couldn't determine the collision date." : current.action_display?.title || 'More information needed' }}</h2>
+          <h2>{{ action.field_name === 'incident_date' ? "We couldn't determine when the accident happened." : current.action_display?.title || 'More information needed' }}</h2>
           @if (action.field_name === 'incident_date') {
-            <p>Please confirm the incident date to continue.</p>
+            <p>Record a quick answer. You can also mention injuries or other important details.</p>
           } @else if (current.action_display) {
             <div class="correction-context"><strong>Why we need this</strong><p>{{ current.action_display.explanation }}</p></div>
           }
           @if (action.field_name !== 'incident_date') {
             <p class="what-to-do"><strong>What to do</strong>{{ action.instruction }}</p>
           }
-          <label class="field">
-            <span>{{ action.field_name === 'incident_date' ? 'Incident date' : 'Your response' }}</span>
-            <input [type]="action.field_name === 'incident_date' ? 'date' : 'text'" [(ngModel)]="correctionValue" maxlength="256" autocomplete="off" />
-          </label>
-          <button class="primary" type="button" [disabled]="correctionSubmitDisabled(action)" (click)="submitCorrection(action.field_name)">
-            {{ uploading() ? 'Submitting…' : action.field_name === 'incident_date' ? 'Continue' : 'Submit correction' }}
-          </button>
+          @if (action.field_name === 'incident_date') {
+            <div class="voice-correction" [attr.data-state]="voiceRecordingState()">
+              <strong>Voice answer</strong>
+              @if (voiceRecordingState() === 'idle') {
+                <button class="secondary" type="button" [disabled]="uploading()" (click)="startVoiceRecording()">Record voice note</button>
+              } @else if (voiceRecordingState() === 'requesting') {
+                <p role="status"><span class="spinner small-spinner" aria-hidden="true"></span> Requesting microphone access…</p>
+              } @else if (voiceRecordingState() === 'recording') {
+                <p class="recording-state" role="status"><span aria-hidden="true"></span> Recording…</p>
+                <div class="voice-actions">
+                  <button class="primary" type="button" (click)="stopVoiceRecording()">Stop recording</button>
+                  <button class="secondary" type="button" (click)="discardVoiceRecording()">Cancel</button>
+                </div>
+              } @else if (recordedVoice(); as recording) {
+                <p role="status">✓ Voice note ready · {{ recording.size / 1024 | number:'1.0-0' }} KB</p>
+                <div class="voice-actions">
+                  <button class="primary" type="button" [disabled]="uploading()" (click)="submitVoiceCorrection(action)">{{ uploading() ? 'Submitting…' : 'Submit voice note' }}</button>
+                  <button class="secondary" type="button" [disabled]="uploading()" (click)="startVoiceRecording()">Re-record</button>
+                  <button class="secondary" type="button" [disabled]="uploading()" (click)="discardVoiceRecording()">Discard</button>
+                </div>
+              }
+            </div>
+          } @else {
+            <label class="field">
+              <span>Your response</span>
+              <input type="text" [(ngModel)]="correctionValue" maxlength="256" autocomplete="off" />
+            </label>
+            <button class="primary" type="button" [disabled]="correctionSubmitDisabled(action)" (click)="submitCorrection(action.field_name)">
+              {{ uploading() ? 'Submitting…' : 'Submit correction' }}
+            </button>
+          }
           <p class="supporting-copy">FirstNotice will automatically continue processing when this item is received.</p>
         </section>
       }

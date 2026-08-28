@@ -17,6 +17,7 @@ SUPPORTED_CONTENT_TYPES = frozenset(
         "audio/wav",
         "audio/x-wav",
         "audio/mp4",
+        "audio/webm",
     }
 )
 MAX_EVIDENCE_SIZE_BYTES = 15 * 1024 * 1024

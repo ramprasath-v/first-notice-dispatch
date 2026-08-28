@@ -40,6 +40,7 @@ describe('ClaimStatusPage', () => {
     uploadDocument: vi.fn(),
     uploadDocuments: vi.fn(),
     submitCorrection: vi.fn(),
+    submitVoiceIncidentCorrection: vi.fn(),
   };
 
   beforeEach(() => {
@@ -52,9 +53,15 @@ describe('ClaimStatusPage', () => {
     api.submitCorrection.mockReturnValue(
       of({ claim_id: 'CLM-ABC12345', event_id: 'evt', status: 'received' }),
     );
+    api.submitVoiceIncidentCorrection.mockReturnValue(
+      of({ claim_id: 'CLM-ABC12345', event_id: 'voice-evt', status: 'received' }),
+    );
   });
 
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
   async function create(): Promise<ComponentFixture<ClaimStatusPage>> {
     await TestBed.configureTestingModule({
@@ -143,7 +150,7 @@ describe('ClaimStatusPage', () => {
     expect(fixture.nativeElement.textContent).toContain('What to do');
   });
 
-  it('renders a missing incident date as a date picker without an uploader', async () => {
+  it('renders missing incident date as voice-only remediation', async () => {
     api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
       missing_documents: [{ type: 'incident_date' }],
       requested_actions: [{
@@ -158,15 +165,154 @@ describe('ClaimStatusPage', () => {
     const fixture = await create();
 
     expect(fixture.nativeElement.textContent).toContain(
-      "We couldn't determine the collision date.",
+      "We couldn't determine when the accident happened.",
     );
     expect(fixture.nativeElement.textContent).toContain(
-      'Please confirm the incident date to continue.',
+      'Record a quick answer. You can also mention injuries or other important details.',
     );
-    expect(fixture.nativeElement.querySelector('input[type=date]')).not.toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('Record voice note');
+    expect(fixture.nativeElement.querySelector('input[type=date]')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('enter the date manually');
+    expect(fixture.nativeElement.textContent).not.toContain('Continue');
     expect(fixture.nativeElement.querySelector('input[type=file]')).toBeNull();
     expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
     expect(fixture.nativeElement.textContent).not.toContain('incident_date');
+  });
+
+  it('records, stops, and submits voice through the incident-date action', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+    })));
+    class FakeRecorder {
+      static isTypeSupported = () => true;
+      state = 'inactive';
+      mimeType = 'audio/webm';
+      ondataavailable: ((event: { data: Blob }) => void) | null = null;
+      onstop: (() => void) | null = null;
+      constructor(_stream: MediaStream, _options?: MediaRecorderOptions) {}
+      start(): void { this.state = 'recording'; }
+      stop(): void {
+        this.state = 'inactive';
+        this.ondataavailable?.({ data: new Blob(['voice'], { type: 'audio/webm' }) });
+        this.onstop?.();
+      }
+    }
+    const stop = vi.fn();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [{ stop }] }) },
+    });
+    vi.stubGlobal('MediaRecorder', FakeRecorder);
+    const fixture = await create();
+
+    await fixture.componentInstance.startVoiceRecording();
+    expect(fixture.componentInstance.voiceRecordingState()).toBe('recording');
+    fixture.componentInstance.stopVoiceRecording();
+    expect(fixture.componentInstance.voiceRecordingState()).toBe('recorded');
+    const action = fixture.componentInstance.textAction(
+      fixture.componentInstance.claim()?.requested_actions,
+    )!;
+    fixture.componentInstance.submitVoiceCorrection(action);
+
+    expect(api.submitVoiceIncidentCorrection).toHaveBeenCalledWith(
+      'CLM-ABC12345',
+      'ACT-DATE',
+      expect.objectContaining({ type: 'audio/webm' }),
+      expect.any(String),
+    );
+    expect(fixture.componentInstance.rechecking()).toBe(true);
+    expect(stop).toHaveBeenCalled();
+  });
+
+  it('allows discard and re-record without exposing manual date entry', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+    })));
+    const fixture = await create();
+    fixture.componentInstance.recordedVoice.set(
+      new File(['voice'], 'voice.webm', { type: 'audio/webm' }),
+    );
+    fixture.componentInstance.voiceRecordingState.set('recorded');
+    fixture.componentInstance.discardVoiceRecording();
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.recordedVoice()).toBeNull();
+    expect(fixture.componentInstance.voiceRecordingState()).toBe('idle');
+    expect(fixture.nativeElement.querySelector('input[type=date]')).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('Record voice note');
+  });
+
+  it('handles microphone permission failure with voice-only guidance', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+    })));
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockRejectedValue(new Error('denied')) },
+    });
+    vi.stubGlobal('MediaRecorder', class {});
+    const fixture = await create();
+
+    await fixture.componentInstance.startVoiceRecording();
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.error()).toContain('Microphone access');
+    expect(fixture.componentInstance.error()).not.toContain('manually');
+    expect(fixture.nativeElement.querySelector('input[type=date]')).toBeNull();
+  });
+
+  it('reports unsupported recording without suggesting manual date entry', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+    })));
+    vi.stubGlobal('MediaRecorder', undefined);
+    const fixture = await create();
+
+    await fixture.componentInstance.startVoiceRecording();
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.error()).toContain('not supported');
+    expect(fixture.componentInstance.error()).not.toContain('manually');
+    expect(fixture.nativeElement.querySelector('input[type=date]')).toBeNull();
+  });
+
+  it('keeps the recording available when voice upload fails', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+    })));
+    api.submitVoiceIncidentCorrection.mockReturnValue(
+      throwError(() => new Error('upload failed')),
+    );
+    const fixture = await create();
+    const recording = new File(['voice'], 'voice.webm', { type: 'audio/webm' });
+    fixture.componentInstance.recordedVoice.set(recording);
+    fixture.componentInstance.voiceRecordingState.set('recorded');
+    const action = fixture.componentInstance.textAction(
+      fixture.componentInstance.claim()?.requested_actions,
+    )!;
+
+    fixture.componentInstance.submitVoiceCorrection(action);
+
+    expect(fixture.componentInstance.recordedVoice()).toBe(recording);
+    expect(fixture.componentInstance.rechecking()).toBe(false);
+    expect(fixture.componentInstance.error()).toBe(
+      'We could not use that recording. Please re-record your answer.',
+    );
   });
 
   it('submits a valid incident date through the correction API', async () => {

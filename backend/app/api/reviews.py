@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from urllib.parse import quote
 
-from fastapi import APIRouter, Header, HTTPException, Response, status
+from fastapi import APIRouter, File, Form, Header, HTTPException, Response, UploadFile, status
 
 from app.models.human_review import (
     ClaimCorrectionAcceptedResponse,
@@ -91,6 +91,30 @@ def create_reviews_router(
         return _call(
             lambda: get_service().submit_correction(
                 claim_id, field_name=request.field_name, value=request.value
+            )
+        )
+
+    @router.post(
+        "/claims/{claim_id}/corrections/voice",
+        response_model=ClaimCorrectionAcceptedResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def submit_voice_correction(
+        claim_id: str,
+        requested_action_id: str = Form(..., min_length=1, max_length=128),
+        idempotency_key: str = Header(
+            ..., alias="X-Idempotency-Key", min_length=8, max_length=128
+        ),
+        file: UploadFile = File(...),
+    ) -> ClaimCorrectionAcceptedResponse:
+        return _call(
+            lambda: get_service().submit_voice_incident_correction(
+                claim_id,
+                requested_action_id=requested_action_id,
+                idempotency_key=idempotency_key,
+                file_obj=file.file,
+                filename=file.filename,
+                content_type=file.content_type,
             )
         )
 

@@ -7,7 +7,12 @@ from unittest.mock import MagicMock, patch
 from google.api_core.exceptions import AlreadyExists, ServiceUnavailable
 
 from app.models.claim_document import ClaimDocument, DocumentExtractionResult
-from app.models.intake_result import EvidenceArtifactFacts, EvidenceFinding, IntakeResult
+from app.models.intake_result import (
+    EvidenceArtifactClassification,
+    EvidenceArtifactFacts,
+    EvidenceFinding,
+    IntakeResult,
+)
 from app.models.inspection_appointment import InspectionAppointment, InspectionSlot
 from app.models.notification import AdjusterNotification
 from app.models.adjuster_packet import AdjusterPacket
@@ -95,6 +100,31 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         )
         self.assertNotIn("evidence_findings", mapped)
 
+    def test_police_report_incident_date_provenance_is_persisted(self) -> None:
+        result = self.result.model_copy(
+            update={
+                "evidence_artifact_classifications": [
+                    EvidenceArtifactClassification(
+                        source="police-report.pdf",
+                        document_type="police_report",
+                    )
+                ],
+                "evidence_artifact_facts": [
+                    EvidenceArtifactFacts(
+                        source="police-report.pdf",
+                        incident_date="2026-08-01",
+                    )
+                ],
+            }
+        )
+
+        mapped = intake_result_to_claim_fields(result)
+
+        self.assertEqual(
+            mapped["incident_date_provenance"],
+            {"source_type": "police_report", "source": "police-report.pdf"},
+        )
+
     def test_complete_date_correction_persists_fact_and_clears_missing_item(self) -> None:
         self.repository.get_claim = MagicMock(return_value={
             "claim_id": "CLM-A1B2C3D4",
@@ -129,7 +159,52 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         self.assertEqual(claim_update["incident_date"], "2026-08-07")
         self.assertEqual(claim_update["missing_documents"], [])
         self.assertEqual(claim_update["status"], "inspection_ready")
+        self.assertEqual(
+            claim_update["incident_date_provenance"],
+            {"source_type": "claimant_manual"},
+        )
         self.batch.commit.assert_called_once_with()
+
+    def test_voice_date_with_injury_routes_to_existing_human_review_boundary(self) -> None:
+        self.repository.get_claim = MagicMock(return_value={
+            "claim_id": "CLM-A1B2C3D4",
+            "status": "awaiting_documents",
+            "missing_documents": [{"type": "incident_date"}],
+            "unusable_evidence": [],
+            "conflicts": [],
+            "intake_priority": "routine",
+            "operational_indicators": {"possible_injury": False},
+        })
+        self.repository.reserve_human_review_generation = MagicMock(
+            return_value=HumanReviewGeneration(
+                generation=2,
+                generation_key="voice-injury",
+                review_id="HRV-VOICE",
+                created=True,
+            )
+        )
+
+        target = self.repository.complete_claim_correction(
+            claim_id="CLM-A1B2C3D4",
+            review_id="AUTONOMOUS-DATE",
+            field_name="incident_date",
+            value="2026-08-24",
+            correlation_id="voice-correlation",
+            source_type="claimant_voice",
+            source_document_id="DOC-VOICE",
+            injury_mentioned=True,
+            injury_description="neck pain later that evening",
+        )
+
+        self.assertEqual(target, ClaimStatus.HUMAN_REVIEW_REQUIRED)
+        claim_update = self.batch.update.call_args.args[1]
+        self.assertTrue(claim_update["operational_indicators"]["possible_injury"])
+        self.assertTrue(claim_update["requires_human_review"])
+        self.assertEqual(claim_update["intake_priority"], "urgent_human_review")
+        self.assertEqual(
+            claim_update["incident_date_provenance"],
+            {"source_type": "claimant_voice", "document_id": "DOC-VOICE"},
+        )
 
     def test_completed_intake_writes_claim_and_event_in_one_batch(self) -> None:
         claim_id = self.repository.save_completed_intake(
