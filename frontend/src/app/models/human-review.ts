@@ -36,6 +36,7 @@ export interface ClaimantVoiceUpdate {
   source_label: 'Claimant voice response';
   incident_date?: string | null;
   incident_time?: string | null;
+  incident_description?: string | null;
   injury_mentioned: boolean;
   injury_description?: string | null;
   contributed_to_decision: boolean;

@@ -291,6 +291,7 @@ describe('AdjusterReviewPage', () => {
         source_label: 'Claimant voice response',
         incident_date: '2026-08-24',
         incident_time: '18:00',
+        incident_description: 'I was rear-ended while stopped at a light.',
         injury_mentioned: true,
         injury_description: 'neck pain later that evening',
         contributed_to_decision: true,
@@ -306,6 +307,8 @@ describe('AdjusterReviewPage', () => {
     expect(voiceSection.textContent).toContain('Claimant voice response');
     expect(voiceSection.textContent).toContain('2026-08-24');
     expect(voiceSection.textContent).toContain('18:00');
+    expect(voiceSection.textContent).toContain('What happened');
+    expect(voiceSection.textContent).toContain('I was rear-ended while stopped at a light.');
     expect(voiceSection.textContent).toContain('Injury mentioned');
     expect(voiceSection.textContent).toContain('Yes');
     expect(voiceSection.textContent).toContain('neck pain later that evening');
@@ -328,6 +331,7 @@ describe('AdjusterReviewPage', () => {
         source_label: 'Claimant voice response',
         incident_date: null,
         incident_time: '13:00',
+        incident_description: null,
         injury_mentioned: true,
         injury_description: null,
         contributed_to_decision: true,
@@ -342,7 +346,34 @@ describe('AdjusterReviewPage', () => {
     expect(voiceSection.textContent).toContain('Incident time');
     expect(voiceSection.textContent).toContain('13:00');
     expect(voiceSection.textContent).not.toContain('Incident date');
+    expect(voiceSection.textContent).not.toContain('What happened');
     expect(voiceSection.textContent).not.toContain('Injury description');
+  });
+
+  it('shows voice incident context together with grounded injury details', async () => {
+    api.getHumanReview.mockReturnValue(of({
+      ...review,
+      claimant_voice_updates: [{
+        source_label: 'Claimant voice response',
+        incident_date: '2026-08-24',
+        incident_time: null,
+        incident_description: 'A truck struck my car from behind.',
+        injury_mentioned: true,
+        injury_description: 'My neck started hurting later.',
+        contributed_to_decision: true,
+      }],
+    }));
+
+    const fixture = await create();
+    const voiceSection = fixture.nativeElement.querySelector(
+      '[aria-labelledby="claimant-voice-title"]',
+    ) as HTMLElement;
+
+    expect(voiceSection.textContent).toContain('What happened');
+    expect(voiceSection.textContent).toContain('A truck struck my car from behind.');
+    expect(voiceSection.textContent).toContain('Injury mentioned');
+    expect(voiceSection.textContent).toContain('My neck started hurting later.');
+    expect(voiceSection.textContent).not.toContain('Incident time');
   });
 
   it('labels insurance evidence from its document type instead of its PDF extension', async () => {

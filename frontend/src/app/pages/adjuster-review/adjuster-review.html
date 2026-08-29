@@ -56,6 +56,7 @@
                 <dl>
                   @if (update.incident_date) { <div><dt>Incident date</dt><dd>{{ update.incident_date }}</dd></div> }
                   @if (update.incident_time) { <div><dt>Incident time</dt><dd>{{ update.incident_time }}</dd></div> }
+                  @if (update.incident_description) { <div><dt>What happened</dt><dd>{{ update.incident_description }}</dd></div> }
                   @if (update.injury_mentioned) { <div><dt>Injury mentioned</dt><dd>Yes</dd></div> }
                   @if (update.injury_description) { <div><dt>Injury description</dt><dd>{{ update.injury_description }}</dd></div> }
                 </dl>

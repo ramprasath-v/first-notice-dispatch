@@ -58,6 +58,7 @@ class HumanReviewVoiceUpdate(BaseModel):
     source_label: Literal["Claimant voice response"] = "Claimant voice response"
     incident_date: str | None = None
     incident_time: str | None = None
+    incident_description: str | None = None
     injury_mentioned: bool = False
     injury_description: str | None = None
     contributed_to_decision: bool = False

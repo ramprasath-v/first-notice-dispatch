@@ -1061,6 +1061,7 @@ class HumanReviewServiceTests(unittest.TestCase):
                 evidence_facts={
                     "incident_date": "2026-08-24",
                     "incident_time": "18:00",
+                    "incident_description": "I was rear-ended at a traffic light.",
                     "injury_mentioned": "true",
                     "injury_description": "neck pain later that evening",
                     "vehicle_identity": "must not be exposed here",
@@ -1076,10 +1077,38 @@ class HumanReviewServiceTests(unittest.TestCase):
         self.assertEqual(update.source_label, "Claimant voice response")
         self.assertEqual(update.incident_date, "2026-08-24")
         self.assertEqual(update.incident_time, "18:00")
+        self.assertEqual(
+            update.incident_description,
+            "I was rear-ended at a traffic light.",
+        )
         self.assertTrue(update.injury_mentioned)
         self.assertEqual(update.injury_description, "neck pain later that evening")
         self.assertTrue(update.contributed_to_decision)
         self.assertNotIn("vehicle_identity", update.model_dump_json())
+
+    def test_public_review_omits_absent_voice_incident_description(self) -> None:
+        self.repository.get_human_review_by_token_hash.return_value = record()
+        self.repository.get_documents.return_value = [
+            ClaimDocument(
+                document_id="DOC-VOICE",
+                claim_id=CLAIM_ID,
+                document_type="voice_note",
+                source_type="claimant_voice",
+                filename="incident.webm",
+                status="validated",
+                evidence_facts={
+                    "incident_date": "2026-08-24",
+                    "internal_note": "must not be exposed",
+                },
+                received_at=NOW,
+            )
+        ]
+
+        public = self.service.get_public_review("secure-token")
+
+        update = public.claimant_voice_updates[0]
+        self.assertIsNone(update.incident_description)
+        self.assertNotIn("internal_note", update.model_dump_json())
 
     def test_public_review_projects_actual_document_type_for_evidence(self) -> None:
         self.repository.get_human_review_by_token_hash.return_value = record()

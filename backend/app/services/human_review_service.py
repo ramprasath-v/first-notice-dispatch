@@ -1448,6 +1448,7 @@ def _claimant_voice_update(
         "source_label": "Claimant voice response",
         "incident_date": facts.get("incident_date"),
         "incident_time": facts.get("incident_time"),
+        "incident_description": facts.get("incident_description"),
         "injury_mentioned": str(facts.get("injury_mentioned", "")).casefold()
         == "true",
         "injury_description": facts.get("injury_description"),
