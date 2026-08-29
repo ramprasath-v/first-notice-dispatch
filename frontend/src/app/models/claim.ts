@@ -31,6 +31,7 @@ export interface ClaimantEvidenceRequest {
 export interface ClaimantActionDisplay {
   title: string;
   explanation: string;
+  instruction?: string | null;
 }
 
 export interface InspectionAppointment {

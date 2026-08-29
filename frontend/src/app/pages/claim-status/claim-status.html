@@ -62,7 +62,7 @@
             <div class="correction-context"><strong>Why we need this</strong><p>{{ current.action_display.explanation }}</p></div>
           }
           @if (!isVoiceIncidentAction(action)) {
-            <p class="what-to-do"><strong>What to do</strong>{{ action.instruction }}</p>
+            <p class="what-to-do"><strong>What to do</strong>{{ current.action_display?.instruction || action.instruction }}</p>
           }
           @if (isVoiceIncidentAction(action)) {
             <div class="voice-correction" [attr.data-state]="voiceRecordingState()">

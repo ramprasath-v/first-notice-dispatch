@@ -12,12 +12,14 @@ from app.models.requested_action import (
 class ClaimantActionDisplay(BaseModel):
     title: str
     explanation: str
+    instruction: str | None = None
 
 
 def build_claimant_action_display(
     claim: dict[str, Any],
     requested_actions: list[RequestedAction],
     remediation_document_ids: frozenset[str] = frozenset(),
+    vehicle_mismatch_document_ids: frozenset[str] = frozenset(),
 ) -> ClaimantActionDisplay | None:
     """Return concise claimant copy only for grounded persisted issue facts."""
 
@@ -115,6 +117,22 @@ def build_claimant_action_display(
         is_remediation_target = (
             current_action.replaces_document_id in remediation_document_ids
         )
+        is_persisted_vehicle_mismatch = (
+            current_action.replaces_document_id in vehicle_mismatch_document_ids
+        )
+
+        if is_remediation_target and is_persisted_vehicle_mismatch:
+            return ClaimantActionDisplay(
+                title="New evidence doesn't match",
+                explanation=(
+                    "The uploaded vehicle does not match the insured vehicle on "
+                    "the policy."
+                ),
+                instruction=(
+                    "Please upload a clear photo of the insured vehicle with a "
+                    "readable license plate."
+                ),
+            )
 
         if has_damage and has_identity:
             return ClaimantActionDisplay(
@@ -153,10 +171,14 @@ def build_claimant_action_display(
         if has_identity:
             if has_selected_target and is_remediation_target:
                 return ClaimantActionDisplay(
-                    title="This evidence doesn't match the vehicle in the claim.",
+                    title="New evidence doesn't match",
                     explanation=(
-                        "The submitted photo conflicts with the vehicle identity "
-                        "established by the other claim evidence."
+                        "The uploaded vehicle does not match the insured vehicle "
+                        "on the policy."
+                    ),
+                    instruction=(
+                        "Please upload a clear photo of the insured vehicle with "
+                        "a readable license plate."
                     ),
                 )
             return ClaimantActionDisplay(
@@ -254,8 +276,8 @@ def build_claimant_action_display(
         return ClaimantActionDisplay(
             title="Vehicle identity not verified",
             explanation=(
-                "The submitted damage photo does not show a readable license plate, "
-                "so FirstNotice cannot verify the vehicle identity."
+                "The submitted photo does not show enough information to verify "
+                "the insured vehicle."
             ),
         )
 

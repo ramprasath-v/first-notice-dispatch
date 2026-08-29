@@ -43,7 +43,10 @@ class ClaimantActionDisplayTests(unittest.TestCase):
         )
 
         self.assertEqual(display.title, "Vehicle identity not verified")
-        self.assertIn("readable license plate", display.explanation)
+        self.assertEqual(
+            display.explanation,
+            "The submitted photo does not show enough information to verify the insured vehicle.",
+        )
 
     def test_damage_mismatch_uses_report_grounding(self) -> None:
         display = build_claimant_action_display(
@@ -104,9 +107,34 @@ class ClaimantActionDisplayTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            display.title, "This evidence doesn't match the vehicle in the claim."
+            display.title, "New evidence doesn't match"
         )
-        self.assertIn("conflicts with the vehicle identity", display.explanation)
+        self.assertEqual(
+            display.explanation,
+            "The uploaded vehicle does not match the insured vehicle on the policy.",
+        )
+        self.assertEqual(
+            display.instruction,
+            "Please upload a clear photo of the insured vehicle with a readable license plate.",
+        )
+
+    def test_persisted_followup_mismatch_uses_mismatch_copy(self) -> None:
+        display = build_claimant_action_display(
+            {"missing_documents": [{"type": "vehicle_identity"}]},
+            [upload_action()],
+            frozenset({"DOC-BAD"}),
+            frozenset({"DOC-BAD"}),
+        )
+
+        self.assertEqual(display.title, "New evidence doesn't match")
+        self.assertEqual(
+            display.explanation,
+            "The uploaded vehicle does not match the insured vehicle on the policy.",
+        )
+        self.assertEqual(
+            display.instruction,
+            "Please upload a clear photo of the insured vehicle with a readable license plate.",
+        )
 
     def test_initial_selected_damage_image_keeps_generic_identity_copy(self) -> None:
         display = build_claimant_action_display(

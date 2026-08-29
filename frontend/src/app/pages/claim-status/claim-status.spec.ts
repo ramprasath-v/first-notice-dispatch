@@ -105,8 +105,7 @@ describe('ClaimStatusPage', () => {
         ...awaitingClaim,
         action_display: {
           title: 'Vehicle identity not verified',
-          explanation:
-            'The submitted damage photo does not show a readable license plate, so FirstNotice cannot verify the vehicle identity.',
+          explanation: 'The submitted photo does not show enough information to verify the insured vehicle.',
         },
       }),
     );
@@ -115,7 +114,7 @@ describe('ClaimStatusPage', () => {
 
     expect(fixture.nativeElement.textContent).toContain('Vehicle identity not verified');
     expect(fixture.nativeElement.textContent).toContain('Why we need this');
-    expect(fixture.nativeElement.textContent).toContain('cannot verify the vehicle identity');
+    expect(fixture.nativeElement.textContent).toContain('does not show enough information');
     expect(fixture.nativeElement.textContent).toContain('What to do');
     expect(fixture.nativeElement.querySelectorAll('.missing-item')).toHaveLength(1);
   });
@@ -551,8 +550,9 @@ describe('ClaimStatusPage', () => {
   it('renders mismatch-specific Flow 4 copy from the grounded backend display', async () => {
     api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
       action_display: {
-        title: "This evidence doesn't match the vehicle in the claim.",
-        explanation: 'The submitted photo conflicts with the vehicle identity established by the other claim evidence.',
+        title: "New evidence doesn't match",
+        explanation: 'The uploaded vehicle does not match the insured vehicle on the policy.',
+        instruction: 'Please upload a clear photo of the insured vehicle with a readable license plate.',
       },
       requested_actions: [{
         action_type: 'upload_document',
@@ -567,9 +567,15 @@ describe('ClaimStatusPage', () => {
     const fixture = await create();
 
     expect(fixture.nativeElement.textContent).toContain(
-      "This evidence doesn't match the vehicle in the claim.",
+      "New evidence doesn't match",
     );
     expect(fixture.nativeElement.textContent).toContain(
+      'The uploaded vehicle does not match the insured vehicle on the policy.',
+    );
+    expect(fixture.nativeElement.textContent).toContain(
+      'Please upload a clear photo of the insured vehicle with a readable license plate.',
+    );
+    expect(fixture.nativeElement.textContent).not.toContain(
       'Please upload a clear rear or license-plate photo of the involved vehicle.',
     );
     expect(fixture.nativeElement.querySelector('input[type=file]')).not.toBeNull();
@@ -579,7 +585,7 @@ describe('ClaimStatusPage', () => {
     api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
       action_display: {
         title: 'Vehicle identity not verified',
-        explanation: 'The submitted damage photo does not show a readable license plate.',
+        explanation: 'The submitted photo does not show enough information to verify the insured vehicle.',
       },
       requested_actions: [{
         action_type: 'upload_document',
@@ -598,7 +604,7 @@ describe('ClaimStatusPage', () => {
       'Please upload a clear vehicle photo with a readable license plate.',
     );
     expect(fixture.nativeElement.textContent).not.toContain(
-      "This evidence doesn't match the vehicle in the claim.",
+      "New evidence doesn't match",
     );
   });
 

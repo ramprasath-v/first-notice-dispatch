@@ -332,17 +332,28 @@ class ClaimSubmissionService:
         requested_actions = parse_requested_actions(
             claim.get("requested_actions", [])
         )
+        documents = (
+            self._repository.get_documents(claim_id)
+            if any(
+                isinstance(action, UploadDocumentRequestedAction)
+                for action in requested_actions
+            )
+            else []
+        )
         remediation_document_ids = frozenset(
             document.document_id
-            for document in (
-                self._repository.get_documents(claim_id)
-                if any(
-                    isinstance(action, UploadDocumentRequestedAction)
-                    for action in requested_actions
-                )
-                else []
-            )
+            for document in documents
             if document.requested_action_id
+        )
+        vehicle_mismatch_document_ids = frozenset(
+            document.document_id
+            for document in documents
+            if document.requested_action_id
+            and document.resume_extraction_result is not None
+            and any(
+                conflict.field == "vehicle_identity"
+                for conflict in document.resume_extraction_result.conflicts
+            )
         )
         requested_evidence = build_claimant_evidence_requests(
             claim.get("missing_documents", []),
@@ -364,6 +375,7 @@ class ClaimSubmissionService:
                 claim,
                 requested_actions,
                 remediation_document_ids,
+                vehicle_mismatch_document_ids,
             ),
             voice_correction_processing=claim.get("voice_correction_processing"),
             manual_handling=bool(claim.get("manual_handling")),

@@ -616,7 +616,10 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
         self.assertEqual(
             response.action_display.title, "Vehicle identity not verified"
         )
-        self.assertIn("readable license plate", response.action_display.explanation)
+        self.assertEqual(
+            response.action_display.explanation,
+            "The submitted photo does not show enough information to verify the insured vehicle.",
+        )
 
     def test_get_claim_exposes_missing_date_as_text_action_not_upload(self) -> None:
         self.repository.get_claim.return_value = {
@@ -832,9 +835,66 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
 
         self.assertEqual(
             response.action_display.title,
-            "This evidence doesn't match the vehicle in the claim.",
+            "New evidence doesn't match",
+        )
+        self.assertEqual(
+            response.action_display.instruction,
+            "Please upload a clear photo of the insured vehicle with a readable license plate.",
         )
         self.repository.get_documents.assert_called_once_with(CLAIM_ID)
+
+    def test_get_claim_uses_persisted_resume_mismatch_for_retry_copy(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+            "intake_priority": "routine",
+            "missing_documents": [{"type": "vehicle_identity"}],
+            "unusable_evidence": [],
+            "requested_actions": [{
+                "action_type": "upload_document",
+                "action_id": "ACT-RETRY",
+                "review_id": "AUTONOMOUS-RETRY",
+                "document_type": "license_plate_photo",
+                "instruction": "Please upload another vehicle image.",
+                "replaces_document_id": "DOC-WRONG-FOLLOWUP",
+            }],
+            "source_aware_conflicts": [],
+            "updated_at": NOW,
+        }
+        self.repository.get_documents.return_value = [
+            ClaimDocument(
+                document_id="DOC-WRONG-FOLLOWUP",
+                claim_id=CLAIM_ID,
+                document_type="damage_evidence",
+                filename="wrong.jpg",
+                requested_action_id="ACT-INITIAL",
+                status="unusable",
+                received_at=NOW,
+                resume_extraction_result={
+                    "usable": False,
+                    "reason": "Vehicle mismatch.",
+                    "conflicts": [{
+                        "field": "vehicle_identity",
+                        "values": ["Toyota Corolla", "Honda Accord"],
+                        "sources": ["policy.pdf", "wrong.jpg"],
+                        "reason": "The vehicle identities conflict.",
+                    }],
+                },
+            )
+        ]
+        self.repository.get_scheduled_appointment.return_value = None
+
+        response = self.service.get_claim(CLAIM_ID)
+
+        self.assertEqual(response.action_display.title, "New evidence doesn't match")
+        self.assertEqual(
+            response.action_display.explanation,
+            "The uploaded vehicle does not match the insured vehicle on the policy.",
+        )
+        self.assertEqual(
+            response.action_display.instruction,
+            "Please upload a clear photo of the insured vehicle with a readable license plate.",
+        )
 
 
 class ClaimantApiEndpointTests(unittest.TestCase):
