@@ -95,6 +95,38 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             content_type="audio/webm",
         )
 
+    def submit_and_process(self):
+        accepted = self.submit()
+        document = self.repository.add_document.call_args.args[0]
+        self.repository.get_document.return_value = document
+        self.publisher.reset_mock()
+        processed = self.service.process_voice_incident_document(
+            CLAIM_ID, document.document_id
+        )
+        return accepted, processed
+
+    def test_upload_is_accepted_before_voice_extraction(self) -> None:
+        accepted = self.submit()
+
+        self.assertEqual(accepted.status, "received")
+        self.extractor.extract.assert_not_called()
+        event = self.publisher.publish.call_args.args[0]
+        self.assertEqual(event.event_type, "claim.document.received")
+        self.repository.mark_voice_correction_processing.assert_called_once()
+
+    def test_duplicate_upload_reuses_deterministic_document_and_event(self) -> None:
+        first = self.submit()
+        document = self.repository.add_document.call_args.args[0]
+        self.repository.get_document.return_value = document
+
+        second = self.submit()
+
+        self.assertEqual(first.event_id, second.event_id)
+        self.storage.upload_claim_document.assert_called_once()
+        self.repository.add_document.assert_called_once()
+        published = [call.args[0] for call in self.publisher.publish.call_args_list]
+        self.assertEqual([event.event_id for event in published], [first.event_id] * 2)
+
     def test_valid_date_without_injury_reuses_correction_event(self) -> None:
         self.extractor.extract.return_value = VoiceIncidentExtractionResult(
             incident_date="2026-08-24",
@@ -103,7 +135,7 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             injury_mentioned=False,
         )
 
-        self.submit()
+        self.submit_and_process()
 
         saved = self.repository.add_document.call_args.args[0]
         self.assertEqual(saved.source_type, "claimant_voice")
@@ -133,7 +165,7 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             injury_description="neck pain later that evening",
         )
 
-        self.submit()
+        self.submit_and_process()
 
         self.repository.record_claimant_voice_injury_signal.assert_called_once()
         event = self.publisher.publish.call_args.args[0]
@@ -149,9 +181,9 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             injury_mentioned=False,
         )
 
-        with self.assertRaisesRegex(HumanReviewConflictError, "could not use"):
-            self.submit()
+        _, processed = self.submit_and_process()
 
+        self.assertEqual(processed["action"], "voice_correction_unusable")
         self.repository.mark_document_unusable.assert_called_once()
         self.repository.save_claim_voice_incident_correction.assert_not_called()
         self.publisher.publish.assert_not_called()
@@ -163,9 +195,9 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             injury_mentioned=False,
         )
 
-        with self.assertRaisesRegex(HumanReviewConflictError, "not in the future"):
-            self.submit()
+        _, processed = self.submit_and_process()
 
+        self.assertEqual(processed["action"], "voice_correction_unusable")
         self.repository.mark_document_unusable.assert_called_once()
         self.repository.save_claim_voice_incident_correction.assert_not_called()
 
@@ -202,7 +234,7 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             injury_description="my neck started hurting later",
         )
 
-        self.submit()
+        self.submit_and_process()
 
         saved = self.repository.save_claim_voice_incident_correction.call_args.kwargs
         self.assertEqual(saved["requested_field"], "incident_information")
@@ -227,7 +259,7 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             injury_mentioned=False,
         )
 
-        self.submit()
+        self.submit_and_process()
 
         saved = self.repository.save_claim_voice_incident_correction.call_args.kwargs
         self.assertIsNone(saved["incident_date"])
@@ -248,9 +280,9 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             injury_mentioned=False,
         )
 
-        with self.assertRaisesRegex(HumanReviewConflictError, "could not use"):
-            self.submit()
+        _, processed = self.submit_and_process()
 
+        self.assertEqual(processed["action"], "voice_correction_unusable")
         self.repository.mark_document_unusable.assert_called_once()
         self.repository.save_claim_voice_incident_correction.assert_not_called()
         self.publisher.publish.assert_not_called()

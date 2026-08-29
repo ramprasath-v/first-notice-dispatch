@@ -646,6 +646,38 @@ class ClaimSubmissionServiceTests(unittest.TestCase):
         self.assertEqual(response.requested_actions[0].action_type, "enter_text")
         self.assertEqual(response.requested_actions[0].field_name, "incident_date")
 
+    def test_get_claim_exposes_async_voice_processing_result(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "awaiting_documents",
+            "missing_documents": [{"type": "incident_date"}],
+            "requested_actions": [{
+                "action_type": "enter_text",
+                "action_id": "ACT-DATE",
+                "review_id": "AUTONOMOUS-DATE",
+                "field_name": "incident_date",
+                "instruction": "Please provide the incident date.",
+            }],
+            "voice_correction_processing": {
+                "document_id": "DOC-VOICE",
+                "requested_action_id": "ACT-DATE",
+                "status": "unusable",
+                "message": "We could not use that recording. Please re-record your answer.",
+            },
+            "updated_at": NOW,
+        }
+        self.repository.get_scheduled_appointment.return_value = None
+
+        response = self.service.get_claim(CLAIM_ID)
+
+        self.assertEqual(
+            response.voice_correction_processing["status"], "unusable"
+        )
+        self.assertEqual(
+            response.voice_correction_processing["requested_action_id"],
+            "ACT-DATE",
+        )
+
     def test_get_claim_exposes_durable_manual_handling_state(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,

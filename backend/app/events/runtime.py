@@ -4,12 +4,14 @@ from app.events.claim_event_handler import ClaimEventHandler
 from app.events.pubsub_publisher import ClaimEventPublisher, PubSubSettings
 from app.events.coordinator_invoker import AdkClaimCoordinatorInvoker
 from app.integrations.gmail_service import GmailService, GmailSettings
+from app.services.voice_incident_extraction_service import GeminiVoiceIncidentExtractor
 from app.services.human_review_service import (
     HumanReviewResumeWorkflow,
     HumanReviewService,
     HumanReviewSettings,
 )
 from app.tools.firestore_repository import FirestoreClaimRepository
+from app.tools.gemini_client import create_gemini_client
 
 
 def build_claim_event_handler(
@@ -23,10 +25,14 @@ def build_claim_event_handler(
     publisher = publisher or ClaimEventPublisher(PubSubSettings.from_env())
     if human_review_service is None:
         gmail_settings = GmailSettings.from_env()
+        gemini_client = create_gemini_client(settings)
         human_review_service = HumanReviewService(
             repository=runtime.repository,
             publisher=publisher,
             settings=HumanReviewSettings.from_env(),
+            voice_incident_extractor=GeminiVoiceIncidentExtractor(
+                gemini_client, settings.gemini_model
+            ),
             gmail_sender=(
                 GmailService.from_oauth_settings(gmail_settings)
                 if gmail_settings.enabled

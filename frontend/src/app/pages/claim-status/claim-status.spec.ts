@@ -269,6 +269,129 @@ describe('ClaimStatusPage', () => {
     expect(stop).toHaveBeenCalled();
   });
 
+  it('shows voice processing immediately after the upload is accepted', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+    })));
+    const fixture = await create();
+    fixture.componentInstance.recordedVoice.set(
+      new File(['voice'], 'voice.webm', { type: 'audio/webm' }),
+    );
+    fixture.componentInstance.voiceRecordingState.set('recorded');
+    const action = fixture.componentInstance.textAction(
+      fixture.componentInstance.claim()?.requested_actions,
+    )!;
+
+    fixture.componentInstance.submitVoiceCorrection(action);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('Voice response received');
+    expect(fixture.nativeElement.textContent).toContain(
+      'FirstNotice is analyzing your response and will continue automatically.',
+    );
+    expect(fixture.nativeElement.textContent).not.toContain('Submit voice note');
+    expect(fixture.nativeElement.textContent).not.toContain('Re-record');
+    expect(fixture.nativeElement.textContent).not.toContain('Discard');
+  });
+
+  it('prevents duplicate voice submission while upload acceptance is pending', async () => {
+    const accepted = new Subject<{ claim_id: string; event_id: string; status: string }>();
+    api.submitVoiceIncidentCorrection.mockReturnValue(accepted);
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+    })));
+    const fixture = await create();
+    fixture.componentInstance.recordedVoice.set(
+      new File(['voice'], 'voice.webm', { type: 'audio/webm' }),
+    );
+    fixture.componentInstance.voiceRecordingState.set('recorded');
+    const action = fixture.componentInstance.textAction(
+      fixture.componentInstance.claim()?.requested_actions,
+    )!;
+
+    fixture.componentInstance.submitVoiceCorrection(action);
+    fixture.componentInstance.submitVoiceCorrection(action);
+
+    expect(api.submitVoiceIncidentCorrection).toHaveBeenCalledOnce();
+    expect(fixture.componentInstance.uploading()).toBe(true);
+  });
+
+  it('moves from accepted voice processing through normal status polling', async () => {
+    const pending = claim('awaiting_documents', {
+      requested_actions: [{
+        action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+        field_name: 'incident_date', instruction: 'Please provide the incident date.',
+      }],
+      voice_correction_processing: {
+        requested_action_id: 'ACT-DATE', status: 'accepted',
+      },
+      updated_at: '2026-08-07T12:00:01Z',
+    });
+    api.getClaim
+      .mockReturnValueOnce(of(claim('awaiting_documents', {
+        requested_actions: pending.requested_actions,
+      })))
+      .mockReturnValueOnce(of(pending))
+      .mockReturnValueOnce(of(claim('human_review_required')));
+    const fixture = await create();
+    fixture.componentInstance.recordedVoice.set(
+      new File(['voice'], 'voice.webm', { type: 'audio/webm' }),
+    );
+    fixture.componentInstance.voiceRecordingState.set('recorded');
+    fixture.componentInstance.submitVoiceCorrection(
+      fixture.componentInstance.textAction(
+        fixture.componentInstance.claim()?.requested_actions,
+      )!,
+    );
+    fixture.detectChanges();
+    expect(fixture.componentInstance.rechecking()).toBe(true);
+
+    vi.advanceTimersByTime(3000);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.claim()?.status).toBe('human_review_required');
+    expect(fixture.componentInstance.rechecking()).toBe(false);
+  });
+
+  it('restores voice remediation when async processing rejects the recording', async () => {
+    const action = {
+      action_type: 'enter_text' as const,
+      action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
+      field_name: 'incident_date', instruction: 'Please provide the incident date.',
+    };
+    api.getClaim
+      .mockReturnValueOnce(of(claim('awaiting_documents', { requested_actions: [action] })))
+      .mockReturnValueOnce(of(claim('awaiting_documents', {
+        requested_actions: [action],
+        updated_at: '2026-08-07T12:00:01Z',
+        voice_correction_processing: {
+          requested_action_id: 'ACT-DATE',
+          status: 'unusable',
+          message: 'We could not use that recording. Please re-record your answer.',
+        },
+      })));
+    const fixture = await create();
+    fixture.componentInstance.recordedVoice.set(
+      new File(['voice'], 'voice.webm', { type: 'audio/webm' }),
+    );
+    fixture.componentInstance.voiceRecordingState.set('recorded');
+
+    fixture.componentInstance.submitVoiceCorrection(action);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.rechecking()).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('Record voice note');
+    expect(fixture.nativeElement.textContent).toContain(
+      'We could not use that recording. Please re-record your answer.',
+    );
+  });
+
   it('allows discard and re-record without exposing manual date entry', async () => {
     api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
       requested_actions: [{

@@ -51,6 +51,11 @@ export interface ClaimSummary {
   requested_evidence: ClaimantEvidenceRequest[];
   requested_actions?: RequestedAction[];
   action_display?: ClaimantActionDisplay | null;
+  voice_correction_processing?: {
+    requested_action_id: string;
+    status: 'processing' | 'accepted' | 'unusable';
+    message?: string | null;
+  } | null;
   manual_handling?: boolean;
   inspection?: InspectionAppointment | null;
   updated_at: string;

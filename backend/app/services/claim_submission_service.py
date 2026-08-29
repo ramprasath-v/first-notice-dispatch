@@ -365,6 +365,7 @@ class ClaimSubmissionService:
                 requested_actions,
                 remediation_document_ids,
             ),
+            voice_correction_processing=claim.get("voice_correction_processing"),
             manual_handling=bool(claim.get("manual_handling")),
             inspection=(
                 appointment.model_dump(mode="python") if appointment else None

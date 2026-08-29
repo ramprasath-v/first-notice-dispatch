@@ -10,10 +10,12 @@ from urllib.parse import quote
 from app.domain.claim_status import ClaimStatus
 from app.events.claim_events import (
     ClaimCorrectionReceivedEvent,
+    ClaimDocumentReceivedEvent,
     ClaimHumanReviewApprovedEvent,
     ClaimHumanReviewCorrectionRequestedEvent,
     ClaimHumanReviewManualHandlingEvent,
     CorrectionReceivedPayload,
+    DocumentReceivedPayload,
     HumanReviewPayload,
     human_review_event_id,
 )
@@ -107,6 +109,23 @@ def _validate_incident_date(value: str) -> date:
             "Please provide a valid incident date that is not in the future."
         )
     return parsed_date
+
+
+def _voice_incident_requirements(
+    claim: dict[str, object], action_field: str
+) -> tuple[bool, bool]:
+    missing = {
+        str(item.get("type"))
+        for item in claim.get("missing_documents", [])
+        if isinstance(item, dict)
+        and item.get("type") in {"incident_date", "incident_description"}
+    }
+    return (
+        action_field in {"incident_date", "incident_information"}
+        or "incident_date" in missing,
+        action_field in {"incident_description", "incident_information"}
+        or "incident_description" in missing,
+    )
 
 
 class HumanReviewService:
@@ -621,7 +640,7 @@ class HumanReviewService:
         filename: str | None,
         content_type: str | None,
     ) -> ClaimCorrectionAcceptedResponse:
-        if self._storage_service is None or self._voice_incident_extractor is None:
+        if self._storage_service is None:
             raise HumanReviewError("Voice incident remediation is not configured.")
         if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", idempotency_key):
             raise HumanReviewConflictError(
@@ -652,19 +671,8 @@ class HumanReviewService:
         ).hexdigest()
         document_id = f"DOC-{digest[:8].upper()}"
         action_field = str(action["field_name"])
-        missing_incident_fields = {
-            str(item.get("type"))
-            for item in claim.get("missing_documents", [])
-            if isinstance(item, dict)
-            and item.get("type") in {"incident_date", "incident_description"}
-        }
-        needs_date = (
-            action_field in {"incident_date", "incident_information"}
-            or "incident_date" in missing_incident_fields
-        )
-        needs_context = (
-            action_field in {"incident_description", "incident_information"}
-            or "incident_description" in missing_incident_fields
+        needs_date, needs_context = _voice_incident_requirements(
+            claim, action_field
         )
         for document in self._repository.get_documents(claim_id):
             if document.document_id == document_id or document.status == "superseded":
@@ -716,17 +724,61 @@ class HumanReviewService:
                 received_at=datetime.now(timezone.utc),
             )
             self._repository.add_document(document)
+        event = ClaimDocumentReceivedEvent(
+            event_id=f"{claim_id}:{requested_action_id}:voice-upload:{digest[:16]}",
+            event_type="claim.document.received",
+            claim_id=claim_id,
+            correlation_id=f"{requested_action_id}:{digest[16:32]}",
+            source="claimant-api",
+            payload=DocumentReceivedPayload(document_id=document_id),
+        )
+        self._repository.mark_voice_correction_processing(
+            claim_id=claim_id,
+            document_id=document_id,
+            requested_action_id=requested_action_id,
+            status="processing",
+            correlation_id=event.correlation_id,
+        )
+        self._publisher.publish(event)
+        return ClaimCorrectionAcceptedResponse(claim_id=claim_id, event_id=event.event_id)
+
+    def process_voice_incident_document(
+        self, claim_id: str, document_id: str
+    ) -> dict[str, str]:
+        if self._voice_incident_extractor is None:
+            raise HumanReviewError("Voice incident extraction is not configured.")
+        claim = self._repository.get_claim(claim_id)
+        document = self._repository.get_document(claim_id, document_id)
+        if claim is None or document is None:
+            raise HumanReviewNotFoundError("The voice correction document was not found.")
+        requested_action_id = str(document.requested_action_id or "")
+        action = next(
+            (
+                item
+                for item in claim.get("requested_actions", [])
+                if isinstance(item, dict)
+                and item.get("action_type") == "enter_text"
+                and item.get("field_name")
+                in {"incident_date", "incident_description", "incident_information"}
+                and item.get("action_id") == requested_action_id
+            ),
+            None,
+        )
+        if action is None:
+            return {"action": "voice_correction_already_resolved", "status": str(claim.get("status"))}
+        action_field = str(action["field_name"])
+        needs_date, needs_context = _voice_incident_requirements(
+            claim, action_field
+        )
+        if document.status == "unusable":
+            return {"action": "voice_correction_unusable", "status": "awaiting_documents"}
 
         if document.status == "validated":
-            incident_date = document.evidence_facts.get("incident_date")
-            incident_time = document.evidence_facts.get("incident_time")
-            incident_description = document.evidence_facts.get(
-                "incident_description"
-            )
-            injury_mentioned = (
-                document.evidence_facts.get("injury_mentioned") == "true"
-            )
-            injury_description = document.evidence_facts.get("injury_description")
+            facts = dict(document.evidence_facts)
+            incident_date = facts.get("incident_date")
+            incident_description = facts.get("incident_description")
+            injury_mentioned = facts.get("injury_mentioned") == "true"
+            injury_description = facts.get("injury_description")
         else:
             result = self._voice_incident_extractor.extract(
                 str(document.storage_path),
@@ -734,7 +786,6 @@ class HumanReviewService:
                 filename=document.filename,
             )
             incident_date = result.incident_date
-            incident_time = result.incident_time
             incident_description = (
                 result.incident_description.strip()
                 if result.incident_description
@@ -748,7 +799,7 @@ class HumanReviewService:
                 key: value
                 for key, value in {
                     "incident_date": incident_date,
-                    "incident_time": incident_time,
+                    "incident_time": result.incident_time,
                     "incident_description": incident_description,
                     "injury_mentioned": "true" if injury_mentioned else "false",
                     "injury_description": injury_description,
@@ -766,37 +817,23 @@ class HumanReviewService:
                     document_id=document_id,
                     injury_description=injury_description,
                 )
-            missing_spoken_fields = [
-                label
-                for required, value, label in (
-                    (needs_date, incident_date, "incident date"),
-                    (needs_context, incident_description, "incident context"),
-                )
-                if required and not value
-            ]
-            if missing_spoken_fields:
-                self._repository.mark_document_unusable(
-                    claim_id,
-                    document_id,
+            if (needs_date and not incident_date) or (
+                needs_context and not incident_description
+            ):
+                return self._reject_voice_document(
+                    claim_id, document_id, requested_action_id,
                     "The voice response did not contain the requested incident information.",
-                    evidence_findings=findings,
-                    evidence_facts=facts,
-                )
-                raise HumanReviewConflictError(
-                    "We could not use that recording. Please re-record your answer."
+                    findings, facts,
                 )
             if needs_date:
                 try:
                     _validate_incident_date(str(incident_date))
                 except HumanReviewConflictError:
-                    self._repository.mark_document_unusable(
-                        claim_id,
-                        document_id,
+                    return self._reject_voice_document(
+                        claim_id, document_id, requested_action_id,
                         "The voice response did not contain a valid non-future incident date.",
-                        evidence_findings=findings,
-                        evidence_facts=facts,
+                        findings, facts,
                     )
-                    raise
             self._repository.mark_document_validated(
                 claim_id,
                 document_id,
@@ -806,12 +843,18 @@ class HumanReviewService:
             )
 
         review_id = str(action["review_id"])
+        digest = hashlib.sha256(
+            f"{claim_id}:{requested_action_id}:{document_id}".encode("utf-8")
+        ).hexdigest()
         event = ClaimCorrectionReceivedEvent(
             event_id=f"{claim_id}:{requested_action_id}:voice:{digest[:16]}",
             event_type="claim.correction.received",
             claim_id=claim_id,
-            correlation_id=f"{requested_action_id}:{digest[16:32]}",
-            source="claimant-api",
+            correlation_id=str(
+                (claim.get("voice_correction_processing") or {}).get("correlation_id")
+                or f"{requested_action_id}:{digest[16:32]}"
+            ),
+            source="firstnotice-dispatch",
             payload=CorrectionReceivedPayload(
                 review_id=review_id,
                 field_name=action_field,
@@ -826,13 +869,44 @@ class HumanReviewService:
             event_id=event.event_id,
             requested_field=action_field,
             incident_date=incident_date if needs_date else None,
-            incident_description=(
-                incident_description if needs_context else None
-            ),
+            incident_description=incident_description if needs_context else None,
+            correlation_id=event.correlation_id,
+        )
+        self._repository.mark_voice_correction_processing(
+            claim_id=claim_id,
+            document_id=document_id,
+            requested_action_id=requested_action_id,
+            status="accepted",
             correlation_id=event.correlation_id,
         )
         self._publisher.publish(event)
-        return ClaimCorrectionAcceptedResponse(claim_id=claim_id, event_id=event.event_id)
+        return {"action": "voice_correction_processed", "status": "accepted"}
+
+    def _reject_voice_document(
+        self,
+        claim_id: str,
+        document_id: str,
+        requested_action_id: str,
+        reason: str,
+        findings: list[str],
+        facts: dict[str, str],
+    ) -> dict[str, str]:
+        self._repository.mark_document_unusable(
+            claim_id,
+            document_id,
+            reason,
+            evidence_findings=findings,
+            evidence_facts=facts,
+        )
+        self._repository.mark_voice_correction_processing(
+            claim_id=claim_id,
+            document_id=document_id,
+            requested_action_id=requested_action_id,
+            status="unusable",
+            correlation_id=None,
+            message="We could not use that recording. Please re-record your answer.",
+        )
+        return {"action": "voice_correction_unusable", "status": "awaiting_documents"}
 
     def _review_for_token(self, token: str) -> HumanReviewRecord:
         if not token or len(token) > 256:

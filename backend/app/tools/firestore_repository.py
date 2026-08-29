@@ -873,6 +873,34 @@ class FirestoreClaimRepository:
         except Exception as exc:
             self._raise_write_error("record claimant voice injury signal", exc)
 
+    def mark_voice_correction_processing(
+        self,
+        *,
+        claim_id: str,
+        document_id: str,
+        requested_action_id: str,
+        status: str,
+        correlation_id: str | None,
+        message: str | None = None,
+    ) -> None:
+        processing = {
+            "document_id": document_id,
+            "requested_action_id": requested_action_id,
+            "status": status,
+            "correlation_id": correlation_id,
+            "message": message,
+            "updated_at": utc_now(),
+        }
+        try:
+            self._client.collection("claims").document(claim_id).update(
+                {
+                    "voice_correction_processing": processing,
+                    "updated_at": processing["updated_at"],
+                }
+            )
+        except Exception as exc:
+            self._raise_write_error("update voice correction processing", exc)
+
     def mark_document_superseded(
         self, claim_id: str, document_id: str, replacement_document_id: str
     ) -> None:
@@ -1608,6 +1636,7 @@ class FirestoreClaimRepository:
                     "status": target.value,
                     **fact_updates,
                     "pending_corrections": {},
+                    "voice_correction_processing": None,
                     "requested_actions": [],
                     "missing_documents": missing,
                     "conflicts": remaining_conflicts,

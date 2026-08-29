@@ -30,6 +30,7 @@ class ClaimSummaryResponse(BaseModel):
     requested_evidence: list[ClaimantEvidenceRequest] = Field(default_factory=list)
     requested_actions: list[RequestedAction] = Field(default_factory=list)
     action_display: ClaimantActionDisplay | None = None
+    voice_correction_processing: dict[str, Any] | None = None
     manual_handling: bool = False
     inspection: dict[str, Any] | None = None
     updated_at: datetime

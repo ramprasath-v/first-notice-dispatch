@@ -80,7 +80,7 @@ export interface WorkflowHeartbeat {
   showProgress: boolean;
 }
 
-type RecheckKind = 'document' | 'correction';
+type RecheckKind = 'document' | 'correction' | 'voice';
 type VoiceRecordingState = 'idle' | 'requesting' | 'recording' | 'recorded';
 
 export function workflowSteps(status: string, rechecking = false): WorkflowStep[] {
@@ -561,9 +561,9 @@ export class ClaimStatusPage {
       next: () => {
         this.uploading.set(false);
         this.resetVoiceRecording();
-        this.documentNotice.set('Voice response received. Rechecking your claim…');
+        this.documentNotice.set('');
         this.rechecking.set(true);
-        this.recheckKind.set('correction');
+        this.recheckKind.set('voice');
         this.statusAtUpload = this.claim()?.status ?? 'awaiting_documents';
         this.updatedAtAtUpload = this.claim()?.updated_at ?? null;
         this.actionIdAtSubmission = action.action_id;
@@ -664,13 +664,32 @@ export class ClaimStatusPage {
       (claim.requested_actions ?? []).some(
         (action) => action.action_id === this.actionIdAtSubmission,
       );
+    const voiceProcessing = claim.voice_correction_processing;
+    const voiceRejected =
+      this.recheckKind() === 'voice' &&
+      this.actionIdAtSubmission !== null &&
+      voiceProcessing?.requested_action_id === this.actionIdAtSubmission &&
+      voiceProcessing.status === 'unusable';
     const correctionResolved =
-      this.recheckKind() === 'correction' &&
+      ['correction', 'voice'].includes(this.recheckKind() ?? '') &&
       (statusChangedAfterSubmission || !submittedActionStillPending);
     const documentRecheckResolved =
       this.recheckKind() === 'document' &&
       (statusChangedAfterSubmission || claimUpdatedAfterSubmission);
-    if (this.rechecking() && (correctionResolved || documentRecheckResolved)) {
+    if (this.rechecking() && voiceRejected) {
+      this.rechecking.set(false);
+      this.recheckKind.set(null);
+      this.documentNotice.set('');
+      this.error.set(
+        voiceProcessing?.message ||
+          'We could not use that recording. Please re-record your answer.',
+      );
+      this.pollingWarning.set('');
+      this.documentSubmittedAt = null;
+      this.statusAtUpload = null;
+      this.updatedAtAtUpload = null;
+      this.actionIdAtSubmission = null;
+    } else if (this.rechecking() && (correctionResolved || documentRecheckResolved)) {
       this.rechecking.set(false);
       this.recheckKind.set(null);
       this.documentNotice.set(
@@ -685,7 +704,7 @@ export class ClaimStatusPage {
       this.actionIdAtSubmission = null;
     } else if (
       this.rechecking() &&
-      this.recheckKind() === 'correction' &&
+      ['correction', 'voice'].includes(this.recheckKind() ?? '') &&
       submittedActionStillPending &&
       claimUpdatedAfterSubmission
     ) {

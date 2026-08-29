@@ -195,6 +195,14 @@ class ClaimEventHandler:
                     f"Document {event.payload.document_id} does not exist under "
                     f"claim {event.claim_id}."
                 )
+            if document.source_type == "claimant_voice":
+                if self._human_review_service is None:
+                    raise NonRetryableEventError(
+                        "Voice correction processing is not configured."
+                    )
+                return self._human_review_service.process_voice_incident_document(
+                    event.claim_id, document.document_id
+                )
             result = self._resume_workflow.resume(event.claim_id, document)
             return result.model_dump(mode="python")
 

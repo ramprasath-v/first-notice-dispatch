@@ -134,6 +134,29 @@ class ClaimEventHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.resume.resume.assert_called_once_with(CLAIM_ID, document)
 
+    async def test_voice_document_received_routes_to_async_voice_processing(self) -> None:
+        document = MagicMock(
+            document_id="DOC-VOICE", source_type="claimant_voice"
+        )
+        self.repository.get_document.return_value = document
+        self.human_review_service.process_voice_incident_document.return_value = {
+            "action": "voice_correction_processed",
+            "status": "accepted",
+        }
+        event = ClaimDocumentReceivedEvent(
+            event_id="voice-upload-event",
+            event_type="claim.document.received",
+            claim_id=CLAIM_ID,
+            payload=DocumentReceivedPayload(document_id="DOC-VOICE"),
+        )
+
+        await self.handler.handle(event)
+
+        self.human_review_service.process_voice_incident_document.assert_called_once_with(
+            CLAIM_ID, "DOC-VOICE"
+        )
+        self.resume.resume.assert_not_called()
+
     async def test_resource_exhausted_document_review_remains_retryable(self) -> None:
         document = MagicMock(document_id="DOC-5678")
         self.repository.get_document.return_value = document
