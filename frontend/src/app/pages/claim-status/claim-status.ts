@@ -379,10 +379,10 @@ export class ClaimStatusPage {
       return {
         mode: 'adjuster',
         badge: 'Waiting for adjuster',
-        title: 'Additional review is underway',
+        title: 'Your intake is complete',
         detail: this.claim()?.manual_handling
           ? 'Your claim requires additional review by an adjuster. No action is required from you at this time.'
-          : 'An adjuster is reviewing the evidence package. No action is needed from you.',
+          : 'An adjuster is reviewing the evidence package before authorizing inspection. No action is needed from you.',
         showProgress: false,
       };
     }

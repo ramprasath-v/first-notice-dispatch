@@ -662,6 +662,7 @@ describe('ClaimStatusPage', () => {
     const fixture = await create();
     expect(fixture.nativeElement.textContent).toContain('Waiting for information from you');
     expect(fixture.nativeElement.querySelector('.indeterminate-progress')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.poll-row')).not.toBeNull();
 
     api.getClaim.mockReturnValue(of(claim('inspection_ready')));
     fixture.componentInstance.refreshNow();
@@ -669,6 +670,26 @@ describe('ClaimStatusPage', () => {
     expect(fixture.nativeElement.textContent).toContain('Waiting for adjuster');
     expect(fixture.nativeElement.textContent).toContain('Your intake is complete');
     expect(fixture.nativeElement.querySelector('.indeterminate-progress')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.poll-row')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('Up to date');
+    expect(fixture.nativeElement.textContent).not.toContain('Last checked:');
+    expect(fixture.nativeElement.textContent).not.toContain('Workflow update:');
+  });
+
+  it('hides polling metadata while human review waits for an adjuster', async () => {
+    api.getClaim.mockReturnValue(of(claim('human_review_required')));
+    const fixture = await create();
+
+    expect(fixture.nativeElement.textContent).toContain('Waiting for adjuster');
+    expect(fixture.nativeElement.textContent).toContain('Your intake is complete');
+    expect(fixture.nativeElement.textContent).toContain(
+      'An adjuster is reviewing the evidence package before authorizing inspection. No action is needed from you.',
+    );
+    expect(fixture.nativeElement.querySelector('.poll-row')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('Up to date');
+    expect(fixture.nativeElement.textContent).not.toContain('Updates automatic');
+    expect(fixture.nativeElement.textContent).not.toContain('Last checked:');
+    expect(fixture.nativeElement.textContent).not.toContain('Workflow update:');
   });
 
   it('sends requested_action_id and resumes polling for replacement upload', async () => {

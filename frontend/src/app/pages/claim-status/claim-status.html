@@ -30,11 +30,13 @@
           <div class="heartbeat-badge"><span class="indicator-dot" aria-hidden="true"></span>{{ heartbeat.badge }}</div>
           <div class="heartbeat-copy" aria-live="polite"><strong>{{ heartbeat.title }}</strong><p>{{ heartbeat.detail }}</p></div>
         </div>
-        <div class="poll-row" aria-hidden="true">
-          <span class="poll-icon" [class.spinning]="pollInProgress()">{{ pollInProgress() ? '↻' : pollMessage(current.status) === 'Up to date' ? '✓' : '○' }}</span>
-          <strong>{{ pollMessage(current.status) }}</strong>
-          <small>Last checked: {{ relativeTime(lastSuccessfulPollAt()) }} · Workflow update: {{ relativeTime(lastBusinessUpdateAt()) }}</small>
-        </div>
+        @if (heartbeat.mode !== 'adjuster') {
+          <div class="poll-row" aria-hidden="true">
+            <span class="poll-icon" [class.spinning]="pollInProgress()">{{ pollInProgress() ? '↻' : pollMessage(current.status) === 'Up to date' ? '✓' : '○' }}</span>
+            <strong>{{ pollMessage(current.status) }}</strong>
+            <small>Last checked: {{ relativeTime(lastSuccessfulPollAt()) }} · Workflow update: {{ relativeTime(lastBusinessUpdateAt()) }}</small>
+          </div>
+        }
         @if (heartbeat.showProgress) {
           <div class="indeterminate-progress" aria-label="Workflow processing"><span></span></div>
         }
