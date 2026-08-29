@@ -8,6 +8,7 @@ from app.domain.claim_status import ClaimStatus, review_target_status
 from app.models.claim_document import ClaimDocument, DocumentExtractionResult
 from app.models.intake_result import EvidenceArtifactFacts
 from app.models.requested_action import (
+    EnterTextRequestedAction,
     UploadDocumentRequestedAction,
     parse_requested_actions,
 )
@@ -287,9 +288,15 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         extraction: DocumentExtractionResult,
         remaining_actions,
         idempotency_key: str,
+        retry_action: UploadDocumentRequestedAction | None = None,
     ) -> None:
         actions = remaining_actions if extraction.usable else [
-            action
+            (
+                retry_action
+                if retry_action is not None
+                and action.action_id == retry_action.action_id
+                else action
+            )
             for action in parse_requested_actions(self.claim.get("requested_actions", []))
             if isinstance(action, UploadDocumentRequestedAction)
         ]
@@ -304,8 +311,12 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.claim.pop("active_resume_document_id", None)
         self.claim.pop("active_resume_idempotency_key", None)
         self.claim.pop("active_resume_correlation_id", None)
-        self.documents[document.document_id] = document.model_copy(update={
+        self.documents[document.document_id] = self.documents[
+            document.document_id
+        ].model_copy(update={
             "status": "validated" if extraction.usable else "unusable",
+            "requested_action_id": document.requested_action_id,
+            "replaces_document_id": document.replaces_document_id,
             "resume_idempotency_key": idempotency_key,
             "resume_processed_at": datetime.now(timezone.utc),
             "resume_result_status": "awaiting_documents",
@@ -624,6 +635,126 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
         self.assertTrue(saved_review.intake_complete)
         self.assertEqual(result.final_status, "inspection_ready")
         self.extractor.extract.assert_called_once()
+
+    def test_wrong_requested_vehicle_image_stays_paused_and_targets_retry(self) -> None:
+        self.claim.update({
+            "incident_date": None,
+            "incident_description": "",
+            "missing_documents": [
+                {"type": "vehicle_identity", "reason": "Identity required."},
+                {"type": "license_plate_photo", "reason": "Plate required."},
+                {"type": "incident_date", "reason": "Date required."},
+            ],
+            "requested_actions": [{
+                "action_id": "ACT-VEHICLE",
+                "action_type": "upload_document",
+                "review_id": "AUTONOMOUS-VEHICLE",
+                "document_type": "license_plate_photo",
+                "instruction": "Please upload a clear vehicle photo with a readable license plate.",
+                "replaces_document_id": None,
+            }],
+        })
+        self.documents["DOC-POLICY"] = ClaimDocument(
+            document_id="DOC-POLICY",
+            claim_id="CLM-A1B2C3D4",
+            document_type="policy_document",
+            filename="policy.pdf",
+            status="validated",
+            evidence_facts={
+                "vehicle_make": "Toyota",
+                "vehicle_model": "Corolla",
+                "license_plate": "7ABX123",
+            },
+            received_at=datetime.now(timezone.utc),
+        )
+        wrong = document(document_id="DOC-WRONG").model_copy(
+            update={"requested_action_id": "ACT-VEHICLE"}
+        )
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="The vehicle and plate are readable.",
+            supported_capabilities=[
+                "damage_evidence", "license_plate_photo", "vehicle_identity"
+            ],
+            evidence_facts=EvidenceArtifactFacts(
+                source="wrong-vehicle.jpg",
+                vehicle_make="Honda",
+                vehicle_model="CR-V",
+                license_plate="8XYZ999",
+            ),
+        )
+
+        result = self.workflow.resume("CLM-A1B2C3D4", wrong)
+
+        self.assertEqual(result.final_status, "awaiting_documents")
+        self.assertFalse(result.evidence_usable)
+        self.assertEqual(self.documents[wrong.document_id].status, "unusable")
+        actions = parse_requested_actions(self.claim["requested_actions"])
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].action_id, "ACT-VEHICLE")
+        self.assertEqual(actions[0].replaces_document_id, wrong.document_id)
+        self.assertFalse(
+            any(
+                isinstance(action, EnterTextRequestedAction)
+                for action in actions
+            )
+        )
+        persisted_extraction = self.documents[wrong.document_id].resume_extraction_result
+        self.assertFalse(persisted_extraction.usable)
+        self.assertEqual(persisted_extraction.conflicts[0].field, "vehicle_identity")
+        self.review_service.review.assert_not_called()
+        emitted = [
+            call.kwargs["action"]
+            for call in self.repository.append_claim_event.call_args_list
+        ]
+        self.assertIn("missing_requirement_still_unresolved", emitted)
+        self.assertNotIn("claim_review_resumed", emitted)
+
+    def test_correct_vehicle_after_mismatch_advances_once_to_voice(self) -> None:
+        self.test_wrong_requested_vehicle_image_stays_paused_and_targets_retry()
+        self.repository.append_claim_event.reset_mock()
+        self.review_service.reset_mock()
+        correct = document(document_id="DOC-CORRECT").model_copy(
+            update={"requested_action_id": "ACT-VEHICLE"}
+        )
+        self.extractor.extract.return_value = DocumentExtractionResult(
+            usable=True,
+            reason="The insured vehicle and plate are readable.",
+            supported_capabilities=[
+                "damage_evidence", "license_plate_photo", "vehicle_identity"
+            ],
+            evidence_facts=EvidenceArtifactFacts(
+                source="correct-vehicle.jpg",
+                vehicle_make="Toyota",
+                vehicle_model="Corolla",
+                license_plate="7ABX123",
+            ),
+        )
+        voice_action = EnterTextRequestedAction(
+            action_id="ACT-INCIDENT",
+            review_id="AUTONOMOUS-INCIDENT",
+            field_name="incident_information",
+            instruction="Tell us when the accident happened and briefly what happened.",
+        )
+        self.review_service.review.return_value = review_result(
+            complete=False
+        ).model_copy(update={"requested_actions": [voice_action]})
+
+        result = self.workflow.resume("CLM-A1B2C3D4", correct)
+
+        self.assertEqual(result.final_status, "awaiting_documents")
+        self.assertEqual(self.review_service.review.call_count, 1)
+        self.assertEqual(self.documents["DOC-WRONG"].status, "superseded")
+        self.assertEqual(
+            self.documents["DOC-WRONG"].superseded_by_document_id,
+            "DOC-CORRECT",
+        )
+        self.assertEqual(
+            self.documents["DOC-CORRECT"].replaces_document_id,
+            "DOC-WRONG",
+        )
+        actions = self.repository.save_review_result.call_args.args[1].requested_actions
+        self.assertEqual(actions, [voice_action])
 
     def test_followup_image_adds_damage_capability_and_keeps_original_active(
         self,

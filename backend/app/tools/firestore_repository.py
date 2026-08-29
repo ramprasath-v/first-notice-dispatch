@@ -484,6 +484,7 @@ class FirestoreClaimRepository:
         extraction: DocumentExtractionResult,
         remaining_actions: list[UploadDocumentRequestedAction],
         idempotency_key: str,
+        retry_action: UploadDocumentRequestedAction | None = None,
     ) -> None:
         """Atomically finalize one item while a multi-item request remains paused."""
         claim = self.get_claim(claim_id)
@@ -495,7 +496,12 @@ class FirestoreClaimRepository:
         batch = self._client.batch()
         successful = extraction.usable
         actions = remaining_actions if successful else [
-            action
+            (
+                retry_action
+                if retry_action is not None
+                and action.action_id == retry_action.action_id
+                else action
+            )
             for action in parse_requested_actions(claim.get("requested_actions", []))
             if isinstance(action, UploadDocumentRequestedAction)
         ]

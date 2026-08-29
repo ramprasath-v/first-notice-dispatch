@@ -7,8 +7,13 @@ from app.domain.claim_status import ClaimStatus, review_target_status, validate_
 from app.domain.evidence_reasoning import shape_source_aware_conflicts
 from app.models.adjuster_packet import AdjusterNotificationDraft
 from app.models.claim_document import ClaimDocument, DocumentExtractionResult
+from app.models.intake_result import EvidenceArtifactFacts
 from app.models.notification import AdjusterNotification
-from app.models.requested_action import UploadDocumentRequestedAction, parse_requested_actions
+from app.models.requested_action import (
+    EnterTextRequestedAction,
+    UploadDocumentRequestedAction,
+    parse_requested_actions,
+)
 from app.models.review_result import (
     CurrentEvidenceFinding,
     EvidenceConflict,
@@ -287,6 +292,57 @@ class MatrixStateRepository:
             "resume_result_status": result_status,
         })
 
+    def mark_document_resume_retry_required(
+        self, claim_id, document_id, *, error_type
+    ):
+        self.documents[document_id] = self.documents[document_id].model_copy(update={
+            "resume_result_status": "retry_required",
+            "resume_error": f"{error_type}: document resume failed; retry is required.",
+            "resume_retry_required_at": NOW,
+        })
+
+    def complete_requested_evidence_item(
+        self, *, claim_id, document, extraction, remaining_actions,
+        idempotency_key, retry_action=None,
+    ):
+        persisted_actions = [
+            action
+            for action in parse_requested_actions(self.claim["requested_actions"])
+            if isinstance(action, UploadDocumentRequestedAction)
+        ]
+        actions = remaining_actions if extraction.usable else [
+            (
+                retry_action
+                if retry_action is not None
+                and action.action_id == retry_action.action_id
+                else action
+            )
+            for action in persisted_actions
+        ]
+        self.claim.update({
+            "status": "awaiting_documents",
+            "requested_actions": [
+                item.model_dump(mode="python") for item in actions
+            ],
+            "missing_documents": [
+                {"type": item.document_type, "reason": item.instruction}
+                for item in actions
+            ],
+        })
+        for key in [
+            "active_resume_document_id",
+            "active_resume_idempotency_key",
+            "active_resume_correlation_id",
+        ]:
+            self.claim.pop(key, None)
+        persisted = self.documents[document.document_id]
+        self.documents[document.document_id] = persisted.model_copy(update={
+            "status": "validated" if extraction.usable else "unusable",
+            "resume_idempotency_key": idempotency_key,
+            "resume_processed_at": NOW,
+            "resume_result_status": "awaiting_documents",
+        })
+
     def append_claim_event(self, claim_id, *, event_id=None, **values):
         key = event_id or f"event-{len(self.events) + 1}"
         self.events.setdefault(key, values)
@@ -478,7 +534,16 @@ class WorkflowMatrixHarness:
         return first, second
 
 
-def doc(document_id: str, filename: str, document_type: str, *, capabilities=(), findings=()):
+def doc(
+    document_id: str,
+    filename: str,
+    document_type: str,
+    *,
+    capabilities=(),
+    findings=(),
+    facts=None,
+    requested_action_id=None,
+):
     return ClaimDocument(
         document_id=document_id,
         claim_id=CLAIM_ID,
@@ -486,12 +551,172 @@ def doc(document_id: str, filename: str, document_type: str, *, capabilities=(),
         filename=filename,
         status="validated",
         supported_capabilities=list(capabilities),
+        evidence_facts=dict(facts or {}),
         evidence_findings=list(findings),
+        requested_action_id=requested_action_id,
         received_at=NOW,
     )
 
 
 class FrozenWorkflowRegressionMatrixTests(unittest.TestCase):
+    def _vehicle_then_voice_demo_path(self) -> WorkflowMatrixHarness:
+        vehicle_action = UploadDocumentRequestedAction(
+            action_id="ACT-DEMO-VEHICLE",
+            review_id="AUTONOMOUS-DEMO-VEHICLE",
+            document_type="license_plate_photo",
+            instruction="Please upload a clear vehicle photo with a readable license plate.",
+        )
+        harness = WorkflowMatrixHarness([
+            doc(
+                "DOC-POLICY", "policy.pdf", "policy_document",
+                facts={
+                    "vehicle_make": "Toyota",
+                    "vehicle_model": "Corolla",
+                    "license_plate": "7ABX123",
+                },
+            ),
+            doc(
+                "DOC-INITIAL", "initial.jpg", "damage_evidence",
+                capabilities=("damage_evidence",),
+            ),
+        ])
+        harness.repository.claim.update({
+            "incident_date": None,
+            "incident_summary": "",
+            "incident_description": "",
+        })
+        self.assertEqual(
+            harness.submit(identity_missing_review(action=vehicle_action)),
+            "awaiting_documents",
+        )
+
+        wrong = doc(
+            "DOC-WRONG", "wrong-vehicle.jpg", "license_plate_photo",
+            requested_action_id=vehicle_action.action_id,
+        )
+        wrong_result = harness.deliver(
+            wrong,
+            DocumentExtractionResult(
+                usable=True,
+                reason="The vehicle and plate are readable.",
+                supported_capabilities=[
+                    "damage_evidence", "license_plate_photo", "vehicle_identity"
+                ],
+                evidence_facts=EvidenceArtifactFacts(
+                    source="wrong-vehicle.jpg",
+                    vehicle_make="Honda",
+                    vehicle_model="CR-V",
+                    license_plate="8XYZ999",
+                ),
+            ),
+        )
+        self.assertEqual(wrong_result.final_status, "awaiting_documents")
+        self.assertEqual(harness.repository.documents["DOC-WRONG"].status, "unusable")
+        actions = parse_requested_actions(
+            harness.repository.claim["requested_actions"]
+        )
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], UploadDocumentRequestedAction)
+        self.assertEqual(actions[0].replaces_document_id, "DOC-WRONG")
+        self.assertEqual(harness.review.responses, [])
+
+        voice_action = EnterTextRequestedAction(
+            action_id="ACT-DEMO-VOICE",
+            review_id="AUTONOMOUS-DEMO-VOICE",
+            field_name="incident_information",
+            instruction=(
+                "Tell us when the accident happened and briefly what happened. "
+                "You can also mention any injuries or other important details."
+            ),
+        )
+        correct = doc(
+            "DOC-CORRECT", "correct-vehicle.jpg", "license_plate_photo",
+            requested_action_id=vehicle_action.action_id,
+        )
+        correct_result = harness.deliver(
+            correct,
+            DocumentExtractionResult(
+                usable=True,
+                reason="The insured vehicle and plate are readable.",
+                supported_capabilities=[
+                    "damage_evidence", "license_plate_photo", "vehicle_identity"
+                ],
+                evidence_facts=EvidenceArtifactFacts(
+                    source="correct-vehicle.jpg",
+                    vehicle_make="Toyota",
+                    vehicle_model="Corolla",
+                    license_plate="7ABX123",
+                ),
+            ),
+            ReviewResult(
+                intake_complete=False,
+                intake_priority="routine",
+                priority_reason="Incident information is still required.",
+                confidence=0.9,
+                inspection_required=True,
+                requires_human_review=False,
+                missing_documents=[
+                    MissingEvidence(
+                        type="incident_date",
+                        reason="Incident date is required.",
+                        source_requirement="always_required",
+                    ),
+                    MissingEvidence(
+                        type="incident_description",
+                        reason="Incident context is required.",
+                        source_requirement="always_required",
+                    ),
+                ],
+                requested_actions=[voice_action],
+                operational_indicators=OperationalIndicators(),
+            ),
+        )
+        self.assertEqual(correct_result.final_status, "awaiting_documents")
+        self.assertEqual(harness.repository.documents["DOC-WRONG"].status, "superseded")
+        self.assertEqual(
+            harness.repository.documents["DOC-CORRECT"].replaces_document_id,
+            "DOC-WRONG",
+        )
+        final_actions = parse_requested_actions(
+            harness.repository.claim["requested_actions"]
+        )
+        self.assertEqual(final_actions, [voice_action])
+        self.assertEqual(
+            {item["type"] for item in harness.repository.claim["missing_documents"]},
+            {"incident_date", "incident_description"},
+        )
+        return harness
+
+    def test_final_demo_vehicle_mismatch_then_voice_injury_requires_human_review(self):
+        harness = self._vehicle_then_voice_demo_path()
+        harness.repository.claim["status"] = "review_processing"
+        injury_review = complete_review().model_copy(update={
+            "intake_complete": False,
+            "intake_priority": "urgent_human_review",
+            "priority_reason": "Possible injury requires prompt human review.",
+            "requires_human_review": True,
+            "human_review_reason": "Possible injury requires prompt human review.",
+            "operational_indicators": OperationalIndicators(possible_injury=True),
+        })
+
+        target = harness.repository.save_review_result(
+            CLAIM_ID, injury_review, review_generation_key="voice-injury"
+        )
+
+        self.assertEqual(target, ClaimStatus.HUMAN_REVIEW_REQUIRED)
+        self.assertEqual(harness.repository.claim["status"], "human_review_required")
+
+    def test_final_demo_vehicle_mismatch_then_voice_no_injury_continues(self):
+        harness = self._vehicle_then_voice_demo_path()
+        harness.repository.claim["status"] = "review_processing"
+
+        target = harness.repository.save_review_result(
+            CLAIM_ID, complete_review(), review_generation_key="voice-no-injury"
+        )
+
+        self.assertEqual(target, ClaimStatus.INSPECTION_READY)
+        self.assertEqual(harness.repository.claim["status"], "inspection_ready")
+
     def test_flow_1_complete_initial_evidence_and_approved_dispatch(self):
         harness = WorkflowMatrixHarness([
             doc("DOC-REPORT", "police-report.pdf", "police_report"),

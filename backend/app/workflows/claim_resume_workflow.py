@@ -210,6 +210,20 @@ class ClaimResumeWorkflow:
                 reason=reason,
             )
 
+        pending_upload_actions = [
+            action
+            for action in parse_requested_actions(claim.get("requested_actions", []))
+            if isinstance(action, UploadDocumentRequestedAction)
+        ]
+        current_action = next(
+            (
+                action
+                for action in pending_upload_actions
+                if action.action_id == document.requested_action_id
+            ),
+            None,
+        )
+
         if not same_operation_retry:
             self._repository.begin_document_resume_review(
                 claim_id,
@@ -240,6 +254,21 @@ class ClaimResumeWorkflow:
                 document=document,
                 matched_requirement=matched_requirement,
             )
+            mismatch = _requested_vehicle_identity_mismatch(
+                action=current_action,
+                current_document=document,
+                extraction=extraction,
+                documents=self._repository.get_documents(claim_id),
+            )
+            if mismatch is not None:
+                extraction = extraction.model_copy(
+                    update={
+                        "usable": False,
+                        "reason": mismatch.reason,
+                        "satisfies_requirement": None,
+                        "conflicts": [*extraction.conflicts, mismatch],
+                    }
+                )
             self._repository.save_document_resume_extraction(
                 claim_id, document.document_id, extraction
             )
@@ -313,19 +342,6 @@ class ClaimResumeWorkflow:
                 claim_id, document.document_id
             )
 
-        pending_upload_actions = [
-            action
-            for action in parse_requested_actions(claim.get("requested_actions", []))
-            if isinstance(action, UploadDocumentRequestedAction)
-        ]
-        current_action = next(
-            (
-                action
-                for action in pending_upload_actions
-                if action.action_id == document.requested_action_id
-            ),
-            None,
-        )
         if current_action is not None and (
             not extraction.usable or len(pending_upload_actions) > 1
         ):
@@ -352,6 +368,17 @@ class ClaimResumeWorkflow:
                 extraction=extraction,
                 remaining_actions=remaining_actions,
                 idempotency_key=idempotency_key,
+                retry_action=(
+                    current_action.model_copy(
+                        update={"replaces_document_id": document.document_id}
+                    )
+                    if not extraction.usable
+                    and any(
+                        conflict.field == "vehicle_identity"
+                        for conflict in extraction.conflicts
+                    )
+                    else None
+                ),
             )
             return ResumeClaimResult(
                 claim_id=claim_id,
@@ -882,6 +909,87 @@ def _normalize_extraction(
             *canonical_findings,
         ])),
     })
+
+
+def _requested_vehicle_identity_mismatch(
+    *,
+    action: UploadDocumentRequestedAction | None,
+    current_document: ClaimDocument,
+    extraction: DocumentExtractionResult,
+    documents: list[ClaimDocument],
+) -> EvidenceConflict | None:
+    """Reject a requested identity image that contradicts active policy facts."""
+    if (
+        action is None
+        or action.document_type not in {"damage_evidence", "license_plate_photo"}
+        or not extraction.usable
+        or extraction.evidence_facts is None
+        or not (
+            {"license_plate_photo", "vehicle_identity"}
+            & set(extraction.supported_capabilities)
+        )
+    ):
+        return None
+
+    policy_documents = [
+        document
+        for document in documents
+        if document.document_type == "policy_document"
+        and document.status not in {"superseded", "unusable"}
+    ]
+    incoming = extraction.evidence_facts.fact_values()
+
+    def authoritative(field_name: str) -> tuple[str, list[str]] | None:
+        values: dict[str, tuple[str, list[str]]] = {}
+        for policy_document in policy_documents:
+            value = policy_document.evidence_facts.get(field_name)
+            if not value or not value.strip():
+                continue
+            normalized = _normalize_fact_value(value)
+            raw, sources = values.setdefault(normalized, (value.strip(), []))
+            sources.append(policy_document.filename)
+            values[normalized] = (raw, sources)
+        return next(iter(values.values())) if len(values) == 1 else None
+
+    # Strong identifiers are authoritative when both sides provide them. A
+    # match also prevents a weaker visual make/model estimate from rejecting
+    # the same vehicle.
+    for field_name in ("vin", "license_plate"):
+        expected = authoritative(field_name)
+        observed = incoming.get(field_name)
+        if expected is None or not observed:
+            continue
+        if _normalize_fact_value(expected[0]) == _normalize_fact_value(observed):
+            return None
+        return EvidenceConflict(
+            field="vehicle_identity",
+            values=[expected[0], observed],
+            sources=[*expected[1], current_document.filename],
+            reason=(
+                "The submitted vehicle evidence does not match the insured "
+                f"vehicle {field_name.replace('_', ' ')} in the active policy."
+            ),
+        )
+
+    for field_name in ("vehicle_make", "vehicle_model", "vehicle_year"):
+        expected = authoritative(field_name)
+        observed = incoming.get(field_name)
+        if (
+            expected is not None
+            and observed
+            and _normalize_fact_value(expected[0])
+            != _normalize_fact_value(observed)
+        ):
+            return EvidenceConflict(
+                field="vehicle_identity",
+                values=[expected[0], observed],
+                sources=[*expected[1], current_document.filename],
+                reason=(
+                    "The submitted vehicle evidence does not match the insured "
+                    "vehicle described by the active policy."
+                ),
+            )
+    return None
 
 
 def _documents_for_resumed_review(
