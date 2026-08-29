@@ -165,6 +165,61 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         )
         self.batch.commit.assert_called_once_with()
 
+    def test_injury_review_approval_uses_valid_inspection_continuation(self) -> None:
+        self.repository.get_claim = MagicMock(return_value={
+            "claim_id": "CLM-A1B2C3D4",
+            "status": "human_review_required",
+            "current_human_review_generation": 2,
+            "intake_priority": "urgent_human_review",
+        })
+
+        self.repository.complete_human_review_resume(
+            claim_id="CLM-A1B2C3D4",
+            review_id="HRV-VOICE-INJURY",
+            target_status=ClaimStatus.INSPECTION_PENDING,
+            conflicts=[],
+            missing_documents=[],
+            unusable_evidence=[],
+            requested_actions=[],
+            correlation_id="voice-injury-approval",
+        )
+
+        claim_update = self.batch.update.call_args_list[0].args[1]
+        event = self.batch.create.call_args.args[1]
+        self.assertEqual(claim_update["status"], "inspection_pending")
+        self.assertFalse(claim_update["requires_human_review"])
+        self.assertEqual(
+            event["details"]["transition_path"],
+            [
+                "human_review_required",
+                "review_processing",
+                "inspection_ready",
+                "inspection_pending",
+            ],
+        )
+        self.batch.commit.assert_called_once()
+
+    def test_duplicate_injury_review_approval_remains_idempotent(self) -> None:
+        self.repository.get_claim = MagicMock(return_value={
+            "claim_id": "CLM-A1B2C3D4",
+            "status": "human_review_required",
+            "current_human_review_generation": 2,
+        })
+        self.batch.commit.side_effect = AlreadyExists("already completed")
+
+        self.repository.complete_human_review_resume(
+            claim_id="CLM-A1B2C3D4",
+            review_id="HRV-VOICE-INJURY",
+            target_status=ClaimStatus.INSPECTION_PENDING,
+            conflicts=[],
+            missing_documents=[],
+            unusable_evidence=[],
+            requested_actions=[],
+            correlation_id="voice-injury-approval",
+        )
+
+        self.batch.commit.assert_called_once()
+
     def test_voice_incident_correction_persists_date_and_context_together(self) -> None:
         self.repository.save_claim_voice_incident_correction(
             claim_id="CLM-A1B2C3D4",

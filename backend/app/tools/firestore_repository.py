@@ -1311,11 +1311,9 @@ class FirestoreClaimRepository:
         if claim is None:
             raise FirestoreWriteError(f"Claim {claim_id} does not exist.")
         current_status = ClaimStatus(str(claim.get("status", "")))
-        if current_status == ClaimStatus.INSPECTION_READY:
-            validate_claim_status_transition(current_status, target_status)
-        else:
-            validate_claim_status_transition(current_status, ClaimStatus.REVIEW_PROCESSING)
-            validate_claim_status_transition(ClaimStatus.REVIEW_PROCESSING, target_status)
+        transition_path = _human_review_resume_transition_path(
+            current_status, target_status
+        )
         now = utc_now()
         claim_ref = self._client.collection("claims").document(claim_id)
         review_ref = claim_ref.collection("human_reviews").document(review_id)
@@ -1380,6 +1378,7 @@ class FirestoreClaimRepository:
                         "review_generation": int(
                             claim.get("current_human_review_generation") or 1
                         ),
+                        "transition_path": [status.value for status in transition_path],
                     },
                     correlation_id=correlation_id,
                 ),
@@ -2877,3 +2876,27 @@ class FirestoreClaimRepository:
         if isinstance(exc, GoogleAPICallError):
             raise FirestoreWriteError(f"Could not {action}: {exc}") from exc
         raise FirestoreWriteError(f"Could not {action}: {exc}") from exc
+
+
+def _human_review_resume_transition_path(
+    current_status: ClaimStatus,
+    target_status: ClaimStatus,
+) -> tuple[ClaimStatus, ...]:
+    """Validate the canonical continuation used after an adjuster decision."""
+    path = [current_status]
+    if current_status != ClaimStatus.INSPECTION_READY:
+        validate_claim_status_transition(
+            current_status, ClaimStatus.REVIEW_PROCESSING
+        )
+        path.append(ClaimStatus.REVIEW_PROCESSING)
+    if (
+        target_status == ClaimStatus.INSPECTION_PENDING
+        and path[-1] == ClaimStatus.REVIEW_PROCESSING
+    ):
+        validate_claim_status_transition(
+            ClaimStatus.REVIEW_PROCESSING, ClaimStatus.INSPECTION_READY
+        )
+        path.append(ClaimStatus.INSPECTION_READY)
+    validate_claim_status_transition(path[-1], target_status)
+    path.append(target_status)
+    return tuple(path)

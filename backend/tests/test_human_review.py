@@ -1382,6 +1382,35 @@ class HumanReviewResumeWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result["final_status"], "inspection_pending")
 
+    def test_voice_injury_approval_reuses_inspection_continuation(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "human_review_required",
+            "incident_date": "2026-08-24",
+            "incident_description": "I was rear-ended at a light.",
+            "incident_date_provenance": {"source_type": "claimant_voice"},
+            "incident_description_provenance": {
+                "source_type": "claimant_voice"
+            },
+            "operational_indicators": {"possible_injury": True},
+            "conflicts": [],
+            "missing_documents": [],
+            "unusable_evidence": [],
+        }
+        self.repository.get_human_review.return_value = record(
+            status="approved",
+            reason="Possible injury requires adjuster review.",
+            conflict_fields=[],
+        )
+
+        result = self.workflow.resume_approved(CLAIM_ID, REVIEW_ID, "corr")
+
+        self.assertEqual(result["final_status"], "inspection_pending")
+        call = self.repository.complete_human_review_resume.call_args.kwargs
+        self.assertEqual(call["target_status"], ClaimStatus.INSPECTION_PENDING)
+        self.assertEqual(call["missing_documents"], [])
+        self.assertEqual(call["unusable_evidence"], [])
+
     def test_inspection_ready_approval_starts_existing_dispatch_boundary(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,

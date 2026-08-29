@@ -2350,6 +2350,12 @@ class ClaimReviewServiceTests(unittest.TestCase):
                 ClaimStatus.INTAKE_COMPLETE, ClaimStatus.INSPECTION_PENDING
             )
 
+    def test_review_processing_cannot_skip_inspection_ready(self) -> None:
+        with self.assertRaises(InvalidClaimStatusTransition):
+            validate_claim_status_transition(
+                ClaimStatus.REVIEW_PROCESSING, ClaimStatus.INSPECTION_PENDING
+            )
+
     def test_review_result_schema_rejects_missing_human_reason(self) -> None:
         with self.assertRaises(ValidationError):
             ReviewResult(

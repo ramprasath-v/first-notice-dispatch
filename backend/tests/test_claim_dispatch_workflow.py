@@ -203,6 +203,28 @@ class ClaimDispatchWorkflowTests(unittest.TestCase):
         self.repository.schedule_inspection.assert_called_once()
         self.notification_tool.send_adjuster_notification.assert_called_once()
 
+    def test_approved_voice_injury_claim_schedules_and_notifies(self) -> None:
+        self.claim.update({
+            "incident_date": "2026-08-24",
+            "incident_description": "I was rear-ended at a light.",
+            "incident_date_provenance": {"source_type": "claimant_voice"},
+            "incident_description_provenance": {
+                "source_type": "claimant_voice"
+            },
+            "operational_indicators": {"possible_injury": True},
+            "requires_human_review": False,
+            "human_review_reason": None,
+            "intake_priority": "routine",
+        })
+        calendar = self._enable_calendar()
+
+        result = self.workflow.dispatch("CLM-A1B2C3D4", now=NOW)
+
+        self.assertEqual(result.final_status, "adjuster_notified")
+        calendar.create_inspection_event.assert_called_once()
+        self.repository.schedule_inspection.assert_called_once()
+        self.notification_tool.send_adjuster_notification.assert_called_once()
+
     def test_calendar_failure_does_not_advance_or_persist_appointment(self) -> None:
         calendar = self._enable_calendar()
         calendar.create_inspection_event.side_effect = GoogleCalendarError(
