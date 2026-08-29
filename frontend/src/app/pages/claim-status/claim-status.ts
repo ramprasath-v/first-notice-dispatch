@@ -561,7 +561,7 @@ export class ClaimStatusPage {
       next: () => {
         this.uploading.set(false);
         this.resetVoiceRecording();
-        this.documentNotice.set('Document received. Rechecking your claim…');
+        this.documentNotice.set('Voice note received. Rechecking your claim…');
         this.rechecking.set(true);
         this.recheckKind.set('voice');
         this.statusAtUpload = this.claim()?.status ?? 'awaiting_documents';

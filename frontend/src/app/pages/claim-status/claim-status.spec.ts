@@ -289,7 +289,7 @@ describe('ClaimStatusPage', () => {
     fixture.detectChanges();
 
     expect(fixture.nativeElement.textContent).toContain(
-      'Document received. Rechecking your claim',
+      'Voice note received. Rechecking your claim',
     );
     expect(fixture.nativeElement.textContent).toContain('Reviewing your new evidence');
     expect(fixture.nativeElement.textContent).not.toContain('Voice response received');
