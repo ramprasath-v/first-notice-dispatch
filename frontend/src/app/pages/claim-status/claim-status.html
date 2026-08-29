@@ -45,15 +45,6 @@
     @if (pollingWarning()) { <div class="alert warning-alert" role="status">{{ pollingWarning() }}</div> }
     @if (error()) { <div class="alert error-alert" role="alert">{{ error() }}</div> }
 
-    @if (rechecking() && recheckKind() === 'voice') {
-      <section class="card voice-processing" role="status" aria-live="polite">
-        <p class="kicker">Processing response</p>
-        <h2>Voice response received</h2>
-        <p>FirstNotice is analyzing your response and will continue automatically.</p>
-        <div class="indeterminate-progress" aria-label="Analyzing voice response"><span></span></div>
-      </section>
-    }
-
     @if (current.status === 'awaiting_documents' && !rechecking()) {
       @if (evidenceRequests(current.requested_evidence, current.requested_actions); as requests) {
         @if (requests.length) {

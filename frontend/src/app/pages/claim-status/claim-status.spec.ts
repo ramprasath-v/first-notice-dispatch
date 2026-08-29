@@ -269,7 +269,7 @@ describe('ClaimStatusPage', () => {
     expect(stop).toHaveBeenCalled();
   });
 
-  it('shows voice processing immediately after the upload is accepted', async () => {
+  it('uses the existing document processing UI after voice upload acceptance', async () => {
     api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
       requested_actions: [{
         action_type: 'enter_text', action_id: 'ACT-DATE', review_id: 'AUTONOMOUS-DATE',
@@ -288,10 +288,11 @@ describe('ClaimStatusPage', () => {
     fixture.componentInstance.submitVoiceCorrection(action);
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.textContent).toContain('Voice response received');
     expect(fixture.nativeElement.textContent).toContain(
-      'FirstNotice is analyzing your response and will continue automatically.',
+      'Document received. Rechecking your claim',
     );
+    expect(fixture.nativeElement.textContent).toContain('Reviewing your new evidence');
+    expect(fixture.nativeElement.textContent).not.toContain('Voice response received');
     expect(fixture.nativeElement.textContent).not.toContain('Submit voice note');
     expect(fixture.nativeElement.textContent).not.toContain('Re-record');
     expect(fixture.nativeElement.textContent).not.toContain('Discard');
