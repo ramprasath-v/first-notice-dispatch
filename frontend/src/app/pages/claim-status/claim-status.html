@@ -1,90 +1,197 @@
 <main class="page status-page">
   @if (loading()) {
-    <section class="loading-card card"><span class="spinner"></span><div><h1>Finding your claim</h1><p>This should only take a moment.</p></div></section>
+    <section class="loading-card card">
+      <span class="spinner"></span>
+      <div>
+        <h1>Finding your claim</h1>
+        <p>This should only take a moment.</p>
+      </div>
+    </section>
   } @else if (claim(); as current) {
-    <section class="status-hero card" [class.status-changed]="clock() < statusChangedUntil()" aria-live="polite">
+    <section
+      class="status-hero card"
+      [class.status-changed]="clock() < statusChangedUntil()"
+      aria-live="polite"
+    >
       <div class="status-copy">
         <p class="kicker">Claim status</p>
-        <div class="status-line"><span class="status-mark"></span><h1>{{ statusLabel(current.status) }}</h1></div>
-        <p>Claim {{ current.claim_id }} · Last updated {{ current.updated_at | date:'MMM d, y · h:mm a' }}</p>
+        <div class="status-line">
+          <span class="status-mark"></span>
+          <h1>{{ statusLabel(current.status) }}</h1>
+        </div>
+        <p>
+          Claim {{ current.claim_id }} · Last updated
+          {{ current.updated_at | date: 'MMM d, y · h:mm a' }}
+        </p>
       </div>
       @if (current.intake_priority) {
-        <div class="priority"><span>Intake priority</span><strong>{{ current.intake_priority.replaceAll('_', ' ') | titlecase }}</strong></div>
+        <div class="priority">
+          <span>Intake priority</span
+          ><strong>{{ current.intake_priority.replaceAll('_', ' ') | titlecase }}</strong>
+        </div>
       }
     </section>
 
     <nav class="stepper" aria-label="Claim progress">
       @for (step of steps(current.status); track step.label; let index = $index; let last = $last) {
-        <span class="step" [class.complete]="step.state === 'complete'" [class.active]="step.state === 'active'" [class.upcoming]="step.state === 'upcoming'" [attr.data-state]="step.state" [attr.aria-current]="step.state === 'active' ? 'step' : null">
+        <span
+          class="step"
+          [class.complete]="step.state === 'complete'"
+          [class.active]="step.state === 'active'"
+          [class.upcoming]="step.state === 'upcoming'"
+          [attr.data-state]="step.state"
+          [attr.aria-current]="step.state === 'active' ? 'step' : null"
+        >
           <b aria-hidden="true">{{ step.state === 'complete' ? '✓' : index + 1 }}</b>
-          <small>{{ step.label }}<em>{{ step.note }}</em></small>
-          <span class="sr-only">{{ step.state === 'complete' ? 'Complete' : step.state === 'active' ? 'Current step' : 'Upcoming' }}</span>
+          <small
+            >{{ step.label }}<em>{{ step.note }}</em></small
+          >
+          <span class="sr-only">{{
+            step.state === 'complete'
+              ? 'Complete'
+              : step.state === 'active'
+                ? 'Current step'
+                : 'Upcoming'
+          }}</span>
         </span>
-        @if (!last) { <i [class.complete]="step.state === 'complete'" aria-hidden="true"></i> }
+        @if (!last) {
+          <i [class.complete]="step.state === 'complete'" aria-hidden="true"></i>
+        }
       }
     </nav>
 
     @if (workflowHeartbeat(current.status); as heartbeat) {
       <section class="workflow-heartbeat card" [attr.data-mode]="heartbeat.mode">
         <div class="heartbeat-heading">
-          <div class="heartbeat-badge"><span class="indicator-dot" aria-hidden="true"></span>{{ heartbeat.badge }}</div>
-          <div class="heartbeat-copy" aria-live="polite"><strong>{{ heartbeat.title }}</strong><p>{{ heartbeat.detail }}</p></div>
+          <div class="heartbeat-badge">
+            <span class="indicator-dot" aria-hidden="true"></span>{{ heartbeat.badge }}
+          </div>
+          <div class="heartbeat-copy" aria-live="polite">
+            <strong>{{ heartbeat.title }}</strong>
+            <p>{{ heartbeat.detail }}</p>
+          </div>
         </div>
-        @if (heartbeat.mode !== 'adjuster') {
+        <!-- @if (heartbeat.mode !== 'adjuster') {
           <div class="poll-row" aria-hidden="true">
             <span class="poll-icon" [class.spinning]="pollInProgress()">{{ pollInProgress() ? '↻' : pollMessage(current.status) === 'Up to date' ? '✓' : '○' }}</span>
             <strong>{{ pollMessage(current.status) }}</strong>
             <small>Last checked: {{ relativeTime(lastSuccessfulPollAt()) }} · Workflow update: {{ relativeTime(lastBusinessUpdateAt()) }}</small>
           </div>
-        }
+        } -->
         @if (heartbeat.showProgress) {
           <div class="indeterminate-progress" aria-label="Workflow processing"><span></span></div>
         }
       </section>
     }
 
-    @if (documentNotice()) { <div class="alert success-alert" role="status">{{ documentNotice() }}</div> }
-    @if (pollingWarning()) { <div class="alert warning-alert" role="status">{{ pollingWarning() }}</div> }
-    @if (error()) { <div class="alert error-alert" role="alert">{{ error() }}</div> }
+    @if (documentNotice()) {
+      <div class="alert success-alert" role="status">{{ documentNotice() }}</div>
+    }
+    @if (pollingWarning()) {
+      <div class="alert warning-alert" role="status">{{ pollingWarning() }}</div>
+    }
+    @if (error()) {
+      <div class="alert error-alert" role="alert">{{ error() }}</div>
+    }
 
     @if (current.status === 'awaiting_documents' && !rechecking()) {
       @if (evidenceRequests(current.requested_evidence, current.requested_actions); as requests) {
         @if (requests.length) {
-          <app-missing-documents [requests]="requests" [displayReason]="current.action_display || null" [uploading]="uploading()" [processing]="rechecking()" (uploadDocuments)="uploadDocuments($event)" />
+          <app-missing-documents
+            [requests]="requests"
+            [displayReason]="current.action_display || null"
+            [uploading]="uploading()"
+            [processing]="rechecking()"
+            (uploadDocuments)="uploadDocuments($event)"
+          />
         }
       }
       @if (textAction(current.requested_actions); as action) {
         <section class="card correction-card">
           <p class="kicker">Action needed</p>
           <p class="action-count">1 item needed to continue</p>
-          <h2>{{ isVoiceIncidentAction(action) ? 'Tell us about the accident' : current.action_display?.title || 'More information needed' }}</h2>
+          <h2>
+            {{
+              isVoiceIncidentAction(action)
+                ? 'Tell us about the accident'
+                : current.action_display?.title || 'More information needed'
+            }}
+          </h2>
           @if (isVoiceIncidentAction(action)) {
-            <p>Tell us when the accident happened and briefly what happened. You can also mention any injuries or other important details.</p>
+            <p>
+              Tell us when the accident happened and briefly what happened. You can also mention any
+              injuries or other important details.
+            </p>
           } @else if (current.action_display) {
-            <div class="correction-context"><strong>Why we need this</strong><p>{{ current.action_display.explanation }}</p></div>
+            <div class="correction-context">
+              <strong>Why we need this</strong>
+              <p>{{ current.action_display.explanation }}</p>
+            </div>
           }
           @if (!isVoiceIncidentAction(action)) {
-            <p class="what-to-do"><strong>What to do</strong>{{ current.action_display?.instruction || action.instruction }}</p>
+            <p class="what-to-do">
+              <strong>What to do</strong
+              >{{ current.action_display?.instruction || action.instruction }}
+            </p>
           }
           @if (isVoiceIncidentAction(action)) {
             <div class="voice-correction" [attr.data-state]="voiceRecordingState()">
               <strong>Voice answer</strong>
               @if (voiceRecordingState() === 'idle') {
-                <button class="secondary" type="button" [disabled]="uploading()" (click)="startVoiceRecording()">Record voice note</button>
+                <button
+                  class="secondary"
+                  type="button"
+                  [disabled]="uploading()"
+                  (click)="startVoiceRecording()"
+                >
+                  Record voice note
+                </button>
               } @else if (voiceRecordingState() === 'requesting') {
-                <p role="status"><span class="spinner small-spinner" aria-hidden="true"></span> Requesting microphone access…</p>
+                <p role="status">
+                  <span class="spinner small-spinner" aria-hidden="true"></span> Requesting
+                  microphone access…
+                </p>
               } @else if (voiceRecordingState() === 'recording') {
-                <p class="recording-state" role="status"><span aria-hidden="true"></span> Recording…</p>
+                <p class="recording-state" role="status">
+                  <span aria-hidden="true"></span> Recording…
+                </p>
                 <div class="voice-actions">
-                  <button class="primary" type="button" (click)="stopVoiceRecording()">Stop recording</button>
-                  <button class="secondary" type="button" (click)="discardVoiceRecording()">Cancel</button>
+                  <button class="primary" type="button" (click)="stopVoiceRecording()">
+                    Stop recording
+                  </button>
+                  <button class="secondary" type="button" (click)="discardVoiceRecording()">
+                    Cancel
+                  </button>
                 </div>
               } @else if (recordedVoice(); as recording) {
-                <p role="status">✓ Voice note ready · {{ recording.size / 1024 | number:'1.0-0' }} KB</p>
+                <p role="status">
+                  ✓ Voice note ready · {{ recording.size / 1024 | number: '1.0-0' }} KB
+                </p>
                 <div class="voice-actions">
-                  <button class="primary" type="button" [disabled]="uploading()" (click)="submitVoiceCorrection(action)">{{ uploading() ? 'Submitting…' : 'Submit voice note' }}</button>
-                  <button class="secondary" type="button" [disabled]="uploading()" (click)="startVoiceRecording()">Re-record</button>
-                  <button class="secondary" type="button" [disabled]="uploading()" (click)="discardVoiceRecording()">Discard</button>
+                  <button
+                    class="primary"
+                    type="button"
+                    [disabled]="uploading()"
+                    (click)="submitVoiceCorrection(action)"
+                  >
+                    {{ uploading() ? 'Submitting…' : 'Submit voice note' }}
+                  </button>
+                  <button
+                    class="secondary"
+                    type="button"
+                    [disabled]="uploading()"
+                    (click)="startVoiceRecording()"
+                  >
+                    Re-record
+                  </button>
+                  <button
+                    class="secondary"
+                    type="button"
+                    [disabled]="uploading()"
+                    (click)="discardVoiceRecording()"
+                  >
+                    Discard
+                  </button>
                 </div>
               }
             </div>
@@ -93,19 +200,32 @@
               <span>Your response</span>
               <input type="text" [(ngModel)]="correctionValue" maxlength="256" autocomplete="off" />
             </label>
-            <button class="primary" type="button" [disabled]="correctionSubmitDisabled(action)" (click)="submitCorrection(action.field_name)">
+            <button
+              class="primary"
+              type="button"
+              [disabled]="correctionSubmitDisabled(action)"
+              (click)="submitCorrection(action.field_name)"
+            >
               {{ uploading() ? 'Submitting…' : 'Submit correction' }}
             </button>
           }
-          <p class="supporting-copy">FirstNotice will automatically continue processing when this item is received.</p>
+          <p class="supporting-copy">
+            FirstNotice will automatically continue processing when this item is received.
+          </p>
         </section>
       }
     }
 
-    @if (current.inspection) { <app-inspection-card [inspection]="current.inspection" /> }
+    @if (current.inspection) {
+      <app-inspection-card [inspection]="current.inspection" />
+    }
 
     <app-claim-timeline [events]="events()" />
   } @else {
-    <section class="card error-state"><h1>Claim unavailable</h1><p>{{ error() }}</p><button class="secondary" (click)="refreshNow()">Try again</button></section>
+    <section class="card error-state">
+      <h1>Claim unavailable</h1>
+      <p>{{ error() }}</p>
+      <button class="secondary" (click)="refreshNow()">Try again</button>
+    </section>
   }
 </main>
