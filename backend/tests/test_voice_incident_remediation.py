@@ -39,6 +39,21 @@ def awaiting_date_claim(**updates):
     return claim
 
 
+def awaiting_incident_claim(*, field_name: str, missing: list[str]):
+    return awaiting_date_claim(
+        incident_date=(None if "incident_date" in missing else "2026-08-23"),
+        incident_description="",
+        missing_documents=[{"type": item} for item in missing],
+        requested_actions=[{
+            "action_type": "enter_text",
+            "action_id": ACTION_ID,
+            "review_id": "AUTONOMOUS-INCIDENT",
+            "field_name": field_name,
+            "instruction": "Tell us when and what happened.",
+        }],
+    )
+
+
 class VoiceIncidentRemediationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repository = MagicMock()
@@ -84,6 +99,7 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
         self.extractor.extract.return_value = VoiceIncidentExtractionResult(
             incident_date="2026-08-24",
             incident_time="18:00",
+            incident_description=None,
             injury_mentioned=False,
         )
 
@@ -93,14 +109,12 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
         self.assertEqual(saved.source_type, "claimant_voice")
         self.assertEqual(saved.requested_action_id, ACTION_ID)
         self.assertEqual(saved.document_type, "voice_note")
-        self.assertEqual(
-            self.repository.save_claim_correction.call_args.kwargs["field_name"],
-            "incident_date",
+        saved_correction = (
+            self.repository.save_claim_voice_incident_correction.call_args.kwargs
         )
-        self.assertEqual(
-            self.repository.save_claim_correction.call_args.kwargs["value"],
-            "2026-08-24",
-        )
+        self.assertEqual(saved_correction["requested_field"], "incident_date")
+        self.assertEqual(saved_correction["incident_date"], "2026-08-24")
+        self.assertIsNone(saved_correction["incident_description"])
         event = self.publisher.publish.call_args.args[0]
         self.assertEqual(event.event_type, "claim.correction.received")
         self.assertEqual(event.payload.source_type, "claimant_voice")
@@ -114,6 +128,7 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
         self.extractor.extract.return_value = VoiceIncidentExtractionResult(
             incident_date="2026-08-24",
             incident_time="18:00",
+            incident_description=None,
             injury_mentioned=True,
             injury_description="neck pain later that evening",
         )
@@ -134,11 +149,11 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             injury_mentioned=False,
         )
 
-        with self.assertRaisesRegex(HumanReviewConflictError, "could not determine"):
+        with self.assertRaisesRegex(HumanReviewConflictError, "could not use"):
             self.submit()
 
         self.repository.mark_document_unusable.assert_called_once()
-        self.repository.save_claim_correction.assert_not_called()
+        self.repository.save_claim_voice_incident_correction.assert_not_called()
         self.publisher.publish.assert_not_called()
 
     def test_future_date_is_rejected_and_claim_stays_paused(self) -> None:
@@ -152,7 +167,7 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
             self.submit()
 
         self.repository.mark_document_unusable.assert_called_once()
-        self.repository.save_claim_correction.assert_not_called()
+        self.repository.save_claim_voice_incident_correction.assert_not_called()
 
     def test_existing_stronger_date_is_not_overwritten(self) -> None:
         self.repository.get_documents.return_value = [
@@ -172,7 +187,73 @@ class VoiceIncidentRemediationTests(unittest.TestCase):
 
         self.storage.upload_claim_document.assert_not_called()
         self.extractor.extract.assert_not_called()
-        self.repository.save_claim_correction.assert_not_called()
+        self.repository.save_claim_voice_incident_correction.assert_not_called()
+
+    def test_date_and_context_are_accepted_once_with_injury(self) -> None:
+        self.repository.get_claim.return_value = awaiting_incident_claim(
+            field_name="incident_information",
+            missing=["incident_date", "incident_description"],
+        )
+        self.extractor.extract.return_value = VoiceIncidentExtractionResult(
+            incident_date="2026-08-24",
+            incident_time="13:00",
+            incident_description="I was rear-ended while stopped at a light.",
+            injury_mentioned=True,
+            injury_description="my neck started hurting later",
+        )
+
+        self.submit()
+
+        saved = self.repository.save_claim_voice_incident_correction.call_args.kwargs
+        self.assertEqual(saved["requested_field"], "incident_information")
+        self.assertEqual(saved["incident_date"], "2026-08-24")
+        self.assertEqual(
+            saved["incident_description"],
+            "I was rear-ended while stopped at a light.",
+        )
+        event = self.publisher.publish.call_args.args[0]
+        self.assertEqual(event.payload.field_name, "incident_information")
+        self.assertTrue(event.payload.injury_mentioned)
+
+    def test_context_only_gap_accepts_voice_without_date(self) -> None:
+        self.repository.get_claim.return_value = awaiting_incident_claim(
+            field_name="incident_description",
+            missing=["incident_description"],
+        )
+        self.extractor.extract.return_value = VoiceIncidentExtractionResult(
+            incident_date=None,
+            incident_time=None,
+            incident_description="I was rear-ended at a traffic light.",
+            injury_mentioned=False,
+        )
+
+        self.submit()
+
+        saved = self.repository.save_claim_voice_incident_correction.call_args.kwargs
+        self.assertIsNone(saved["incident_date"])
+        self.assertEqual(
+            saved["incident_description"],
+            "I was rear-ended at a traffic light.",
+        )
+
+    def test_missing_required_context_keeps_voice_action_active(self) -> None:
+        self.repository.get_claim.return_value = awaiting_incident_claim(
+            field_name="incident_information",
+            missing=["incident_date", "incident_description"],
+        )
+        self.extractor.extract.return_value = VoiceIncidentExtractionResult(
+            incident_date="2026-08-24",
+            incident_time=None,
+            incident_description=None,
+            injury_mentioned=False,
+        )
+
+        with self.assertRaisesRegex(HumanReviewConflictError, "could not use"):
+            self.submit()
+
+        self.repository.mark_document_unusable.assert_called_once()
+        self.repository.save_claim_voice_incident_correction.assert_not_called()
+        self.publisher.publish.assert_not_called()
 
     def test_wrong_requested_action_is_rejected(self) -> None:
         with self.assertRaisesRegex(HumanReviewConflictError, "not currently requested"):

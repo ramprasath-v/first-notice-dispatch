@@ -1450,6 +1450,43 @@ class FirestoreClaimRepository:
         except Exception as exc:
             self._raise_write_error("save claimant correction", exc)
 
+    def save_claim_voice_incident_correction(
+        self,
+        *,
+        claim_id: str,
+        event_id: str,
+        requested_field: str,
+        incident_date: str | None,
+        incident_description: str | None,
+        correlation_id: str,
+    ) -> None:
+        """Persist one validated voice response and all requested grounded facts."""
+        values = {
+            key: value
+            for key, value in {
+                "incident_date": incident_date,
+                "incident_description": incident_description,
+            }.items()
+            if value
+        }
+        marker = values.get(requested_field) or "claimant_voice"
+        claim_ref = self._client.collection("claims").document(claim_id)
+        try:
+            claim_ref.update(
+                {
+                    **{
+                        f"pending_corrections.{field_name}": value
+                        for field_name, value in values.items()
+                    },
+                    f"pending_corrections.{requested_field}": marker,
+                    "correction_event_id": event_id,
+                    "correction_correlation_id": correlation_id,
+                    "updated_at": utc_now(),
+                }
+            )
+        except Exception as exc:
+            self._raise_write_error("save claimant voice correction", exc)
+
     def complete_claim_correction(
         self,
         *,
@@ -1462,6 +1499,8 @@ class FirestoreClaimRepository:
         source_document_id: str | None = None,
         injury_mentioned: bool = False,
         injury_description: str | None = None,
+        incident_date: str | None = None,
+        incident_description: str | None = None,
     ) -> ClaimStatus:
         claim = self.get_claim(claim_id)
         if claim is None:
@@ -1469,15 +1508,64 @@ class FirestoreClaimRepository:
         validate_claim_status_transition(
             claim.get("status", ""), ClaimStatus.REVIEW_PROCESSING
         )
+        corrected_fields = {field_name}
+        fact_updates: dict[str, Any] = {
+            field_name: value,
+            f"{field_name}_provenance": {
+                "source_type": source_type,
+                **(
+                    {"document_id": source_document_id}
+                    if source_document_id
+                    else {}
+                ),
+            },
+        }
+        if source_type == "claimant_voice" and field_name in {
+            "incident_date",
+            "incident_description",
+            "incident_information",
+        }:
+            corrected_fields = set()
+            fact_updates = {}
+            for corrected_field, corrected_value in (
+                (
+                    "incident_date",
+                    incident_date if incident_date is not None else (
+                        value if field_name == "incident_date" else None
+                    ),
+                ),
+                (
+                    "incident_description",
+                    incident_description if incident_description is not None else (
+                        value if field_name == "incident_description" else None
+                    ),
+                ),
+            ):
+                if not corrected_value or claim.get(corrected_field):
+                    continue
+                corrected_fields.add(corrected_field)
+                fact_updates.update(
+                    {
+                        corrected_field: corrected_value,
+                        f"{corrected_field}_provenance": {
+                            "source_type": source_type,
+                            **(
+                                {"document_id": source_document_id}
+                                if source_document_id
+                                else {}
+                            ),
+                        },
+                    }
+                )
         remaining_conflicts = [
             item
             for item in claim.get("conflicts", [])
-            if not isinstance(item, dict) or item.get("field") != field_name
+            if not isinstance(item, dict) or item.get("field") not in corrected_fields
         ]
         missing = [
             item
             for item in claim.get("missing_documents", [])
-            if not isinstance(item, dict) or item.get("type") != field_name
+            if not isinstance(item, dict) or item.get("type") not in corrected_fields
         ]
         unusable = list(claim.get("unusable_evidence", []))
         indicators = dict(claim.get("operational_indicators") or {})
@@ -1519,15 +1607,7 @@ class FirestoreClaimRepository:
                 claim_ref,
                 {
                     "status": target.value,
-                    field_name: value,
-                    f"{field_name}_provenance": {
-                        "source_type": source_type,
-                        **(
-                            {"document_id": source_document_id}
-                            if source_document_id
-                            else {}
-                        ),
-                    },
+                    **fact_updates,
                     "pending_corrections": {},
                     "requested_actions": [],
                     "missing_documents": missing,
@@ -1576,6 +1656,7 @@ class FirestoreClaimRepository:
                     details={
                         "review_id": review_id,
                         "corrected_field": field_name,
+                        "corrected_fields": sorted(corrected_fields),
                         "source_type": source_type,
                         **(
                             {"source_document_id": source_document_id}

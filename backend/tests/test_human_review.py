@@ -1428,6 +1428,39 @@ class HumanReviewResumeWorkflowTests(unittest.TestCase):
         self.assertEqual(call["source_document_id"], "DOC-VOICE")
         self.assertTrue(call["injury_mentioned"])
 
+    def test_combined_voice_correction_passes_date_context_and_injury(self) -> None:
+        self.repository.get_claim.return_value = {
+            "claim_id": CLAIM_ID,
+            "status": "review_processing",
+            "pending_corrections": {
+                "incident_information": "claimant_voice",
+                "incident_date": "2026-08-24",
+                "incident_description": "I was rear-ended at a light.",
+            },
+        }
+        self.repository.complete_claim_correction.return_value = (
+            ClaimStatus.HUMAN_REVIEW_REQUIRED
+        )
+
+        result = self.workflow.resume_correction(
+            CLAIM_ID,
+            "AUTONOMOUS-INCIDENT",
+            "incident_information",
+            "voice-correlation",
+            source_type="claimant_voice",
+            source_document_id="DOC-VOICE",
+            injury_mentioned=True,
+            injury_description="neck pain later that afternoon",
+        )
+
+        self.assertEqual(result["final_status"], "human_review_required")
+        call = self.repository.complete_claim_correction.call_args.kwargs
+        self.assertEqual(call["incident_date"], "2026-08-24")
+        self.assertEqual(
+            call["incident_description"], "I was rear-ended at a light."
+        )
+        self.assertTrue(call["injury_mentioned"])
+
     def test_adjuster_prose_creates_non_replacement_upload_action(self) -> None:
         self.repository.get_claim.return_value = {
             "claim_id": CLAIM_ID,

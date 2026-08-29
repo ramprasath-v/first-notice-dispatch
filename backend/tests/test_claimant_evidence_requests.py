@@ -64,6 +64,13 @@ class ClaimantEvidenceRequestTests(unittest.TestCase):
 
         self.assertEqual(requests, [])
 
+    def test_incident_context_is_never_projected_as_uploadable_evidence(self) -> None:
+        requests = build_claimant_evidence_requests(
+            [missing("incident_description")]
+        )
+
+        self.assertEqual(requests, [])
+
 
 if __name__ == "__main__":
     unittest.main()

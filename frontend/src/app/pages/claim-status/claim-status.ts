@@ -580,9 +580,14 @@ export class ClaimStatusPage {
     });
   }
 
+  isVoiceIncidentAction(action: EnterTextRequestedAction): boolean {
+    return ['incident_date', 'incident_description', 'incident_information']
+      .includes(action.field_name);
+  }
+
   correctionSubmitDisabled(action: EnterTextRequestedAction): boolean {
     return this.uploading() || this.rechecking()
-      || (action.field_name !== 'incident_date' && !this.correctionValue.trim());
+      || (!this.isVoiceIncidentAction(action) && !this.correctionValue.trim());
   }
 
   private isValidIncidentDate(value: string): boolean {

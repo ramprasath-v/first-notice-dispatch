@@ -500,21 +500,12 @@ def _reconcile_evidence_action(
     text_actions: list[RequestedAction] = []
     for field_name, instruction in (
         ("policy_number", "Please confirm your policy number."),
-        ("incident_date", "Please provide the incident date to continue."),
     ):
         conflict = next((item for item in conflicts if item.field == field_name), None)
-        missing_field = next(
-            (
-                item
-                for item in missing_documents
-                if field_name == "incident_date" and item.type == field_name
-            ),
-            None,
-        )
-        if conflict is not None or missing_field is not None:
+        if conflict is not None:
             fingerprint = _action_fingerprint(
                 field_name,
-                conflict.sources if conflict is not None else ["missing"],
+                conflict.sources,
             )
             text_actions.append(
                 EnterTextRequestedAction(
@@ -524,6 +515,44 @@ def _reconcile_evidence_action(
                     instruction=instruction,
                 )
             )
+
+    missing_incident_fields = {
+        item.type
+        for item in missing_documents
+        if item.type in {"incident_date", "incident_description"}
+    }
+    incident_conflicts = {
+        item.field
+        for item in conflicts
+        if item.field == "incident_date"
+    }
+    unresolved_incident_fields = missing_incident_fields | incident_conflicts
+    if unresolved_incident_fields:
+        field_name = (
+            "incident_information"
+            if len(unresolved_incident_fields) > 1
+            else next(iter(unresolved_incident_fields))
+        )
+        sources = sorted(
+            {
+                source
+                for conflict in conflicts
+                if conflict.field in unresolved_incident_fields
+                for source in conflict.sources
+            }
+        ) or ["missing"]
+        fingerprint = _action_fingerprint(field_name, sources)
+        text_actions.append(
+            EnterTextRequestedAction(
+                action_id=f"ACT-{fingerprint}",
+                review_id=f"AUTONOMOUS-{fingerprint}",
+                field_name=field_name,
+                instruction=(
+                    "Tell us when the accident happened and briefly what happened. "
+                    "You can also mention any injuries or other important details."
+                ),
+            )
+        )
 
     has_vehicle_identity_issue = has_identity_provenance_gap or any(
         item.field == "vehicle_identity"
@@ -642,7 +671,8 @@ def _prioritize_claimant_actions(
             return 0
         if (
             isinstance(action, EnterTextRequestedAction)
-            and action.field_name == "incident_date"
+            and action.field_name
+            in {"incident_date", "incident_description", "incident_information"}
         ):
             return 1
         return 2

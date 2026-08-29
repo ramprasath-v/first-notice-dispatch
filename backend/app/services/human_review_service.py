@@ -636,7 +636,8 @@ class HumanReviewService:
                 for item in claim.get("requested_actions", [])
                 if isinstance(item, dict)
                 and item.get("action_type") == "enter_text"
-                and item.get("field_name") == "incident_date"
+                and item.get("field_name")
+                in {"incident_date", "incident_description", "incident_information"}
                 and item.get("action_id") == requested_action_id
             ),
             None,
@@ -650,16 +651,35 @@ class HumanReviewService:
             f"{claim_id}:{requested_action_id}:{idempotency_key}".encode("utf-8")
         ).hexdigest()
         document_id = f"DOC-{digest[:8].upper()}"
+        action_field = str(action["field_name"])
+        missing_incident_fields = {
+            str(item.get("type"))
+            for item in claim.get("missing_documents", [])
+            if isinstance(item, dict)
+            and item.get("type") in {"incident_date", "incident_description"}
+        }
+        needs_date = (
+            action_field in {"incident_date", "incident_information"}
+            or "incident_date" in missing_incident_fields
+        )
+        needs_context = (
+            action_field in {"incident_description", "incident_information"}
+            or "incident_description" in missing_incident_fields
+        )
         for document in self._repository.get_documents(claim_id):
             if document.document_id == document_id or document.status == "superseded":
                 continue
-            if document.evidence_facts.get("incident_date"):
+            if needs_date and document.evidence_facts.get("incident_date"):
                 raise HumanReviewConflictError(
                     "Existing evidence already provides an incident date; voice cannot overwrite it."
                 )
-        if claim.get("incident_date"):
+        if needs_date and claim.get("incident_date"):
             raise HumanReviewConflictError(
                 "The claim already has an incident date; voice cannot overwrite it."
+            )
+        if needs_context and str(claim.get("incident_description") or "").strip():
+            raise HumanReviewConflictError(
+                "The claim already has claimant incident context; voice cannot overwrite it."
             )
 
         document = self._repository.get_document(claim_id, document_id)
@@ -697,11 +717,12 @@ class HumanReviewService:
             )
             self._repository.add_document(document)
 
-        if document.status == "validated" and document.evidence_facts.get(
-            "incident_date"
-        ):
-            incident_date = document.evidence_facts["incident_date"]
+        if document.status == "validated":
+            incident_date = document.evidence_facts.get("incident_date")
             incident_time = document.evidence_facts.get("incident_time")
+            incident_description = document.evidence_facts.get(
+                "incident_description"
+            )
             injury_mentioned = (
                 document.evidence_facts.get("injury_mentioned") == "true"
             )
@@ -714,6 +735,11 @@ class HumanReviewService:
             )
             incident_date = result.incident_date
             incident_time = result.incident_time
+            incident_description = (
+                result.incident_description.strip()
+                if result.incident_description
+                else None
+            )
             injury_mentioned = result.injury_mentioned
             injury_description = (
                 result.injury_description if injury_mentioned else None
@@ -723,6 +749,7 @@ class HumanReviewService:
                 for key, value in {
                     "incident_date": incident_date,
                     "incident_time": incident_time,
+                    "incident_description": incident_description,
                     "injury_mentioned": "true" if injury_mentioned else "false",
                     "injury_description": injury_description,
                 }.items()
@@ -739,32 +766,41 @@ class HumanReviewService:
                     document_id=document_id,
                     injury_description=injury_description,
                 )
-            if not incident_date:
+            missing_spoken_fields = [
+                label
+                for required, value, label in (
+                    (needs_date, incident_date, "incident date"),
+                    (needs_context, incident_description, "incident context"),
+                )
+                if required and not value
+            ]
+            if missing_spoken_fields:
                 self._repository.mark_document_unusable(
                     claim_id,
                     document_id,
-                    "The voice response did not contain one unambiguous incident date.",
+                    "The voice response did not contain the requested incident information.",
                     evidence_findings=findings,
                     evidence_facts=facts,
                 )
                 raise HumanReviewConflictError(
-                    "We could not determine one incident date from that recording. Re-record or enter the date manually."
+                    "We could not use that recording. Please re-record your answer."
                 )
-            try:
-                _validate_incident_date(incident_date)
-            except HumanReviewConflictError:
-                self._repository.mark_document_unusable(
-                    claim_id,
-                    document_id,
-                    "The voice response did not contain a valid non-future incident date.",
-                    evidence_findings=findings,
-                    evidence_facts=facts,
-                )
-                raise
+            if needs_date:
+                try:
+                    _validate_incident_date(str(incident_date))
+                except HumanReviewConflictError:
+                    self._repository.mark_document_unusable(
+                        claim_id,
+                        document_id,
+                        "The voice response did not contain a valid non-future incident date.",
+                        evidence_findings=findings,
+                        evidence_facts=facts,
+                    )
+                    raise
             self._repository.mark_document_validated(
                 claim_id,
                 document_id,
-                quality_reason="Claimant voice supplied an unambiguous incident date.",
+                quality_reason="Claimant voice supplied the requested incident information.",
                 evidence_findings=findings,
                 evidence_facts=facts,
             )
@@ -778,18 +814,21 @@ class HumanReviewService:
             source="claimant-api",
             payload=CorrectionReceivedPayload(
                 review_id=review_id,
-                field_name="incident_date",
+                field_name=action_field,
                 source_type="claimant_voice",
                 source_document_id=document_id,
                 injury_mentioned=injury_mentioned,
                 injury_description=injury_description,
             ),
         )
-        self._repository.save_claim_correction(
+        self._repository.save_claim_voice_incident_correction(
             claim_id=claim_id,
             event_id=event.event_id,
-            field_name="incident_date",
-            value=incident_date,
+            requested_field=action_field,
+            incident_date=incident_date if needs_date else None,
+            incident_description=(
+                incident_description if needs_context else None
+            ),
             correlation_id=event.correlation_id,
         )
         self._publisher.publish(event)
@@ -982,9 +1021,20 @@ class HumanReviewResumeWorkflow:
         claim = self._repository.get_claim(claim_id)
         if claim is None:
             raise HumanReviewNotFoundError(f"Claim {claim_id} does not exist.")
-        value = str((claim.get("pending_corrections") or {}).get(field_name, "")).strip()
+        pending = claim.get("pending_corrections") or {}
+        value = str(pending.get(field_name, "")).strip()
         if not value:
             raise HumanReviewConflictError("The requested correction was not persisted.")
+        incident_date = (
+            str(pending.get("incident_date") or "").strip() or None
+            if source_type == "claimant_voice"
+            else None
+        )
+        incident_description = (
+            str(pending.get("incident_description") or "").strip() or None
+            if source_type == "claimant_voice"
+            else None
+        )
         target = self._repository.complete_claim_correction(
             claim_id=claim_id,
             review_id=review_id,
@@ -995,6 +1045,8 @@ class HumanReviewResumeWorkflow:
             source_document_id=source_document_id,
             injury_mentioned=injury_mentioned,
             injury_description=injury_description,
+            incident_date=incident_date,
+            incident_description=incident_description,
         )
         return {"action": "claimant_correction_applied", "final_status": target.value}
 
@@ -1248,7 +1300,9 @@ def _inspection_claim_snapshot(
         )
 
     return {
-        "incident": str(claim.get("incident_summary") or "") or None,
+        "incident": str(
+            claim.get("incident_summary") or claim.get("incident_description") or ""
+        ) or None,
         "vehicle": str(claim.get("claim_type") or "") or None,
         "policy_number": str(claim.get("policy_number") or "") or None,
         "drivable": (

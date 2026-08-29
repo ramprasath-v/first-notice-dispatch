@@ -70,7 +70,7 @@ def build_claimant_evidence_requests(
     seen: set[str] = set()
     for requirement, reason, replacement in unresolved:
         if (
-            requirement == "incident_date"
+            requirement in {"incident_date", "incident_description"}
             or requirement in handled
             or requirement in seen
         ):

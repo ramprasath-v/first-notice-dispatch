@@ -55,16 +55,16 @@
         <section class="card correction-card">
           <p class="kicker">Action needed</p>
           <p class="action-count">1 item needed to continue</p>
-          <h2>{{ action.field_name === 'incident_date' ? "We couldn't determine when the accident happened." : current.action_display?.title || 'More information needed' }}</h2>
-          @if (action.field_name === 'incident_date') {
-            <p>Record a quick answer. You can also mention injuries or other important details.</p>
+          <h2>{{ isVoiceIncidentAction(action) ? 'Tell us about the accident' : current.action_display?.title || 'More information needed' }}</h2>
+          @if (isVoiceIncidentAction(action)) {
+            <p>Tell us when the accident happened and briefly what happened. You can also mention any injuries or other important details.</p>
           } @else if (current.action_display) {
             <div class="correction-context"><strong>Why we need this</strong><p>{{ current.action_display.explanation }}</p></div>
           }
-          @if (action.field_name !== 'incident_date') {
+          @if (!isVoiceIncidentAction(action)) {
             <p class="what-to-do"><strong>What to do</strong>{{ action.instruction }}</p>
           }
-          @if (action.field_name === 'incident_date') {
+          @if (isVoiceIncidentAction(action)) {
             <div class="voice-correction" [attr.data-state]="voiceRecordingState()">
               <strong>Voice answer</strong>
               @if (voiceRecordingState() === 'idle') {

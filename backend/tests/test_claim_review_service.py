@@ -1466,7 +1466,132 @@ class ClaimReviewServiceTests(unittest.TestCase):
         action = review.requested_actions[0]
         self.assertIsInstance(action, EnterTextRequestedAction)
         self.assertEqual(action.field_name, "incident_date")
-        self.assertEqual(action.instruction, "Please provide the incident date to continue.")
+        self.assertEqual(
+            action.instruction,
+            "Tell us when the accident happened and briefly what happened. "
+            "You can also mention any injuries or other important details.",
+        )
+
+    def test_missing_incident_context_uses_voice_action(self) -> None:
+        missing_context = intake_result().model_copy(update={"incident_summary": ""})
+
+        review = self.run_review(intake=missing_context)
+
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, EnterTextRequestedAction)
+        self.assertEqual(action.field_name, "incident_description")
+        self.assertIn(
+            "incident_description", [item.type for item in review.missing_documents]
+        )
+
+    def test_police_report_context_does_not_get_replaced_by_voice(self) -> None:
+        no_claimant_context = intake_result().model_copy(
+            update={"incident_summary": ""}
+        )
+        metadata = complete_metadata(
+            uploaded_evidence=[
+                *complete_metadata().uploaded_evidence,
+                UploadedEvidence(
+                    evidence_type="police_report",
+                    filename="police-report.pdf",
+                    document_id="DOC-REPORT",
+                    document_type="police_report",
+                    status="received",
+                    usable=True,
+                ),
+            ]
+        )
+
+        review = self.run_review(intake=no_claimant_context, metadata=metadata)
+
+        self.assertNotIn(
+            "incident_description", [item.type for item in review.missing_documents]
+        )
+        self.assertFalse(
+            any(
+                isinstance(action, EnterTextRequestedAction)
+                and action.field_name
+                in {"incident_description", "incident_information"}
+                for action in review.requested_actions
+            )
+        )
+
+    def test_missing_date_and_context_use_one_voice_action(self) -> None:
+        missing_incident = intake_result().model_copy(
+            update={"incident_date": None, "incident_summary": ""}
+        )
+
+        review = self.run_review(intake=missing_incident)
+
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, EnterTextRequestedAction)
+        self.assertEqual(action.field_name, "incident_information")
+        self.assertEqual(
+            {item.type for item in review.missing_documents},
+            {"incident_date", "incident_description"},
+        )
+
+    def test_vehicle_identity_resolves_before_combined_voice_remediation(self) -> None:
+        missing_incident = intake_result().model_copy(
+            update={"incident_date": None, "incident_summary": ""}
+        )
+        unresolved_vehicle = complete_metadata(
+            vehicle_identity_clear=False,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="vehicle.jpg",
+                    document_id="DOC-VEHICLE",
+                    document_type="damage_evidence",
+                    status="validated",
+                    usable=True,
+                )
+            ],
+        )
+
+        first_review = self.run_review(
+            intake=missing_incident,
+            metadata=unresolved_vehicle,
+        )
+
+        self.assertEqual(len(first_review.requested_actions), 1)
+        first_action = first_review.requested_actions[0]
+        self.assertIsInstance(first_action, UploadDocumentRequestedAction)
+        self.assertEqual(first_action.document_type, "license_plate_photo")
+
+        resolved_vehicle = complete_metadata(
+            vehicle_identity_clear=True,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="correct-vehicle.jpg",
+                    document_id="DOC-CORRECT",
+                    document_type="damage_evidence",
+                    status="validated",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="vehicle_identity",
+                    filename="correct-vehicle.jpg",
+                    document_id="DOC-CORRECT",
+                    document_type="damage_evidence",
+                    status="validated",
+                    usable=True,
+                ),
+            ],
+        )
+
+        second_review = self.run_review(
+            intake=missing_incident,
+            metadata=resolved_vehicle,
+        )
+
+        self.assertEqual(len(second_review.requested_actions), 1)
+        second_action = second_review.requested_actions[0]
+        self.assertIsInstance(second_action, EnterTextRequestedAction)
+        self.assertEqual(second_action.field_name, "incident_information")
 
     def test_vehicle_identity_precedes_incident_date_remediation(self) -> None:
         missing_date = intake_result().model_copy(update={"incident_date": None})

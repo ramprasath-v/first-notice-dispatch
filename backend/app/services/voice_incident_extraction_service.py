@@ -7,8 +7,8 @@ from app.services.intake_extraction_service import evidence_part
 
 
 VOICE_INCIDENT_PROMPT = """
-Extract only the claimant-stated incident timing and injury signal from this
-voice recording.
+Extract only the claimant-stated incident timing, factual incident context, and
+injury signal from this voice recording.
 
 Rules:
 1. Return incident_date as YYYY-MM-DD only when the recording states one
@@ -16,11 +16,13 @@ Rules:
 2. Return incident_time as HH:MM in 24-hour time only when stated clearly.
 3. Set injury_mentioned true only when the claimant explicitly mentions pain,
    injury, symptoms, or receiving medical attention.
-4. Keep injury_description short and grounded in the claimant's words. Do not
+4. Return incident_description only when the claimant states what happened.
+   Keep it concise, factual, and grounded in the claimant's words.
+5. Keep injury_description short and grounded in the claimant's words. Do not
    diagnose, assess severity, or add medical conclusions.
-5. Do not extract or alter policy, vehicle, coverage, liability, fraud, payout,
+6. Do not extract or alter policy, vehicle, coverage, liability, fraud, payout,
    or claim-decision information.
-6. Do not invent missing values.
+7. Do not invent missing values.
 """.strip()
 
 
@@ -34,6 +36,11 @@ class VoiceIncidentExtractionResult(BaseModel):
     incident_time: str | None = Field(
         default=None,
         description="Optional claimant-stated time in HH:MM 24-hour format.",
+    )
+    incident_description: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="Concise factual incident context stated by the claimant.",
     )
     injury_mentioned: bool
     injury_description: str | None = Field(default=None, max_length=500)

@@ -165,6 +165,28 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
         )
         self.batch.commit.assert_called_once_with()
 
+    def test_voice_incident_correction_persists_date_and_context_together(self) -> None:
+        self.repository.save_claim_voice_incident_correction(
+            claim_id="CLM-A1B2C3D4",
+            event_id="voice-event",
+            requested_field="incident_information",
+            incident_date="2026-08-24",
+            incident_description="I was rear-ended at a light.",
+            correlation_id="voice-correlation",
+        )
+
+        update = self.claim_ref.update.call_args.args[0]
+        self.assertEqual(
+            update["pending_corrections.incident_date"], "2026-08-24"
+        )
+        self.assertEqual(
+            update["pending_corrections.incident_description"],
+            "I was rear-ended at a light.",
+        )
+        self.assertEqual(
+            update["pending_corrections.incident_information"], "claimant_voice"
+        )
+
     def test_voice_date_with_injury_routes_to_existing_human_review_boundary(self) -> None:
         self.repository.get_claim = MagicMock(return_value={
             "claim_id": "CLM-A1B2C3D4",
@@ -205,6 +227,95 @@ class FirestoreClaimRepositoryTests(unittest.TestCase):
             claim_update["incident_date_provenance"],
             {"source_type": "claimant_voice", "document_id": "DOC-VOICE"},
         )
+
+    def test_voice_date_and_context_clear_both_gaps_before_injury_review(self) -> None:
+        self.repository.get_claim = MagicMock(return_value={
+            "claim_id": "CLM-A1B2C3D4",
+            "status": "awaiting_documents",
+            "incident_date": None,
+            "incident_description": "",
+            "missing_documents": [
+                {"type": "incident_date"},
+                {"type": "incident_description"},
+            ],
+            "unusable_evidence": [],
+            "conflicts": [],
+            "intake_priority": "routine",
+            "operational_indicators": {"possible_injury": False},
+        })
+        self.repository.reserve_human_review_generation = MagicMock(
+            return_value=HumanReviewGeneration(
+                generation=2,
+                generation_key="voice-incident-injury",
+                review_id="HRV-VOICE",
+                created=True,
+            )
+        )
+
+        target = self.repository.complete_claim_correction(
+            claim_id="CLM-A1B2C3D4",
+            review_id="AUTONOMOUS-INCIDENT",
+            field_name="incident_information",
+            value="claimant_voice",
+            correlation_id="voice-correlation",
+            source_type="claimant_voice",
+            source_document_id="DOC-VOICE",
+            injury_mentioned=True,
+            injury_description="neck pain later that afternoon",
+            incident_date="2026-08-24",
+            incident_description="I was rear-ended while stopped at a light.",
+        )
+
+        self.assertEqual(target, ClaimStatus.HUMAN_REVIEW_REQUIRED)
+        claim_update = self.batch.update.call_args.args[1]
+        self.assertEqual(claim_update["missing_documents"], [])
+        self.assertEqual(claim_update["incident_date"], "2026-08-24")
+        self.assertEqual(
+            claim_update["incident_description"],
+            "I was rear-ended while stopped at a light.",
+        )
+        self.assertNotIn("incident_information", claim_update)
+        self.assertEqual(
+            claim_update["incident_description_provenance"],
+            {"source_type": "claimant_voice", "document_id": "DOC-VOICE"},
+        )
+
+    def test_voice_context_without_injury_resumes_normal_processing(self) -> None:
+        self.repository.get_claim = MagicMock(return_value={
+            "claim_id": "CLM-A1B2C3D4",
+            "status": "awaiting_documents",
+            "incident_date": "2026-08-24",
+            "incident_description": "",
+            "missing_documents": [{"type": "incident_description"}],
+            "unusable_evidence": [],
+            "conflicts": [],
+            "intake_priority": "routine",
+            "operational_indicators": {"possible_injury": False},
+        })
+        self.repository.reserve_human_review_generation = MagicMock(
+            return_value=HumanReviewGeneration(
+                generation=1,
+                generation_key="voice-context",
+                review_id="HRV-READY",
+                created=True,
+            )
+        )
+
+        target = self.repository.complete_claim_correction(
+            claim_id="CLM-A1B2C3D4",
+            review_id="AUTONOMOUS-CONTEXT",
+            field_name="incident_description",
+            value="I was rear-ended at a light.",
+            correlation_id="voice-correlation",
+            source_type="claimant_voice",
+            source_document_id="DOC-VOICE",
+            incident_description="I was rear-ended at a light.",
+        )
+
+        self.assertEqual(target, ClaimStatus.INSPECTION_READY)
+        claim_update = self.batch.update.call_args.args[1]
+        self.assertEqual(claim_update["missing_documents"], [])
+        self.assertEqual(claim_update["status"], "inspection_ready")
 
     def test_completed_intake_writes_claim_and_event_in_one_batch(self) -> None:
         claim_id = self.repository.save_completed_intake(

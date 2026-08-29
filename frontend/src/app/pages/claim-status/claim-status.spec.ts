@@ -165,10 +165,10 @@ describe('ClaimStatusPage', () => {
     const fixture = await create();
 
     expect(fixture.nativeElement.textContent).toContain(
-      "We couldn't determine when the accident happened.",
+      'Tell us about the accident',
     );
     expect(fixture.nativeElement.textContent).toContain(
-      'Record a quick answer. You can also mention injuries or other important details.',
+      'Tell us when the accident happened and briefly what happened. You can also mention any injuries or other important details.',
     );
     expect(fixture.nativeElement.textContent).toContain('Record voice note');
     expect(fixture.nativeElement.querySelector('input[type=date]')).toBeNull();
@@ -177,6 +177,48 @@ describe('ClaimStatusPage', () => {
     expect(fixture.nativeElement.querySelector('input[type=file]')).toBeNull();
     expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
     expect(fixture.nativeElement.textContent).not.toContain('incident_date');
+  });
+
+  it('renders a context-only gap as voice remediation without a file upload', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      missing_documents: [{ type: 'incident_description' }],
+      requested_evidence: [],
+      requested_actions: [{
+        action_type: 'enter_text',
+        action_id: 'ACT-CONTEXT',
+        review_id: 'AUTONOMOUS-CONTEXT',
+        field_name: 'incident_description',
+        instruction: 'Tell us when and what happened.',
+      }],
+    })));
+
+    const fixture = await create();
+
+    expect(fixture.nativeElement.textContent).toContain('Tell us about the accident');
+    expect(fixture.nativeElement.textContent).toContain('Record voice note');
+    expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
+    expect(fixture.nativeElement.querySelector('input[type=file]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.correction-card input')).toBeNull();
+  });
+
+  it('renders combined missing date and context as one voice action', async () => {
+    api.getClaim.mockReturnValue(of(claim('awaiting_documents', {
+      missing_documents: [{ type: 'incident_date' }, { type: 'incident_description' }],
+      requested_evidence: [],
+      requested_actions: [{
+        action_type: 'enter_text',
+        action_id: 'ACT-INCIDENT',
+        review_id: 'AUTONOMOUS-INCIDENT',
+        field_name: 'incident_information',
+        instruction: 'Tell us when and what happened.',
+      }],
+    })));
+
+    const fixture = await create();
+
+    expect(fixture.nativeElement.querySelectorAll('.correction-card').length).toBe(1);
+    expect(fixture.nativeElement.textContent).toContain('Record voice note');
+    expect(fixture.nativeElement.querySelector('app-missing-documents')).toBeNull();
   });
 
   it('records, stops, and submits voice through the incident-date action', async () => {
