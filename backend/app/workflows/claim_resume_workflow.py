@@ -951,25 +951,23 @@ def _requested_vehicle_identity_mismatch(
             values[normalized] = (raw, sources)
         return next(iter(values.values())) if len(values) == 1 else None
 
-    # Strong identifiers are authoritative when both sides provide them. A
-    # match also prevents a weaker visual make/model estimate from rejecting
-    # the same vehicle.
+    # Strong identifiers are authoritative when both sides provide them, but a
+    # match cannot erase a contradiction in other shared structured facts.
     for field_name in ("vin", "license_plate"):
         expected = authoritative(field_name)
         observed = incoming.get(field_name)
         if expected is None or not observed:
             continue
-        if _normalize_fact_value(expected[0]) == _normalize_fact_value(observed):
-            return None
-        return EvidenceConflict(
-            field="vehicle_identity",
-            values=[expected[0], observed],
-            sources=[*expected[1], current_document.filename],
-            reason=(
-                "The submitted vehicle evidence does not match the insured "
-                f"vehicle {field_name.replace('_', ' ')} in the active policy."
-            ),
-        )
+        if _normalize_fact_value(expected[0]) != _normalize_fact_value(observed):
+            return EvidenceConflict(
+                field="vehicle_identity",
+                values=[expected[0], observed],
+                sources=[*expected[1], current_document.filename],
+                reason=(
+                    "The submitted vehicle evidence does not match the insured "
+                    f"vehicle {field_name.replace('_', ' ')} in the active policy."
+                ),
+            )
 
     for field_name in ("vehicle_make", "vehicle_model", "vehicle_year"):
         expected = authoritative(field_name)

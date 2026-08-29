@@ -31,6 +31,7 @@ from app.workflows.claim_resume_workflow import (
     ClaimResumeWorkflow,
     _build_review_metadata,
     _current_review_intake_result,
+    _requested_vehicle_identity_mismatch,
     match_missing_requirement,
 )
 
@@ -140,6 +141,122 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
             review_service=self.review_service,
             document_extractor=self.extractor,
         )
+
+    def _compare_requested_vehicle(
+        self,
+        *,
+        policy_facts: dict[str, str],
+        replacement_facts: dict[str, str],
+    ) -> EvidenceConflict | None:
+        return _requested_vehicle_identity_mismatch(
+            action=UploadDocumentRequestedAction(
+                action_id="ACT-VEHICLE-COMPARE",
+                review_id="AUTONOMOUS-VEHICLE-COMPARE",
+                document_type="license_plate_photo",
+                instruction="Upload a clear vehicle image.",
+            ),
+            current_document=document(document_id="DOC-COMPARE"),
+            extraction=DocumentExtractionResult(
+                usable=True,
+                reason="The vehicle identity is readable.",
+                supported_capabilities=[
+                    "license_plate_photo", "vehicle_identity"
+                ],
+                evidence_facts=EvidenceArtifactFacts(
+                    source="replacement.jpg", **replacement_facts
+                ),
+            ),
+            documents=[
+                ClaimDocument(
+                    document_id="DOC-POLICY",
+                    claim_id="CLM-A1B2C3D4",
+                    document_type="policy_document",
+                    filename="policy.pdf",
+                    status="validated",
+                    evidence_facts=policy_facts,
+                    received_at=datetime.now(timezone.utc),
+                )
+            ],
+        )
+
+    def test_matching_plate_and_make_model_are_accepted(self) -> None:
+        mismatch = self._compare_requested_vehicle(
+            policy_facts={
+                "license_plate": "7ABX123",
+                "vehicle_make": "Toyota",
+                "vehicle_model": "Corolla",
+            },
+            replacement_facts={
+                "license_plate": "7ABX123",
+                "vehicle_make": "Toyota",
+                "vehicle_model": "Corolla",
+            },
+        )
+
+        self.assertIsNone(mismatch)
+
+    def test_matching_plate_with_conflicting_make_model_is_mismatch(self) -> None:
+        mismatch = self._compare_requested_vehicle(
+            policy_facts={
+                "license_plate": "7ABX123",
+                "vehicle_make": "Toyota",
+                "vehicle_model": "Corolla",
+            },
+            replacement_facts={
+                "license_plate": "7ABX123",
+                "vehicle_make": "Honda",
+                "vehicle_model": "Accord",
+            },
+        )
+
+        self.assertIsNotNone(mismatch)
+        self.assertEqual(mismatch.field, "vehicle_identity")
+        self.assertEqual(mismatch.values, ["Toyota", "Honda"])
+
+    def test_conflicting_plate_is_mismatch(self) -> None:
+        mismatch = self._compare_requested_vehicle(
+            policy_facts={"license_plate": "7ABX123"},
+            replacement_facts={"license_plate": "8XYZ999"},
+        )
+
+        self.assertIsNotNone(mismatch)
+        self.assertEqual(mismatch.values, ["7ABX123", "8XYZ999"])
+
+    def test_matching_vin_and_descriptive_fields_are_accepted(self) -> None:
+        mismatch = self._compare_requested_vehicle(
+            policy_facts={
+                "vin": "1NXBR1EE8EZ123456",
+                "vehicle_make": "Toyota",
+                "vehicle_model": "Corolla",
+            },
+            replacement_facts={
+                "vin": "1NXBR1EE8EZ123456",
+                "vehicle_make": "Toyota",
+                "vehicle_model": "Corolla",
+            },
+        )
+
+        self.assertIsNone(mismatch)
+
+    def test_conflicting_vin_is_mismatch(self) -> None:
+        mismatch = self._compare_requested_vehicle(
+            policy_facts={"vin": "1NXBR1EE8EZ123456"},
+            replacement_facts={"vin": "2HGFA16598H654321"},
+        )
+
+        self.assertIsNotNone(mismatch)
+        self.assertEqual(
+            mismatch.values,
+            ["1NXBR1EE8EZ123456", "2HGFA16598H654321"],
+        )
+
+    def test_plate_only_match_is_accepted(self) -> None:
+        mismatch = self._compare_requested_vehicle(
+            policy_facts={"license_plate": "7ABX123"},
+            replacement_facts={"license_plate": "7ABX123"},
+        )
+
+        self.assertIsNone(mismatch)
 
     def _add_document(self, value: ClaimDocument) -> None:
         self.documents[value.document_id] = value
@@ -680,7 +797,7 @@ class ClaimResumeWorkflowTests(unittest.TestCase):
                 source="wrong-vehicle.jpg",
                 vehicle_make="Honda",
                 vehicle_model="CR-V",
-                license_plate="8XYZ999",
+                license_plate="7ABX123",
             ),
         )
 

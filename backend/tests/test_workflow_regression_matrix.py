@@ -606,7 +606,7 @@ class FrozenWorkflowRegressionMatrixTests(unittest.TestCase):
                     source="wrong-vehicle.jpg",
                     vehicle_make="Honda",
                     vehicle_model="CR-V",
-                    license_plate="8XYZ999",
+                    license_plate="7ABX123",
                 ),
             ),
         )
