@@ -13,6 +13,7 @@ from app.agents.firstnotice_adk import (
     build_firstnotice_coordinator,
     route_claim_state,
 )
+from app.domain.intake_requirements import UnsupportedClaimTypeError
 from app.models.adk_orchestration import ClaimStateResult, EvidenceInput
 from app.models.claim_document import ClaimDocument
 from app.models.intake_result import (
@@ -544,6 +545,35 @@ class AdkToolAdapterTests(unittest.TestCase):
             review_generation_key="CLM-ADK00001:submitted-review:v1",
         )
         self.assertEqual(state.status, "inspection_ready")
+
+    def test_unsupported_claim_type_moves_to_manual_review(self) -> None:
+        unsupported_claim = {
+            "claim_id": "CLM-ADK00001",
+            "status": "intake_complete",
+            **intake_result().model_copy(
+                update={"claim_type": "theft"}
+            ).model_dump(mode="python"),
+        }
+        reviewed_claim = {
+            **unsupported_claim,
+            "status": "human_review_required",
+        }
+        self.repository.get_claim.side_effect = [unsupported_claim, reviewed_claim]
+        self.repository.get_documents.return_value = []
+        self.review_service.review.side_effect = UnsupportedClaimTypeError(
+            "Review rules currently support only auto_collision claims."
+        )
+
+        state = self.adapter.run_claim_review("CLM-ADK00001")
+
+        self.repository.update_claim_status.assert_called_once_with(
+            "CLM-ADK00001", "review_processing"
+        )
+        saved_review = self.repository.save_review_result.call_args.args[1]
+        self.assertTrue(saved_review.requires_human_review)
+        self.assertEqual(saved_review.intake_priority, "urgent_human_review")
+        self.assertEqual(saved_review.recommended_next_step, "human_review")
+        self.assertEqual(state.status, "human_review_required")
 
     def test_resume_and_dispatch_adapters_delegate_without_duplication(self) -> None:
         self.resume_workflow.resume.return_value.model_dump.return_value = {

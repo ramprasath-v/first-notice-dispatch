@@ -42,6 +42,9 @@ Rules:
 14. For every submitted artifact, add one evidence_artifact_facts entry. Populate
     only normalized facts directly visible or explicitly stated in that artifact.
     Keep unsupported or unknown fields null, even if another artifact supplies them.
+15. Use auto_collision when grounded evidence describes a vehicle collision,
+    crash, impact, or accident. Missing vehicle identity or incident date does not
+    make an otherwise grounded auto collision unknown.
 """
 
 
@@ -107,7 +110,56 @@ class IntakeExtractionService:
         )
         if not response.text:
             raise RuntimeError("Gemini returned an empty response.")
-        return IntakeResult.model_validate_json(response.text)
+        result = IntakeResult.model_validate_json(response.text)
+        return _normalize_grounded_claim_type(
+            result,
+            incident_description=incident_description,
+        )
+
+
+def _normalize_grounded_claim_type(
+    result: IntakeResult,
+    *,
+    incident_description: str | None,
+) -> IntakeResult:
+    """Normalize only grounded unknown vehicle-collision results."""
+    if result.claim_type != "unknown":
+        return result
+
+    has_automotive_evidence = any(
+        item.document_type == "damage_evidence"
+        for item in result.evidence_artifact_classifications
+    ) or any(
+        "damage_evidence" in item.supported_capabilities
+        for item in result.image_evidence_capabilities
+    )
+    grounded_text = " ".join(
+        filter(
+            None,
+            [
+                incident_description,
+                result.incident_summary,
+                result.damage_type,
+                *(item.finding for item in result.evidence_findings),
+            ],
+        )
+    ).casefold()
+    collision_terms = (
+        "accident",
+        "collision",
+        "collided",
+        "crash",
+        "impact",
+        "rear-ended",
+        "rear ended",
+        "struck by",
+        "struck from behind",
+    )
+    if has_automotive_evidence and any(
+        term in grounded_text for term in collision_terms
+    ):
+        return result.model_copy(update={"claim_type": "auto_collision"})
+    return result
 
 
 def file_part(path: Path) -> types.Part:

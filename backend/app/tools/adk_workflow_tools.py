@@ -4,6 +4,7 @@ from typing import Any
 
 from google.adk.tools import FunctionTool
 
+from app.domain.intake_requirements import UnsupportedClaimTypeError
 from app.models.adk_orchestration import ClaimStateResult, EvidenceInput
 from app.models.claim_document import ClaimDocument
 from app.models.intake_result import (
@@ -14,6 +15,8 @@ from app.models.intake_result import (
 from app.models.review_result import (
     ClaimEvidenceMetadata,
     EvidenceConflict,
+    OperationalIndicators,
+    ReviewResult,
     UploadedEvidence,
 )
 from app.services.claim_review_service import ClaimReviewService
@@ -151,11 +154,14 @@ class ClaimWorkflowToolAdapter:
 
         if current_status == "intake_complete":
             self.repository.update_claim_status(claim_id, "review_processing")
-        review_result = self.review_service.review(
-            intake_result,
-            metadata,
-            evidence_parts=evidence_parts,
-        )
+        try:
+            review_result = self.review_service.review(
+                intake_result,
+                metadata,
+                evidence_parts=evidence_parts,
+            )
+        except UnsupportedClaimTypeError:
+            review_result = _unsupported_claim_type_review(intake_result.claim_type)
         self.repository.save_review_result(
             claim_id,
             review_result,
@@ -197,6 +203,27 @@ class ClaimWorkflowToolAdapter:
             FunctionTool(self.resume_claim_with_document),
             FunctionTool(self.dispatch_to_adjuster),
         ]
+
+
+def _unsupported_claim_type_review(claim_type: str) -> ReviewResult:
+    """Persist a deterministic manual-review boundary for unsupported claims."""
+    reason = (
+        f"Claim type {claim_type!r} is outside the supported automated intake flow."
+    )
+    return ReviewResult(
+        intake_complete=False,
+        intake_priority="urgent_human_review",
+        priority_reason=reason,
+        confidence=0.0,
+        inspection_required=False,
+        requires_human_review=True,
+        human_review_reason=reason,
+        operational_indicators=OperationalIndicators(),
+        review_outcome="requires_human_judgment",
+        ambiguity_reason="other",
+        recommended_next_step="human_review",
+        ambiguity_summary=reason,
+    )
 
 
 def _claim_state_result(claim: dict[str, Any]) -> ClaimStateResult:
