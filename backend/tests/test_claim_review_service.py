@@ -564,7 +564,7 @@ class ClaimReviewServiceTests(unittest.TestCase):
             review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
         )
 
-    def test_low_confidence_with_resolvable_conflict_requests_claimant(
+    def test_low_confidence_with_identity_and_date_conflict_prioritizes_identity(
         self,
     ) -> None:
         uncertain_intake = intake_result().model_copy(
@@ -597,7 +597,12 @@ class ClaimReviewServiceTests(unittest.TestCase):
 
         self.assertFalse(review.requires_human_review)
         self.assertEqual(review.intake_priority, "routine")
-        self.assertEqual(review.requested_actions[0].action_type, "enter_text")
+        self.assertIsInstance(
+            review.requested_actions[0], UploadDocumentRequestedAction
+        )
+        self.assertEqual(
+            review.requested_actions[0].document_type, "license_plate_photo"
+        )
         self.assertEqual(
             review_target_status(review), ClaimStatus.AWAITING_DOCUMENTS
         )
@@ -1462,6 +1467,129 @@ class ClaimReviewServiceTests(unittest.TestCase):
         self.assertIsInstance(action, EnterTextRequestedAction)
         self.assertEqual(action.field_name, "incident_date")
         self.assertEqual(action.instruction, "Please provide the incident date to continue.")
+
+    def test_vehicle_identity_precedes_incident_date_remediation(self) -> None:
+        missing_date = intake_result().model_copy(update={"incident_date": None})
+        metadata = complete_metadata(
+            vehicle_identity_clear=False,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="vehicle.jpg",
+                    document_id="DOC-VEHICLE",
+                    document_type="damage_evidence",
+                    status="validated",
+                    usable=True,
+                )
+            ],
+        )
+
+        review = self.run_review(intake=missing_date, metadata=metadata)
+
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertEqual(action.document_type, "license_plate_photo")
+        self.assertIsNone(action.replaces_document_id)
+        self.assertIn("incident_date", [item.type for item in review.missing_documents])
+        self.assertIn("vehicle_identity", [item.type for item in review.missing_documents])
+
+    def test_vehicle_resolution_advances_to_incident_date_remediation(self) -> None:
+        missing_date = intake_result().model_copy(update={"incident_date": None})
+        metadata = complete_metadata(
+            vehicle_identity_clear=True,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="correct-vehicle.jpg",
+                    document_id="DOC-CORRECT",
+                    document_type="damage_evidence",
+                    status="validated",
+                    usable=True,
+                ),
+                UploadedEvidence(
+                    evidence_type="vehicle_identity",
+                    filename="correct-vehicle.jpg",
+                    document_id="DOC-CORRECT",
+                    document_type="damage_evidence",
+                    status="validated",
+                    usable=True,
+                ),
+            ],
+        )
+
+        review = self.run_review(intake=missing_date, metadata=metadata)
+
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, EnterTextRequestedAction)
+        self.assertEqual(action.field_name, "incident_date")
+        self.assertNotIn("vehicle_identity", [item.type for item in review.missing_documents])
+
+    def test_missing_date_does_not_displace_targeted_vehicle_replacement(self) -> None:
+        missing_date = intake_result().model_copy(update={"incident_date": None})
+        uploaded = [
+            UploadedEvidence(
+                evidence_type=document_type,
+                filename=filename,
+                document_id=document_id,
+                source_identity=f"document:{document_id}",
+                document_type=document_type,
+                status="validated",
+                usable=True,
+                evidence_findings=[f"vehicle_identity: {identity}"],
+            )
+            for document_type, filename, document_id, identity in (
+                ("policy_document", "policy.pdf", "DOC-POLICY", "Toyota Corolla"),
+                ("police_report", "report.pdf", "DOC-REPORT", "Toyota Corolla"),
+                ("damage_evidence", "wrong.jpg", "DOC-WRONG", "Honda SUV"),
+            )
+        ]
+        conflict = EvidenceConflict(
+            field="vehicle_identity",
+            values=["Toyota Corolla", "Honda SUV"],
+            sources=["policy.pdf", "report.pdf", "wrong.jpg"],
+            reason="The submitted sources identify different vehicles.",
+        )
+
+        review = self.run_review(
+            intake=missing_date,
+            metadata=complete_metadata(
+                uploaded_evidence=uploaded,
+                vehicle_identity_clear=False,
+            ),
+            model_review=ai_review(
+                intake_complete=False,
+                conflicts=[conflict],
+                review_outcome="claimant_remediable",
+                recommended_next_step="request_claimant_evidence",
+            ),
+        )
+
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertEqual(action.replaces_document_id, "DOC-WRONG")
+        self.assertNotEqual(action.action_type, "enter_text")
+
+    def test_satisfied_incident_date_leaves_only_vehicle_remediation(self) -> None:
+        metadata = complete_metadata(
+            vehicle_identity_clear=False,
+            uploaded_evidence=[
+                UploadedEvidence(
+                    evidence_type="damage_evidence",
+                    filename="vehicle.jpg",
+                    usable=True,
+                )
+            ],
+        )
+
+        review = self.run_review(metadata=metadata)
+
+        self.assertEqual(len(review.requested_actions), 1)
+        action = review.requested_actions[0]
+        self.assertIsInstance(action, UploadDocumentRequestedAction)
+        self.assertEqual(action.document_type, "license_plate_photo")
 
     def test_extracted_incident_date_does_not_request_manual_date(self) -> None:
         review = self.run_review()

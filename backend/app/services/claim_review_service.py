@@ -497,6 +497,7 @@ def _reconcile_evidence_action(
     has_identity_provenance_gap: bool,
 ) -> list[RequestedAction]:
     """Reconcile current evidence into at most one safe claimant action."""
+    text_actions: list[RequestedAction] = []
     for field_name, instruction in (
         ("policy_number", "Please confirm your policy number."),
         ("incident_date", "Please provide the incident date to continue."),
@@ -515,12 +516,19 @@ def _reconcile_evidence_action(
                 field_name,
                 conflict.sources if conflict is not None else ["missing"],
             )
-            return [EnterTextRequestedAction(
-                action_id=f"ACT-{fingerprint}",
-                review_id=f"AUTONOMOUS-{fingerprint}",
-                field_name=field_name,
-                instruction=instruction,
-            )]
+            text_actions.append(
+                EnterTextRequestedAction(
+                    action_id=f"ACT-{fingerprint}",
+                    review_id=f"AUTONOMOUS-{fingerprint}",
+                    field_name=field_name,
+                    instruction=instruction,
+                )
+            )
+
+    has_vehicle_identity_issue = has_identity_provenance_gap or any(
+        item.field == "vehicle_identity"
+        for item in [*source_aware_conflicts, *conflicts]
+    )
 
     artifacts = canonical_active_evidence(uploaded_evidence)
     unusable_types = {item.evidence_type for item in unusable_evidence}
@@ -552,7 +560,10 @@ def _reconcile_evidence_action(
     }
     selected = unusable_targets if len(unusable_targets) == 1 else source_selected
     if len(selected) != 1:
-        return generic_action
+        return _prioritize_claimant_actions(
+            [*text_actions, *generic_action],
+            has_vehicle_identity_issue=has_vehicle_identity_issue,
+        )
     target = next(iter(selected))
     target_artifact = next(
         (
@@ -563,7 +574,15 @@ def _reconcile_evidence_action(
         None,
     )
     if target_artifact is None or not target_artifact.replaceable:
-        return _requestable_evidence_action(missing_documents, unusable_evidence)
+        return _prioritize_claimant_actions(
+            [
+                *text_actions,
+                *_requestable_evidence_action(
+                    missing_documents, unusable_evidence
+                ),
+            ],
+            has_vehicle_identity_issue=has_vehicle_identity_issue,
+        )
     related = next(
         (
             item
@@ -582,20 +601,53 @@ def _reconcile_evidence_action(
     if generic_action and not _replacement_document_types_compatible(
         generic_action[0].document_type, document_type
     ):
-        return generic_action
+        return _prioritize_claimant_actions(
+            [*text_actions, *generic_action],
+            has_vehicle_identity_issue=has_vehicle_identity_issue,
+        )
     instruction = (
         "Please upload a clear photo of the vehicle involved in this incident "
         "showing the reported damage and a readable license plate."
         if has_identity_provenance_gap
         else f"Please upload the correct {document_type.replace('_', ' ')} for this claim."
     )
-    return [UploadDocumentRequestedAction(
+    targeted_action = UploadDocumentRequestedAction(
         action_id=f"ACT-{fingerprint}",
         review_id=f"AUTONOMOUS-{fingerprint}",
         document_type=document_type,
         instruction=instruction,
         replaces_document_id=target,
-    )]
+    )
+    return _prioritize_claimant_actions(
+        [*text_actions, targeted_action],
+        has_vehicle_identity_issue=has_vehicle_identity_issue,
+    )
+
+
+def _prioritize_claimant_actions(
+    actions: list[RequestedAction],
+    *,
+    has_vehicle_identity_issue: bool,
+) -> list[RequestedAction]:
+    """Select one claimant action by deterministic operational priority."""
+    if not actions:
+        return []
+
+    def priority(action: RequestedAction) -> int:
+        if (
+            has_vehicle_identity_issue
+            and isinstance(action, UploadDocumentRequestedAction)
+            and action.document_type in {"damage_evidence", "license_plate_photo"}
+        ):
+            return 0
+        if (
+            isinstance(action, EnterTextRequestedAction)
+            and action.field_name == "incident_date"
+        ):
+            return 1
+        return 2
+
+    return [min(actions, key=priority)]
 
 
 def _replacement_document_types_compatible(
@@ -651,17 +703,22 @@ def _requestable_evidence_action(
         *(item.type for item in missing_documents),
         *(item.evidence_type for item in unusable_evidence),
     ]
-    candidate = next(
-        (
-            (evidence_type, requests[evidence_type])
-            for evidence_type in evidence_types
-            if evidence_type in requests
+    candidates = [
+        (index, evidence_type, requests[evidence_type])
+        for index, evidence_type in enumerate(evidence_types)
+        if evidence_type in requests
+    ]
+    candidate = min(
+        candidates,
+        key=lambda item: (
+            0 if item[1] in {"vehicle_identity", "license_plate_photo"} else 1,
+            item[0],
         ),
-        None,
+        default=None,
     )
     if candidate is None:
         return []
-    evidence_type, (document_type, instruction) = candidate
+    _, evidence_type, (document_type, instruction) = candidate
     fingerprint = _action_fingerprint(document_type, [evidence_type])
     return [UploadDocumentRequestedAction(
         action_id=f"ACT-{fingerprint}",
