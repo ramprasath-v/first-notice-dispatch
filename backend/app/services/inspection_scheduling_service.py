@@ -19,7 +19,7 @@ class InspectionSchedulingService:
         self, *, now: datetime, business_days: int = 3
     ) -> list[InspectionSlot]:
         now_utc = _utc(now)
-        day = now_utc.date() + timedelta(days=1)
+        day = now_utc.date() + timedelta(days=3)
         slots: list[InspectionSlot] = []
         included_days = 0
 
